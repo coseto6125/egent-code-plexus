@@ -158,31 +158,31 @@ pub fn attach_to_enclosing_span(
     callee: String,
     nodes: &mut [RawNode],
 ) -> Option<(usize, u32)> {
-    let i = nodes
-        .iter()
-        .enumerate()
-        .filter(|(_, node)| {
-            matches!(
-                node.kind,
-                NodeKind::Function | NodeKind::Method | NodeKind::Constructor
-            ) && crate::framework_helpers::span_contains(node.span, span)
-        })
-        .min_by_key(|(_, node)| crate::framework_helpers::span_area(node.span))
-        .map(|(i, _)| i)?;
+    let i = enclosing_container_span(span, nodes)?;
     let calls = &mut nodes[i].calls;
     let idx = calls.len() as u32;
     calls.push(callee);
     Some((i, idx))
 }
 
-/// Attach a call to the smallest function holding `pos`, by row and column so
+/// Index of the smallest function holding `span`, by row and column.
+fn enclosing_container_span(
+    span: crate::framework_helpers::Span,
+    nodes: &[RawNode],
+) -> Option<usize> {
+    nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, node)| {
+            is_container_kind(node.kind) && crate::framework_helpers::span_contains(node.span, span)
+        })
+        .min_by_key(|(_, node)| crate::framework_helpers::span_area(node.span))
+        .map(|(i, _)| i)
+}
+
+/// Index of the smallest function holding `pos`, by row and column so
 /// functions sharing a line stay apart.
-/// Returns the caller's node index and the call's index in its `calls`.
-pub fn attach_to_enclosing(
-    pos: Pos,
-    callee: String,
-    nodes: &mut [RawNode],
-) -> Option<(usize, u32)> {
+fn enclosing_container(pos: Pos, nodes: &[RawNode]) -> Option<usize> {
     let mut best: Option<(usize, (u32, i64))> = None;
     for (i, n) in nodes.iter().enumerate() {
         if !is_container_kind(n.kind) {
@@ -196,10 +196,49 @@ pub fn attach_to_enclosing(
             }
         }
     }
-    let (i, _) = best?;
+    best.map(|(i, _)| i)
+}
+
+/// Attach a call to the smallest function holding `pos`, by row and column so
+/// functions sharing a line stay apart.
+/// Returns the caller's node index and the call's index in its `calls`.
+pub fn attach_to_enclosing(
+    pos: Pos,
+    callee: String,
+    nodes: &mut [RawNode],
+) -> Option<(usize, u32)> {
+    let i = enclosing_container(pos, nodes)?;
     let idx = nodes[i].calls.len() as u32;
     nodes[i].calls.push(callee);
     Some((i, idx))
+}
+
+/// Records `name` as a function value the function holding `pos` hands on:
+/// Pass 2 binds it as a `References` edge, never as a call. A name already
+/// recorded for that function stays one entry. Returns the holder's index.
+pub fn reference_function(pos: Pos, name: &str, nodes: &mut [RawNode]) -> Option<usize> {
+    let holder = enclosing_container(pos, nodes)?;
+    push_function_reference(holder, name, nodes);
+    Some(holder)
+}
+
+/// [`reference_function`] for a holder located by a full span, so one-line
+/// closures stay apart.
+pub fn reference_function_span(
+    span: crate::framework_helpers::Span,
+    name: &str,
+    nodes: &mut [RawNode],
+) {
+    if let Some(holder) = enclosing_container_span(span, nodes) {
+        push_function_reference(holder, name, nodes);
+    }
+}
+
+fn push_function_reference(holder: usize, name: &str, nodes: &mut [RawNode]) {
+    let entry = NameRef::encode(name, NameRefKind::Function);
+    if !nodes[holder].field_reads.contains(&entry) {
+        nodes[holder].field_reads.push(entry);
+    }
 }
 
 /// Walk the AST and attach the **field name** of each member-access read
@@ -290,7 +329,7 @@ fn field_reads_walk(
     while let Some(frame) = stack.pop() {
         let n = frame.node;
         let kind = memo.kind(n);
-        if kind & kind_flag::FIELD_ACCESS != 0 && !is_call_callee(n, frame.parent) {
+        if kind & kind_flag::FIELD_ACCESS != 0 && !is_direct_callee(n, frame.parent) {
             if let Some(name) = field_name_from(n, source) {
                 reads.push(PendingCall {
                     pos: start_pos(n),
@@ -412,10 +451,11 @@ impl LiteralKeyFacts {
     }
 }
 
-/// True when `access` is the callee of an enclosing call expression — i.e. its
-/// parent is a call/invocation whose `function` field is `access`. Such nodes
-/// are method calls handled by `extract_calls`, not data-field reads.
-fn is_call_callee(access: Node<'_>, parent: Option<Node<'_>>) -> bool {
+/// True when `parent` is a call/invocation whose `function` field is
+/// `access`, the direct callee: such nodes are method calls handled by
+/// `extract_calls`, not data-field reads. A parenthesized callee
+/// `(self.f)(x)` is not direct: it still reads the field `f`.
+fn is_direct_callee(access: Node<'_>, parent: Option<Node<'_>>) -> bool {
     let Some(parent) = parent else {
         return false;
     };
@@ -427,6 +467,31 @@ fn is_call_callee(access: Node<'_>, parent: Option<Node<'_>>) -> bool {
             | "invocation_expression"
             | "call"
     ) && parent.child_by_field_name("function").map(|f| f.id()) == Some(access.id())
+}
+
+/// [`is_direct_callee`] seen through parentheses (`(a.m)()`): the method-value
+/// arms skip such an access because a call already records it.
+pub(crate) fn is_call_callee(access: Node<'_>, parent: Option<Node<'_>>) -> bool {
+    let mut outer = access;
+    let mut parent = parent;
+    while let Some(wrapper) = parent.filter(|p| p.kind() == "parenthesized_expression") {
+        outer = wrapper;
+        parent = wrapper.parent();
+    }
+    is_direct_callee(outer, parent)
+}
+
+/// `node` with the parentheses around it removed: the callee `(a.m)` of
+/// `(a.m)(1)` is `a.m`, which a call records as it records `a.m(1)`. A
+/// parenthesized node with no single inner node stays as it is.
+pub(crate) fn unparenthesized(mut node: Node<'_>) -> Node<'_> {
+    while node.kind() == "parenthesized_expression" && node.named_child_count() == 1 {
+        let Some(inner) = node.named_child(0) else {
+            break;
+        };
+        node = inner;
+    }
+    node
 }
 
 /// Reads the name a qualified value node records: see
@@ -1345,7 +1410,9 @@ fn field_name_from(access: Node<'_>, source: &[u8]) -> Option<String> {
                 .last()
         })?;
     let text = field_node.utf8_text(source).ok()?;
-    if text.is_empty() {
+    // `pair.0` indexes a tuple; recorded by name it would bind to any
+    // tuple struct's field "0" in the repo.
+    if text.is_empty() || text.bytes().all(|b| b.is_ascii_digit()) {
         None
     } else {
         Some(text.to_string())
@@ -1473,7 +1540,7 @@ pub fn heads_same_kind_parent(node: Node<'_>, field: &str) -> bool {
         .is_some_and(|parent| is_same_kind_field(node, parent, field))
 }
 
-fn is_same_kind_field(node: Node<'_>, parent: Node<'_>, field: &str) -> bool {
+pub(crate) fn is_same_kind_field(node: Node<'_>, parent: Node<'_>, field: &str) -> bool {
     parent.kind() == node.kind()
         && parent
             .child_by_field_name(field)

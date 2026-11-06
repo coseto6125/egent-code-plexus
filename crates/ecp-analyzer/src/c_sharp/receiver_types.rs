@@ -30,8 +30,9 @@ use super::path_literals::{
     build_raw_path_literal, enclosing_symbol_and_owner_pub, strip_csharp_string_value,
 };
 use crate::calls::{
-    attach_to_enclosing, construction_call, node_range, range_width, span_holds, span_width,
-    start_pos, Pos, PosRange,
+    attach_to_enclosing, construction_call, is_call_callee, is_same_kind_field, node_range,
+    range_width, reference_function, span_holds, span_width, start_pos, unparenthesized, Pos,
+    PosRange,
 };
 use ecp_core::analyzer::csharp_extension::system_type_name;
 use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef, THIS_MEMBER_PREFIX};
@@ -642,7 +643,7 @@ fn csharp_callee(
     locals: &LocalTypes,
     nodes: &[RawNode],
 ) -> Option<String> {
-    let func = inv.child_by_field_name("function")?;
+    let func = unparenthesized(inv.child_by_field_name("function")?);
     let (receiver, method_node) = match func.kind() {
         "identifier" => return func.utf8_text(source).ok().map(str::to_string),
         "member_access_expression" => (
@@ -707,6 +708,57 @@ fn csharp_callee(
     Some(with_call_arguments(entry, inv, source))
 }
 
+/// `c.M` in value position (`xs.ForEach(c.M)`, `new Action<int>(this.M)`)
+/// where `c` is `this`, or a local, parameter, field or property of a
+/// declared type `T`: the method group `T.M`, typed as the call `c.M()` is
+/// ([`classify_receiver`]). The name scan drops `c.M` for a local and records
+/// no `this.M`. A callee, the expression of a longer access and a receiver of
+/// no known type name nothing; a name that may be a type (`Cb.M`) is the name
+/// scan's. A field or property `c.P` is no callable, so Pass 2 binds no edge
+/// to it.
+fn method_group(
+    access: Node<'_>,
+    parent: Option<Node<'_>>,
+    source: &[u8],
+    locals: &LocalTypes,
+    nodes: &[RawNode],
+) -> Option<String> {
+    let name = access.child_by_field_name("name")?;
+    // `c.M<T>` names its method in the first child of a `generic_name`.
+    let member = match name.kind() {
+        "identifier" => name,
+        "generic_name" => name.named_child(0).filter(|id| id.kind() == "identifier")?,
+        _ => return None,
+    }
+    .utf8_text(source)
+    .ok()?;
+    let receiver = access.child_by_field_name("expression")?;
+    let pos = start_pos(access);
+    if is_call_callee(access, parent)
+        || parent.is_some_and(|parent| is_same_kind_field(access, parent, "expression"))
+    {
+        return None;
+    }
+    // Classify only a receiver whose type a lookup holds: the member scan
+    // of an unknown name walks every node, and an access is far more
+    // frequent than a call. `this.P` of a field or property the type
+    // declares is a read, not a method group.
+    let known = match receiver.kind() {
+        "this_expression" | "this" => locals.member_type(pos, member).is_none(),
+        "identifier" => receiver.utf8_text(source).is_ok_and(|name| {
+            locals.lookup(pos, name).is_some() || locals.member_type(pos, name).is_some()
+        }),
+        _ => false,
+    };
+    if !known {
+        return None;
+    }
+    match classify_receiver(receiver, pos, source, locals, nodes)? {
+        Receiver::Typed(ty) => Some(format!("{ty}.{member}")),
+        _ => None,
+    }
+}
+
 /// Walk the AST once, extracting C# invocation sites (attached to
 /// enclosing nodes), collecting path-shaped string literals (`string_literal`,
 /// `verbatim_string_literal`, `raw_string_literal`), and SQL-shaped strings.
@@ -720,12 +772,17 @@ pub fn extract_csharp_calls_and_path_literals(
     let local_types = collect_local_types(root, source);
     let mut path_literals: Vec<RawPathLiteral> = Vec::new();
     let mut sql_refs: Vec<RawSqlRef> = Vec::new();
-    let mut stack: Vec<Node<'_>> = vec![root];
-    while let Some(n) = stack.pop() {
+    let mut stack: Vec<(Node<'_>, Option<Node<'_>>)> = vec![(root, None)];
+    while let Some((n, parent)) = stack.pop() {
         match n.kind() {
             "invocation_expression" => {
                 if let Some(callee) = csharp_callee(n, source, &local_types, nodes) {
                     attach_to_enclosing(start_pos(n), callee, nodes);
+                }
+            }
+            "member_access_expression" => {
+                if let Some(name) = method_group(n, parent, source, &local_types, nodes) {
+                    reference_function(start_pos(n), &name, nodes);
                 }
             }
             "object_creation_expression" => {
@@ -759,7 +816,7 @@ pub fn extract_csharp_calls_and_path_literals(
         }
         let mut c = n.walk();
         for child in n.children(&mut c) {
-            stack.push(child);
+            stack.push((child, Some(n)));
         }
     }
     (path_literals, sql_refs)

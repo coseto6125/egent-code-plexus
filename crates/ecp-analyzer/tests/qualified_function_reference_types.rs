@@ -6,8 +6,9 @@
 //! declaration: with `Cb.M` and `Other.M` in the tree, `Cb.M` binds only `Cb`.
 //!
 //! Contract of every language: a callee records no `function_reference`
-//! edge, a qualifier that is a variable or parameter binds nothing, and a
-//! qualifier that names nothing binds nothing.
+//! edge, a qualifier that is a typed variable or parameter binds the method
+//! its declared type owns (never a same-named class), an untyped one binds
+//! nothing, and a qualifier that names nothing binds nothing.
 //!
 //! Syntax a language does not have, so no test:
 //! - C++ `obj::f` cannot name a variable (`::` takes a namespace or a type),
@@ -79,22 +80,25 @@ fn test_qualified_function_reference_csharp_callee_returns_no_edge() {
     );
 }
 
+/// Stands for: A parameter typed `Cb` binds `c.M` to `Cb.M`.
 #[test]
-fn test_qualified_function_reference_csharp_parameter_qualifier_returns_no_edge() {
+fn test_qualified_function_reference_csharp_parameter_qualifier_binds_parameter_type() {
     let used = cs_use("xs.ForEach(p.M);");
     let found = refs(
         &csharp(),
         &[("Cb.cs", CS_CB), ("Use.cs", used.as_str())],
         "Run",
     );
-    assert_eq!(found, none());
+    assert_one_cross_file(&found, "Cb.cs", "M");
 }
 
+/// Stands for: `held.M` names `M` on the field's declared type, and the field read stays.
 #[test]
-fn test_qualified_function_reference_csharp_field_qualifier_keeps_value_read() {
+fn test_qualified_function_reference_csharp_field_qualifier_binds_field_type_and_keeps_value_read()
+{
     let used = cs_use("xs.ForEach(held.M);");
     let g = graph(&csharp(), &[("Cb.cs", CS_CB), ("Use.cs", used.as_str())]);
-    assert_eq!(function_refs(&g, "Run"), none());
+    assert_one_cross_file(&function_refs(&g, "Run"), "Cb.cs", "M");
     assert!(
         reads_name(&value_reads(&g, "Run"), "held"),
         "{:?}",
@@ -325,15 +329,16 @@ fn test_qualified_function_reference_swift_callee_returns_no_edge() {
     assert_eq!(function_refs(&g, "apply"), none());
 }
 
+/// Stands for: A parameter typed `Cb` binds `c.f` to `Cb.f`.
 #[test]
-fn test_qualified_function_reference_swift_parameter_qualifier_returns_no_edge() {
+fn test_qualified_function_reference_swift_parameter_qualifier_binds_parameter_type() {
     let used = swift_use("return xs.map(p.f)");
     let found = refs(
         &swift(),
         &[("Cb.swift", SWIFT_CB), ("Use.swift", used.as_str())],
         "apply",
     );
-    assert_eq!(found, none());
+    assert_one_cross_file(&found, "Cb.swift", "f");
 }
 
 #[test]
@@ -425,11 +430,12 @@ fn test_qualified_function_reference_dart_callee_returns_no_edge() {
     assert_eq!(function_refs(&g, "apply"), none());
 }
 
+/// Stands for: A parameter typed `Cb` binds `c.f` to `Cb.f`.
 #[test]
-fn test_qualified_function_reference_dart_parameter_qualifier_returns_no_edge() {
+fn test_qualified_function_reference_dart_parameter_qualifier_binds_parameter_type() {
     let used = dart_use("return xs.map(p.f).toList();");
     let found = refs(&dart(), &dart_files(&used), "apply");
-    assert_eq!(found, none());
+    assert_one_cross_file(&found, "cb.dart", "f");
 }
 
 #[test]
@@ -734,15 +740,16 @@ fn test_qualified_function_reference_java_same_member_in_two_classes_binds_named
     assert_one_cross_file(&found, "Other.java", "print");
 }
 
+/// Stands for: A parameter typed `Cb` binds `c::print` to `Cb::print`.
 #[test]
-fn test_qualified_function_reference_java_parameter_qualifier_returns_no_edge() {
+fn test_qualified_function_reference_java_parameter_qualifier_binds_parameter_type() {
     let used = java_use("xs.forEach(cb::print);");
     let found = refs(
         &JavaProvider::new().unwrap(),
         &[("Cb.java", JAVA_CB), ("Use.java", used.as_str())],
         "run",
     );
-    assert_eq!(found, none());
+    assert_one_cross_file(&found, "Cb.java", "print");
 }
 
 #[test]
@@ -823,19 +830,21 @@ fn test_qualified_function_reference_dart_enum_value_argument_returns_no_edge() 
 // local carries its `$`. C++ `ns::f` and Rust `m::f` scope through a
 // namespace or module that no local can stand for.
 
+/// Stands for: A parameter `Other Cb` types `Cb.M` as `Other.M`, never the class `Cb`.
 #[test]
-fn test_qualified_function_reference_csharp_parameter_named_like_type_returns_no_edge() {
+fn test_qualified_function_reference_csharp_parameter_named_like_type_binds_parameter_type() {
     let used = "using System.Collections.Generic;\npublic class Use {\n    public void Run(List<string> xs, Other Cb) {\n        xs.ForEach(Cb.M);\n    }\n    public void Ok(List<string> xs) {\n        xs.ForEach(Cb.M);\n    }\n}\n";
     let g = graph(
         &csharp(),
         &[("Cb.cs", CS_CB), ("Other.cs", CS_OTHER), ("Use.cs", used)],
     );
-    assert_eq!(function_refs(&g, "Run"), none());
+    assert_one_cross_file(&function_refs(&g, "Run"), "Other.cs", "M");
     assert_one_cross_file(&function_refs(&g, "Ok"), "Cb.cs", "M");
 }
 
+/// Stands for: A parameter `Cb: Other` types `Cb.f` as `Other.f`, never the type `Cb`.
 #[test]
-fn test_qualified_function_reference_swift_parameter_named_like_type_returns_no_edge() {
+fn test_qualified_function_reference_swift_parameter_named_like_type_binds_parameter_type() {
     let used = "struct Use {\n    func apply(_ xs: [Int], _ Cb: Other) -> [Int] {\n        return xs.map(Cb.f)\n    }\n    func ok(_ xs: [Int]) -> [Int] {\n        return xs.map(Cb.f)\n    }\n}\n";
     let g = graph(
         &swift(),
@@ -845,20 +854,22 @@ fn test_qualified_function_reference_swift_parameter_named_like_type_returns_no_
             ("Use.swift", used),
         ],
     );
-    assert_eq!(function_refs(&g, "apply"), none());
+    assert_one_cross_file(&function_refs(&g, "apply"), "Other.swift", "f");
     assert_one_cross_file(&function_refs(&g, "ok"), "Cb.swift", "f");
 }
 
+/// Stands for: A parameter `Other Cb` types `Cb.f` as `Other.f`, never the class `Cb`.
 #[test]
-fn test_qualified_function_reference_dart_parameter_named_like_class_returns_no_edge() {
+fn test_qualified_function_reference_dart_parameter_named_like_class_binds_parameter_type() {
     let used = "import 'cb.dart';\nimport 'other.dart';\nList<int> apply(List<int> xs, Other Cb) {\n  return xs.map(Cb.f).toList();\n}\nList<int> ok(List<int> xs) {\n  return xs.map(Cb.f).toList();\n}\n";
     let g = graph(&dart(), &dart_files(used));
-    assert_eq!(function_refs(&g, "apply"), none());
+    assert_one_cross_file(&function_refs(&g, "apply"), "other.dart", "f");
     assert_one_cross_file(&function_refs(&g, "ok"), "cb.dart", "f");
 }
 
+/// Stands for: A parameter `Other Cb` types `Cb::print` as `Other::print`, never the class `Cb`.
 #[test]
-fn test_qualified_function_reference_java_parameter_named_like_class_returns_no_edge() {
+fn test_qualified_function_reference_java_parameter_named_like_class_binds_parameter_type() {
     let used = "class Use {\n    void run(java.util.List<String> xs, Other Cb) {\n        xs.forEach(Cb::print);\n    }\n    void ok(java.util.List<String> xs) {\n        xs.forEach(Cb::print);\n    }\n}\n";
     let g = graph(
         &JavaProvider::new().unwrap(),
@@ -868,12 +879,13 @@ fn test_qualified_function_reference_java_parameter_named_like_class_returns_no_
             ("Use.java", used),
         ],
     );
-    assert_eq!(function_refs(&g, "run"), none());
+    assert_one_cross_file(&function_refs(&g, "run"), "Other.java", "print");
     assert_one_cross_file(&function_refs(&g, "ok"), "Cb.java", "print");
 }
 
+/// Stands for: A parameter `Cb: Other` types `Cb::print` as `Other::print`, never the object `Cb`.
 #[test]
-fn test_qualified_function_reference_kotlin_parameter_named_like_object_returns_no_edge() {
+fn test_qualified_function_reference_kotlin_parameter_named_like_object_binds_parameter_type() {
     let g = graph(
         &KotlinProvider::new().unwrap(),
         &[
@@ -885,7 +897,7 @@ fn test_qualified_function_reference_kotlin_parameter_named_like_object_returns_
             ),
         ],
     );
-    assert_eq!(function_refs(&g, "wire"), none());
+    assert_one_cross_file(&function_refs(&g, "wire"), "Other.kt", "print");
     assert_one_cross_file(&function_refs(&g, "ok"), "Cb.kt", "print");
 }
 

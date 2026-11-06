@@ -126,6 +126,22 @@ def _bench(name: str, cmd: list[str], cwd: Path, runs: int) -> Sample:
     return s
 
 
+def _indexed_file_count(binary: Path, repo: Path) -> int | None:
+    """Return the number of `File` nodes the index of `repo` holds, or None when the query fails."""
+    _, rc, stdout, _ = _run(
+        [str(binary), "cypher", "MATCH (f:File) RETURN count(f)", "--format", "json", "--repo", str(repo)],
+        cwd=repo,
+    )
+    if rc != 0:
+        return None
+    try:
+        first = json.loads(stdout)["rows"][0]
+        # A one-column result prints its rows flat: `{"rows":[111]}`.
+        return int(first[0] if isinstance(first, list) else first)
+    except (json.JSONDecodeError, KeyError, IndexError, TypeError, ValueError):
+        return None
+
+
 def _probe_symbols(binary: Path, repo: Path) -> dict[str, str]:
     """Pick one Class + one Method from the graph for inspect/impact/query tests.
 
@@ -613,6 +629,21 @@ def main() -> int:
         _print_summary(samples)
         return 2
     print(f"  {s.median_s:.2f}s")
+    # ecp indexes the files git tracks in `--repo`, and skips nested git
+    # repos: a directory of clones under an empty repo indexes nothing, and
+    # every later number would time queries over an empty graph.
+    files = _indexed_file_count(args.binary, args.repo)
+    if files is None:
+        print(f"error: could not count the files the index of {args.repo} holds", file=sys.stderr)
+        _print_summary(samples)
+        return 2
+    if files == 0:
+        nested = sorted(p.parent.name for p in args.repo.glob("*/.git"))
+        hint = f"; it holds nested git repos ({', '.join(nested[:5])}...), pass one with --repo" if nested else ""
+        print(f"error: the index of {args.repo} holds 0 files{hint}", file=sys.stderr)
+        _print_summary(samples)
+        return 2
+    print(f"  files indexed: {files}")
 
     # Phase 2: analyze (incremental, hash-cache hot)
     print("→ analyze (incremental)")

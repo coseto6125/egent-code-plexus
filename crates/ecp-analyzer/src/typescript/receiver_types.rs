@@ -21,17 +21,20 @@ use super::path_literals::{
     strip_ts_template_value,
 };
 use crate::calls::{
-    attach_to_enclosing_span, new_expression_call, node_range, range_width, start_pos,
-    CallSiteIndex, Pos, PosRange,
+    attach_to_enclosing_span, is_call_callee, new_expression_call, node_range, range_width,
+    reference_function_span, start_pos, unparenthesized, CallSiteIndex, Pos, PosRange,
 };
 use crate::dynamic_imports::{
     binding_mentions, is_field, may_load, rebound, synthetic_imports, DynamicBinding,
     DynamicImports,
 };
 use crate::framework_helpers::{
-    enclosing_class, js_ts_first_arg_is_literal_string, node_span, Span,
+    enclosing_class, innermost_class, is_class_like, js_ts_first_arg_is_literal_string, node_span,
+    Span,
 };
 use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
+use ecp_core::graph::NodeKind;
+use std::cell::OnceCell;
 use std::collections::{HashMap, HashSet};
 use tree_sitter::Node;
 
@@ -45,7 +48,24 @@ pub struct LocalTypes {
 impl LocalTypes {
     /// Smallest enclosing scope that declares `var`.
     fn lookup(&self, pos: Pos, var: &str) -> Option<&str> {
-        let mut best: Option<&str> = None;
+        self.nearest_typed(pos, var).map(|(_, ty)| ty)
+    }
+
+    /// [`LocalTypes::lookup`] for a receiver in a value position: the type
+    /// stands only when no function nearer than the one that typed `var`
+    /// declares the name, typed or not (`(x: any) => x.m` inside
+    /// `outer(x: A)`).
+    fn lookup_visible(&self, pos: Pos, var: &str) -> Option<&str> {
+        let (typed_start, ty) = self.nearest_typed(pos, var)?;
+        let redeclared_nearer = self.bindings.iter().any(|((start, end), names)| {
+            *start <= pos && pos <= *end && *start > typed_start && names.contains(var)
+        });
+        (!redeclared_nearer).then_some(ty)
+    }
+
+    /// The start of the smallest scope around `pos` that types `var`, and the type.
+    fn nearest_typed(&self, pos: Pos, var: &str) -> Option<(Pos, &str)> {
+        let mut best: Option<(Pos, &str)> = None;
         let mut best_width = (u32::MAX, i64::MAX);
         for ((start, end), map) in &self.scopes {
             if *start <= pos && pos <= *end {
@@ -53,7 +73,7 @@ impl LocalTypes {
                     let w = range_width((*start, *end));
                     if w < best_width {
                         best_width = w;
-                        best = Some(t.as_str());
+                        best = Some((*start, t.as_str()));
                     }
                 }
             }
@@ -106,6 +126,13 @@ pub fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
                 bindings.push((fn_span, names));
             }
         }
+        if let Some((declaration, range)) = statement_declaration(n) {
+            let mut names: HashSet<String> = HashSet::new();
+            insert_pattern_names(declaration, source, &mut names);
+            if !names.is_empty() {
+                bindings.push((range, names));
+            }
+        }
         let mut c = n.walk();
         for child in n.children(&mut c) {
             stack.push(child);
@@ -132,6 +159,7 @@ fn collect_typed_params(
             continue;
         };
         if pat.kind() != "identifier" {
+            insert_pattern_names(pat, source, bindings);
             continue;
         }
         insert_identifier(pat, source, bindings);
@@ -170,6 +198,7 @@ fn collect_typed_vars(
         if n.kind() == "variable_declarator" {
             if let Some(name_node) = n.child_by_field_name("name") {
                 insert_identifier(name_node, source, bindings);
+                insert_pattern_names(name_node, source, bindings);
                 if let Some(type_ann) = n.child_by_field_name("type") {
                     if let Some((name, ty)) = simple_name_and_type(name_node, type_ann, source) {
                         out.insert(name, ty);
@@ -181,6 +210,70 @@ fn collect_typed_vars(
         for child in n.children(&mut c) {
             stack.push(child);
         }
+    }
+}
+
+/// Every name a destructuring pattern (`{ a, b: c }`, `[d, ...e]`, `...f`)
+/// binds. A default (`{ y = obj }`) binds only its left side and a computed
+/// key (`{ [k]: v }`) only its value pattern: the default expression and the
+/// key expression read names, they declare none.
+fn insert_pattern_names(pattern: Node<'_>, source: &[u8], out: &mut HashSet<String>) {
+    let mut stack = vec![pattern];
+    while let Some(n) = stack.pop() {
+        match n.kind() {
+            "identifier" | "shorthand_property_identifier_pattern" => {
+                if let Ok(name) = n.utf8_text(source) {
+                    out.insert(name.to_string());
+                }
+            }
+            "object_assignment_pattern" | "assignment_pattern" => {
+                stack.extend(n.child_by_field_name("left"));
+            }
+            "pair_pattern" => stack.extend(n.child_by_field_name("value")),
+            _ => {
+                let mut c = n.walk();
+                stack.extend(n.named_children(&mut c));
+            }
+        }
+    }
+}
+
+/// The names a statement rebinds, and where the new binding is visible:
+/// `for (const x of xs)` and `catch (x)` bind for the statement. `for (x of
+/// xs)` assigns each element to an existing `x`, so from the loop body to the
+/// end of the enclosing function `x` no longer holds its earlier value; `xs`
+/// still reads it.
+fn statement_declaration(n: Node<'_>) -> Option<(Node<'_>, PosRange)> {
+    match n.kind() {
+        "for_in_statement" => {
+            let left = n.child_by_field_name("left")?;
+            if n.child_by_field_name("kind").is_some() {
+                return Some((left, node_range(n)));
+            }
+            // An assignment target names a variable only through an
+            // identifier or a destructuring pattern: `for (o.p of xs)` writes
+            // no name.
+            let target = unparenthesized(left);
+            if !matches!(
+                target.kind(),
+                "identifier" | "array_pattern" | "object_pattern"
+            ) {
+                return None;
+            }
+            let body = n.child_by_field_name("body")?;
+            let scope = std::iter::successors(n.parent(), |p| p.parent())
+                .find(|p| FUNCTION_SCOPES.contains(&p.kind()))
+                .unwrap_or_else(|| {
+                    std::iter::successors(Some(n), |p| p.parent())
+                        .last()
+                        .unwrap_or(n)
+                });
+            Some((target, (start_pos(body), node_range(scope).1)))
+        }
+        "catch_clause" => n
+            .child_by_field_name("parameter")
+            .map(|p| (p, node_range(n))),
+        _ => None,
     }
 }
 
@@ -546,14 +639,22 @@ pub fn extract_ts_calls_and_path_literals(
     let mut path_literals: Vec<RawPathLiteral> = Vec::new();
     let mut sql_refs: Vec<RawSqlRef> = Vec::new();
     let mut constructions: Vec<(Span, String)> = Vec::new();
-    let mut stack: Vec<Node<'_>> = vec![root];
-    while let Some(n) = stack.pop() {
+    let this_facts = OnceCell::new();
+    let mut stack: Vec<(Node<'_>, Option<Node<'_>>)> = vec![(root, None)];
+    while let Some((n, parent)) = stack.pop() {
         match n.kind() {
             "call_expression" => {
                 if let Some(callee) = ts_callee_name(n, source, locals, dynamic, nodes) {
                     if let Some(site) = attach_to_enclosing_span(node_span(&n), callee, nodes) {
                         call_sites.insert(n.id(), site);
                     }
+                }
+            }
+            "member_expression" => {
+                if let Some(name) =
+                    bound_method_value(n, parent, source, Some(locals), nodes, &this_facts)
+                {
+                    reference_function_span(node_span(&n), &name, nodes);
                 }
             }
             "new_expression" => {
@@ -597,7 +698,7 @@ pub fn extract_ts_calls_and_path_literals(
         }
         let mut c = n.walk();
         for child in n.children(&mut c) {
-            stack.push(child);
+            stack.push((child, Some(n)));
         }
     }
     // After every call: the call-meta detectors index `calls` in
@@ -608,6 +709,146 @@ pub fn extract_ts_calls_and_path_literals(
     (path_literals, sql_refs)
 }
 
+/// What a `this.x` read looks up in the file's declarations. Built on the
+/// first such read, as most files hold none and every read would otherwise
+/// scan every node.
+pub(crate) struct ThisFacts {
+    /// The fields and properties that no function or method of the file
+    /// shares: `this.count` of such a name is a read, never a method value.
+    data_members: HashSet<String>,
+    classes: Vec<(String, Span)>,
+}
+
+impl ThisFacts {
+    fn new(nodes: &[RawNode]) -> Self {
+        let callables: HashSet<&str> = nodes
+            .iter()
+            .filter(|n| n.kind.is_callable())
+            .map(|n| n.name.as_str())
+            .collect();
+        Self {
+            data_members: nodes
+                .iter()
+                .filter(|n| n.kind == NodeKind::Property && !callables.contains(n.name.as_str()))
+                .map(|n| n.name.clone())
+                .collect(),
+            classes: nodes
+                .iter()
+                .filter(|n| is_class_like(n.kind))
+                .map(|n| (n.name.clone(), n.span))
+                .collect(),
+        }
+    }
+
+    /// The innermost class holding `inner`, as `enclosing_class` finds it.
+    fn class_at(&self, inner: Span) -> Option<&str> {
+        innermost_class(
+            self.classes
+                .iter()
+                .map(|(name, span)| (name.as_str(), *span)),
+            inner,
+        )
+        .map(|(name, _)| name)
+    }
+}
+
+/// The class `this` stands for at `member`. `this` belongs to the nearest
+/// non-arrow function, so it is the class only when that function is a method
+/// of a class body, or when no function lies between `member` and a class
+/// field initializer or static block. A plain `function` and an object
+/// literal's method bind their own `this`.
+fn this_class<'f>(member: Node<'_>, facts: &'f ThisFacts) -> Option<&'f str> {
+    let mut current = member.parent();
+    while let Some(n) = current {
+        match n.kind() {
+            "method_definition" => {
+                return n
+                    .parent()
+                    .filter(|owner| owner.kind() == "class_body")
+                    .and_then(|_| facts.class_at(node_span(&member)));
+            }
+            "function_declaration"
+            | "function"
+            | "function_expression"
+            | "generator_function"
+            | "generator_function_declaration" => return None,
+            "public_field_definition"
+            | "field_definition"
+            | "class_static_block"
+            | "class_body" => {
+                return facts.class_at(node_span(&member));
+            }
+            _ => current = n.parent(),
+        }
+    }
+    None
+}
+
+/// `obj.m` in value position (`xs.forEach(obj.m)`, `const f = this.m`,
+/// `xs.forEach(this.m.bind(this))`) where `obj` is `this` or, given `locals`,
+/// a parameter or local annotated with a class `T`: the method `T.m` (for
+/// `this`, the class [`this_class`] finds by its nearest-method rule), typed
+/// as the call `obj.m()` is. The name scan drops `obj.m`, as `obj` is a
+/// local, and records no `this.m`. A callee (parenthesized or not), the
+/// object of a longer member expression (`.bind` aside), an assignment
+/// target, a data member read through `this`, a `this` that is no class's,
+/// and a receiver of no known type name nothing; a field `obj.n` is no
+/// callable, so Pass 2 binds no edge to it. `parent` is `member`'s parent.
+pub(crate) fn bound_method_value(
+    member: Node<'_>,
+    parent: Option<Node<'_>>,
+    source: &[u8],
+    locals: Option<&LocalTypes>,
+    nodes: &[RawNode],
+    this_facts: &OnceCell<ThisFacts>,
+) -> Option<String> {
+    let property = member
+        .child_by_field_name("property")
+        .filter(|property| property.kind() == "property_identifier")?
+        .utf8_text(source)
+        .ok()?;
+    let object = member.child_by_field_name("object")?;
+    if !matches!(object.kind(), "this" | "identifier") {
+        return None;
+    }
+    let parent = parent?;
+    if is_call_callee(member, Some(parent)) {
+        return None;
+    }
+    let value = match parent.kind() {
+        "assignment_expression" | "augmented_assignment_expression" => {
+            parent.child_by_field_name("left") != Some(member)
+        }
+        // `this.m.bind(this)` hands on `m` bound to the receiver.
+        "member_expression" if parent.child_by_field_name("object") == Some(member) => {
+            parent
+                .child_by_field_name("property")
+                .and_then(|property| property.utf8_text(source).ok())
+                == Some("bind")
+                && parent.parent().is_some_and(|call| {
+                    call.kind() == "call_expression"
+                        && call.child_by_field_name("function") == Some(parent)
+                })
+        }
+        _ => true,
+    };
+    if !value {
+        return None;
+    }
+    let ty = if object.kind() == "this" {
+        let facts = this_facts.get_or_init(|| ThisFacts::new(nodes));
+        if facts.data_members.contains(property) {
+            return None;
+        }
+        this_class(member, facts)?.to_string()
+    } else {
+        locals?
+            .lookup_visible(start_pos(member), object.utf8_text(source).ok()?)?
+            .to_string()
+    };
+    Some(format!("{ty}.{property}"))
+}
+
 fn ts_callee_name(
     call: Node<'_>,
     source: &[u8],
@@ -615,7 +856,7 @@ fn ts_callee_name(
     dynamic: &DynamicImports,
     nodes: &[RawNode],
 ) -> Option<String> {
-    let function = call.child_by_field_name("function")?;
+    let function = unparenthesized(call.child_by_field_name("function")?);
     match function.kind() {
         "identifier" => dynamic.bare_callee(call, function, source),
         "member_expression" => {

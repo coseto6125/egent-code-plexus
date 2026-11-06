@@ -118,7 +118,8 @@
   body: (field_declaration_list
     (field_declaration
       (visibility_modifier)? @export
-      name: (field_identifier) @property.name) @property))
+      name: (field_identifier) @property.name
+      type: (_) @type) @property))
 
 ;; Enum variant struct-form fields: `enum E { V { f1: T, f2: U } }`. Each named
 ;; field is a permanent type-level data member parallel to struct fields, and
@@ -127,7 +128,12 @@
   body: (field_declaration_list
     (field_declaration
       (visibility_modifier)? @export
-      name: (field_identifier) @property.name) @property))
+      name: (field_identifier) @property.name
+      type: (_) @type) @property))
+
+;; Tuple-struct and tuple-variant fields have no name token: the role builds
+;; their positional `Property` nodes.
+(ordered_field_declaration_list) @tuple_fields
 
 ;; Modules (both inline `mod foo { }` and declaration `mod foo;`)
 (mod_item

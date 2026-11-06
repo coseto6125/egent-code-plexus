@@ -1,0 +1,538 @@
+//! A PHP callable handed on as a value is a `References` edge with reason
+//! `function_reference` from the function holding it to the function or method
+//! it names, never a `Calls` edge. The string rule: a string names a callable
+//! only as the callable argument of a known callable-taking builtin
+//! (`array_map`, `usort`, `is_callable`, ...), and only when it binds a
+//! project symbol; any other string, and any name the project does not
+//! declare, records nothing. The contract behind each assertion is the cypher
+//! row `MATCH (a)-[r:References]->(b) RETURN a.name, b.name, r.reason` that
+//! `ecp impact --direction upstream` reads.
+use crate::name_ref_support::{graph, refs, FUNCTION_REFERENCE};
+
+use ecp_analyzer::php::parser::PhpProvider;
+use ecp_core::graph::RelType;
+
+const CB: (&str, &str) = (
+    "src/Cb.php",
+    "<?php namespace P; class Cb { public static function cb_qual(int $x): void {} public function cb_ptr(int $x): void {} }",
+);
+const FUNCTIONS: (&str, &str) = (
+    "src/fns.php",
+    "<?php namespace P; function cb_bare(int $x): void {}",
+);
+
+fn holder(params: &str, body: &str) -> (String, String) {
+    (
+        "src/Holder.php".to_string(),
+        format!(
+            "<?php namespace P; use P\\Cb; class Holder {{ public function cb_own($v) {{}} public function m({params}) {{ {body} }} }}"
+        ),
+    )
+}
+
+fn edges(params: &str, body: &str, rel: RelType, reason: &str) -> Vec<String> {
+    let (path, src) = holder(params, body);
+    let g = graph(
+        &PhpProvider::new().unwrap(),
+        &[CB, FUNCTIONS, (path.as_str(), src.as_str())],
+    );
+    refs(&g, "m", rel, reason)
+        .into_iter()
+        .map(|(_, name, _, _)| name)
+        .collect()
+}
+
+fn references(body: &str) -> Vec<String> {
+    edges(
+        "Cb $o, array $a",
+        body,
+        RelType::References,
+        FUNCTION_REFERENCE,
+    )
+}
+
+fn calls(body: &str) -> Vec<String> {
+    edges("Cb $o, array $a", body, RelType::Calls, "call")
+}
+
+fn one(name: &str) -> Vec<String> {
+    vec![name.to_string()]
+}
+
+#[test]
+fn test_string_callable_namespaced_function_references_function() {
+    assert_eq!(references("array_map('P\\cb_bare', $a);"), one("cb_bare"));
+}
+
+#[test]
+fn test_string_callable_bare_function_references_function() {
+    assert_eq!(references("array_map('cb_bare', $a);"), one("cb_bare"));
+}
+
+#[test]
+fn test_string_callable_is_callable_references_function() {
+    assert_eq!(references("is_callable('cb_bare');"), one("cb_bare"));
+}
+
+#[test]
+fn test_first_class_callable_function_references_not_calls() {
+    let body = "array_map(cb_bare(...), $a);";
+    assert_eq!(references(body), one("cb_bare"));
+    assert_eq!(calls(body), Vec::<String>::new());
+}
+
+#[test]
+fn test_first_class_callable_same_function_twice_references_it_once() {
+    let body = "array_map(cb_bare(...), $a); array_map(cb_bare(...), $a);";
+    assert_eq!(references(body), one("cb_bare"));
+    assert_eq!(calls(body), Vec::<String>::new());
+}
+
+#[test]
+fn test_array_callable_class_constant_references_method() {
+    assert_eq!(
+        references("array_map([Cb::class, 'cb_qual'], $a);"),
+        one("cb_qual")
+    );
+}
+
+#[test]
+fn test_array_callable_qualified_string_class_references_method() {
+    assert_eq!(
+        references("array_map(['P\\Cb', 'cb_qual'], $a);"),
+        one("cb_qual")
+    );
+}
+
+#[test]
+fn test_array_callable_this_references_own_method() {
+    assert_eq!(
+        references("array_map([$this, 'cb_own'], $a);"),
+        one("cb_own")
+    );
+}
+
+#[test]
+fn test_array_callable_typed_parameter_references_method_on_its_class() {
+    assert_eq!(references("array_map([$o, 'cb_ptr'], $a);"), one("cb_ptr"));
+}
+
+#[test]
+fn test_array_callable_nullable_typed_parameter_references_method() {
+    let got = edges(
+        "?Cb $o, array $a",
+        "array_map([$o, 'cb_ptr'], $a);",
+        RelType::References,
+        FUNCTION_REFERENCE,
+    );
+    assert_eq!(got, one("cb_ptr"));
+}
+
+#[test]
+fn test_first_class_callable_static_method_references_not_calls() {
+    let body = "array_map(Cb::cb_qual(...), $a);";
+    assert_eq!(references(body), one("cb_qual"));
+    assert_eq!(calls(body), Vec::<String>::new());
+}
+
+#[test]
+fn test_first_class_callable_this_method_references_not_calls() {
+    let body = "array_map($this->cb_own(...), $a);";
+    assert_eq!(references(body), one("cb_own"));
+    assert_eq!(calls(body), Vec::<String>::new());
+}
+
+#[test]
+fn test_string_callable_static_method_references_method() {
+    assert_eq!(
+        references("array_map('P\\Cb::cb_qual', $a);"),
+        one("cb_qual")
+    );
+}
+
+#[test]
+fn test_ordinary_calls_stay_calls_not_references() {
+    let body = "cb_bare(1); Cb::cb_qual(1); $this->cb_own(1);";
+    assert_eq!(references(body), Vec::<String>::new());
+    assert_eq!(calls(body).len(), 3);
+}
+
+#[test]
+fn test_string_argument_to_non_callable_function_records_nothing() {
+    assert_eq!(
+        references("strlen('cb_bare'); my_log('cb_bare');"),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn test_string_callable_unknown_name_records_nothing() {
+    assert_eq!(
+        references("array_map('no_such_fn', $a);"),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn test_string_callable_other_namespace_qualifier_records_nothing() {
+    assert_eq!(
+        references("array_map('Other\\cb_bare', $a);"),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn test_string_callable_empty_and_whitespace_record_nothing() {
+    assert_eq!(
+        references("array_map('', $a); array_map('  ', $a);"),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn test_array_callable_untyped_variable_records_nothing() {
+    let got = edges(
+        "$x, array $a",
+        "array_map([$x, 'cb_ptr'], $a);",
+        RelType::References,
+        FUNCTION_REFERENCE,
+    );
+    assert_eq!(got, Vec::<String>::new());
+}
+
+#[test]
+fn test_array_callable_primitive_typed_variable_records_nothing() {
+    let got = edges(
+        "int $x, array $a",
+        "array_map([$x, 'cb_ptr'], $a);",
+        RelType::References,
+        FUNCTION_REFERENCE,
+    );
+    assert_eq!(got, Vec::<String>::new());
+}
+
+#[test]
+fn test_array_callable_with_three_elements_records_nothing() {
+    assert_eq!(
+        references("array_map([Cb::class, 'cb_qual', 1], $a);"),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn test_first_class_callable_untyped_receiver_records_no_reference() {
+    let got = edges(
+        "$u, array $a",
+        "array_map($u->cb_ptr(...), $a);",
+        RelType::References,
+        FUNCTION_REFERENCE,
+    );
+    assert_eq!(got, Vec::<String>::new());
+}
+
+#[test]
+fn test_callable_reference_repeated_twice_yields_one_edge() {
+    let body = "array_map('cb_bare', $a); array_map(cb_bare(...), $a);";
+    assert_eq!(references(body), one("cb_bare"));
+}
+
+#[test]
+fn test_callable_reference_row_carries_function_reference_reason_and_confidence() {
+    let (path, src) = holder("Cb $o, array $a", "array_map([Cb::class, 'cb_qual'], $a);");
+    let g = graph(
+        &PhpProvider::new().unwrap(),
+        &[CB, FUNCTIONS, (path.as_str(), src.as_str())],
+    );
+    let rows = refs(&g, "m", RelType::References, FUNCTION_REFERENCE);
+    assert_eq!(rows.len(), 1);
+    let (file, name, reason, confidence) = &rows[0];
+    assert_eq!(
+        (file.as_str(), name.as_str(), reason.as_str()),
+        ("src/Cb.php", "cb_qual", FUNCTION_REFERENCE)
+    );
+    assert!(*confidence > 0.0 && *confidence <= 1.0);
+}
+
+#[test]
+fn test_callable_reference_braced_namespace_function_references_function() {
+    let src = "<?php namespace P { class H { public function m(array $a) { array_map('P\\cb_bare', $a); } } }";
+    let g = graph(
+        &PhpProvider::new().unwrap(),
+        &[FUNCTIONS, ("src/H.php", src)],
+    );
+    let got: Vec<_> = refs(&g, "m", RelType::References, FUNCTION_REFERENCE)
+        .into_iter()
+        .map(|r| r.1)
+        .collect();
+    assert_eq!(got, one("cb_bare"));
+}
+
+// Stands for: `[$o, 'm']` names the method of `$o`'s declared class only while
+// `$o` is that parameter; after any of these rewrites it names nothing.
+#[test]
+fn test_array_callable_parameter_reassigned_in_body_references_nothing() {
+    assert_eq!(
+        references("$o = $a; array_map([$o, 'cb_ptr'], $a);"),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn test_array_callable_parameter_foreach_target_references_nothing() {
+    assert_eq!(
+        references("foreach ($a as $o) {} array_map([$o, 'cb_ptr'], $a);"),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn test_array_callable_parameter_list_destructured_references_nothing() {
+    assert_eq!(
+        references("[$o] = $a; array_map([$o, 'cb_ptr'], $a);"),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn test_array_callable_parameter_never_assigned_still_references_method() {
+    assert_eq!(references("array_map([$o, 'cb_ptr'], $a);"), one("cb_ptr"));
+}
+
+#[test]
+fn test_array_callable_closure_without_use_of_parameter_references_nothing() {
+    assert_eq!(
+        references("return function () use ($a) { return array_map([$o, 'cb_ptr'], $a); };"),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn test_array_callable_closure_capturing_parameter_references_method() {
+    assert_eq!(
+        references("return function () use ($o, $a) { return array_map([$o, 'cb_ptr'], $a); };"),
+        one("cb_ptr")
+    );
+}
+
+#[test]
+fn test_array_callable_closure_reassigning_captured_parameter_references_nothing() {
+    assert_eq!(
+        references(
+            "return function () use ($o, $a) { $o = $a; return array_map([$o, 'cb_ptr'], $a); };"
+        ),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn test_array_callable_arrow_function_captures_parameter_by_value_references_method() {
+    assert_eq!(
+        references("return fn () => array_map([$o, 'cb_ptr'], $a);"),
+        one("cb_ptr")
+    );
+}
+
+// Stands for: PHP 8 names the first parameter of `is_callable` `$value`, so a
+// named `value:` argument is the callable and a named `callback:` one is not.
+#[test]
+fn test_string_callable_is_callable_named_value_argument_references_method() {
+    assert_eq!(
+        references("is_callable(value: [$o, 'cb_ptr']);"),
+        one("cb_ptr")
+    );
+}
+
+#[test]
+fn test_string_callable_is_callable_named_callback_argument_references_nothing() {
+    assert_eq!(
+        references("is_callable(callback: [$o, 'cb_ptr']);"),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn test_string_callable_array_map_named_callback_argument_references_method() {
+    assert_eq!(
+        references("array_map(callback: [$o, 'cb_ptr'], array: $a);"),
+        one("cb_ptr")
+    );
+}
+
+// Stands for: only a write that runs before the use replaces the declared
+// type; `??=` cannot replace a parameter whose type excludes null.
+#[test]
+fn test_array_callable_parameter_assigned_after_use_references_method() {
+    assert_eq!(
+        references("array_map([$o, 'cb_ptr'], $a); $o = $a;"),
+        one("cb_ptr")
+    );
+}
+
+#[test]
+fn test_array_callable_parameter_coalesce_assigned_references_method() {
+    assert_eq!(
+        references("$o ??= $a; array_map([$o, 'cb_ptr'], $a);"),
+        one("cb_ptr")
+    );
+}
+
+#[test]
+fn test_array_callable_parameter_plain_augmented_assignment_references_nothing() {
+    assert_eq!(
+        references("$o .= $a; array_map([$o, 'cb_ptr'], $a);"),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn test_array_callable_parameter_assigned_later_in_enclosing_loop_references_nothing() {
+    assert_eq!(
+        references("while ($a) { array_map([$o, 'cb_ptr'], $a); $o = $a; }"),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn test_array_callable_parameter_assigned_after_loop_references_method() {
+    assert_eq!(
+        references("while ($a) { array_map([$o, 'cb_ptr'], $a); } $o = $a;"),
+        one("cb_ptr")
+    );
+}
+
+#[test]
+fn test_array_callable_parameter_coalesce_with_comment_references_method() {
+    assert_eq!(
+        references("$o /* default */ ??= $a; array_map([$o, 'cb_ptr'], $a);"),
+        one("cb_ptr")
+    );
+}
+
+// Stands for: a null parameter takes the `??=` value, so `??=` replaces a
+// `?T` parameter and a parameter that defaults to `null`.
+#[test]
+fn test_array_callable_nullable_parameter_coalesce_assigned_references_nothing() {
+    let got = edges(
+        "?Cb $o, array $a",
+        "$o ??= $a; array_map([$o, 'cb_ptr'], $a);",
+        RelType::References,
+        FUNCTION_REFERENCE,
+    );
+    assert_eq!(got, Vec::<String>::new());
+}
+
+#[test]
+fn test_array_callable_null_default_parameter_coalesce_assigned_references_nothing() {
+    let got = edges(
+        "Cb $o = null, array $a = []",
+        "$o ??= $a; array_map([$o, 'cb_ptr'], $a);",
+        RelType::References,
+        FUNCTION_REFERENCE,
+    );
+    assert_eq!(got, Vec::<String>::new());
+}
+
+#[test]
+fn test_array_callable_null_default_parameter_without_write_references_method() {
+    let got = edges(
+        "Cb $o = null, array $a = []",
+        "array_map([$o, 'cb_ptr'], $a);",
+        RelType::References,
+        FUNCTION_REFERENCE,
+    );
+    assert_eq!(got, one("cb_ptr"));
+}
+
+// Stands for: a `catch` gives its variable a new value before the catch body
+// runs, and only there.
+#[test]
+fn test_array_callable_catch_rebinding_parameter_in_catch_body_references_nothing() {
+    assert_eq!(
+        references("try { g(); } catch (\\Exception $o) { array_map([$o, 'cb_ptr'], $a); }"),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn test_array_callable_catch_rebinding_parameter_use_in_try_references_method() {
+    assert_eq!(
+        references("try { array_map([$o, 'cb_ptr'], $a); } catch (\\Exception $o) {}"),
+        one("cb_ptr")
+    );
+}
+
+#[test]
+fn test_array_callable_catch_without_variable_references_method() {
+    assert_eq!(
+        references("try { g(); } catch (\\Exception) { array_map([$o, 'cb_ptr'], $a); }"),
+        one("cb_ptr")
+    );
+}
+
+// Stands for: a closure that captures by reference reads the variable when it
+// is called, so a write anywhere in the enclosing function can reach the use.
+// A capture by value copies the variable where the closure is written.
+#[test]
+fn test_array_callable_by_ref_closure_parameter_assigned_after_closure_references_nothing() {
+    assert_eq!(
+        references(
+            "$f = function () use (&$o, $a) { return array_map([$o, 'cb_ptr'], $a); }; $o = $a; return $f();"
+        ),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn test_array_callable_by_ref_closure_parameter_never_assigned_references_method() {
+    assert_eq!(
+        references(
+            "$f = function () use (&$o, $a) { return array_map([$o, 'cb_ptr'], $a); }; return $f();"
+        ),
+        one("cb_ptr")
+    );
+}
+
+/// Stands for: an inner `use (&$o)` shares the copy an outer `use ($o)` closure
+/// took, so a later write in the function that declares `$o` does not reach it.
+#[test]
+fn test_array_callable_by_ref_inside_by_value_closure_outer_write_references_method() {
+    assert_eq!(
+        references(
+            "$outer = function () use ($o, $a) { return function () use (&$o, $a) { return array_map([$o, 'cb_ptr'], $a); }; }; $o = $a; return $outer();"
+        ),
+        one("cb_ptr")
+    );
+}
+
+#[test]
+fn test_array_callable_by_ref_inside_by_value_closure_write_in_outer_closure_references_nothing() {
+    assert_eq!(
+        references(
+            "$outer = function () use ($o, $a) { $in = function () use (&$o, $a) { return array_map([$o, 'cb_ptr'], $a); }; $o = $a; return $in; }; return $outer();"
+        ),
+        Vec::<String>::new()
+    );
+}
+
+/// Stands for: a by-value capture inside a closure that shares `$o` by
+/// reference copies `$o` only when that closure runs, so a later write in the
+/// declaring function can reach the copy.
+#[test]
+fn test_array_callable_by_value_capture_inside_by_ref_closure_outer_write_references_nothing() {
+    assert_eq!(
+        references(
+            "$outer = function () use (&$o, $a) { return function () use ($o, $a) { return function () use (&$o, $a) { return array_map([$o, 'cb_ptr'], $a); }; }; }; $o = $a; return $outer()()();"
+        ),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn test_array_callable_by_value_closure_parameter_assigned_after_closure_references_method() {
+    assert_eq!(
+        references(
+            "$f = function () use ($o, $a) { return array_map([$o, 'cb_ptr'], $a); }; $o = $a; return $f();"
+        ),
+        one("cb_ptr")
+    );
+}

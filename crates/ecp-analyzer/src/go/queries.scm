@@ -66,6 +66,8 @@
         (type_identifier) @type
         (pointer_type (type_identifier) @type)
         (qualified_type) @type
+        (generic_type type: (type_identifier) @type)
+        (pointer_type (generic_type type: (type_identifier) @type))
       ]
     )
   )

@@ -75,6 +75,8 @@ fn test_kotlin_driver_imports_only_file_keeps_source_order() {
 
 /// The primary constructor is its own node, rooted at the parameter list.
 /// `internal` hides the class only: the constructor match has no `@export`.
+/// Each `val` / `var` constructor parameter is also a `Property` of its
+/// class, so a type it is declared with reaches `ecp impact`.
 #[test]
 fn test_kotlin_driver_primary_constructor_and_data_class_emit_class_and_constructor() {
     let src: &[u8] = b"class Foo(val x: Int)\ninternal data class Point(val x: Int, val y: Int)\n";
@@ -89,7 +91,21 @@ fn test_kotlin_driver_primary_constructor_and_data_class_emit_class_and_construc
     assert_eq!(shape(point), ((1, 0, 1, 49), false, None));
     let point_ctor = node(&g, "Point", NodeKind::Constructor);
     assert_eq!(shape(point_ctor), ((1, 25, 1, 49), true, Some("Point")));
-    assert_eq!(g.nodes.len(), 4, "{:?}", names_kinds(&g));
+    let properties: Vec<(&str, Option<&str>)> = g
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Property)
+        .map(|n| (n.name.as_str(), n.owner_class.as_deref()))
+        .collect();
+    assert_eq!(
+        properties,
+        [
+            ("x", Some("Foo")),
+            ("x", Some("Point")),
+            ("y", Some("Point"))
+        ]
+    );
+    assert_eq!(g.nodes.len(), 7, "{:?}", names_kinds(&g));
 }
 
 #[test]

@@ -137,6 +137,18 @@ pub fn module_item<D: PickFacts + ?Sized>(decls: &D, id: u32) -> Option<u32> {
     past_body_local(decls, id, |id| is_module_item(decls, id))
 }
 
+/// Whether `file` declares more than one module or type named `name`
+/// (`v1::Config` beside `v2::Config`, `outer::a` beside `a`). A member
+/// records its owner as a bare name ([`owner_key`]), so it cannot say which
+/// of such twins holds it: a Rust path through one binds nothing.
+fn declares_twin_qualifiers<D: ResolveFacts>(decls: &D, file: &str, name: &str) -> bool {
+    decls
+        .call_decls(file, name)
+        .filter(|&(id, kind)| kind.is_qualifier() && !decls.is_body_local(id))
+        .nth(1)
+        .is_some()
+}
+
 /// What a call site adds to a name lookup. The index's
 /// `Resolver::resolve_call` and the overlay's edge pass both build one per
 /// call site; `None` in its place is a plain symbol lookup.
@@ -1215,7 +1227,9 @@ pub struct QualifiedSite<'s> {
 ///
 /// A Rust path (`crate::x::parse`) binds a method only when the qualifier
 /// is its owning type (`K::st`): a module path never names a method
-/// ([`rust_path_may_bind`]).
+/// ([`rust_path_may_bind`]). Nor does it bind through a qualifier the file
+/// declares twice ([`declares_twin_qualifiers`]), unless it is the caller's
+/// own type.
 pub fn qualified_member<F: QualifierFacts>(
     facts: &F,
     site: QualifiedSite<'_>,
@@ -1250,6 +1264,16 @@ pub fn qualified_member<F: QualifierFacts>(
     .or_else(|| caller_type.then(|| facts.stored_file(source)).flatten())?;
     let file = file.as_ref();
     let heritage: &[String] = if caller_type { heritage } else { &[] };
+    // `crate::a::b::f()` beside an `outer::a::b`: the file holds two `b`s,
+    // and the owner name cannot say whose `f` the path names. The caller's
+    // own type keeps its `impl` block rule ([`prefer_owned`]).
+    if language == Language::Rust
+        && callee.contains("::")
+        && !caller_type
+        && owner_key(qualifier).is_some_and(|key| declares_twin_qualifiers(decls, file, key))
+    {
+        return None;
+    }
     let pick = decls.first_decl_in_file(file, member, target)?;
     // Only Rust's `impl_only` reads it once `caller_type` holds.
     let declares_type = (!caller_type || language == Language::Rust)
@@ -1785,37 +1809,110 @@ pub fn anchored_module_file<F: ModuleTreeFacts>(
 /// items: the type's own module-level member, else what [`prefer_owned`] picks
 /// with the type as the receiver. A body-local namesake and a free item of the
 /// type's file never bind. [`qualified`] then applies the method rule
-/// ([`rust_path_may_bind`]).
+/// ([`rust_path_may_bind`]). A path with segments past the item
+/// ([`TreePlace::past`]) binds only when the file confirms each of them but
+/// the member: the item names a module or a type the file declares (an
+/// `impl` block counts), every middle segment one declared inside the
+/// segment before it, and the member is picked from the last of them.
+/// `a::missing::top()` and `a::m::S::new()` (no `S` inside `m`) then bind
+/// nothing, never the `top` or `S::new` of `a`'s file. Nor does a path
+/// through a module or type that the file declares twice
+/// ([`declares_twin_qualifiers`]): `api::v2::Config::new()` beside a
+/// `v1::Config` never binds `v1`'s `new`.
 pub fn module_tree_member<F: ModuleTreeFacts, D: ResolveFacts>(
     facts: &F,
     decls: &D,
     caller: &str,
+    imports: &[RawImport],
     callee: &str,
     member: &str,
     target: ResolveTarget,
 ) -> Option<u32> {
-    let TreeItem::Found { file, item } =
-        module_tree_item(facts, caller, callee, Namespace::of(target))?
+    let namespace = Namespace::of(target);
+    // Rust 2018: a bare `a::f()` whose head `a` is a module the caller's own
+    // file declares (`mod a;`, `mod a { .. }`) is `self::a::f()`. Tried after
+    // the plain path, so a workspace-crate head keeps its route; never for a
+    // head the caller's `use` names (it may be a renamed re-export); and only
+    // for a declared `Module`, so `Type::new()` is untouched.
+    let placed = module_tree_place(facts, caller, callee, namespace).or_else(|| {
+        let head = callee.split("::").next()?;
+        let imported = imports
+            .iter()
+            .any(|i| i.alias.as_deref().unwrap_or(&i.imported_name) == head);
+        let declared_child = !imported
+            && !matches!(head, "crate" | "self" | "super")
+            && decls
+                .call_decls(caller, head)
+                .any(|(_, kind)| kind == NodeKind::Module);
+        declared_child
+            .then(|| module_tree_place(facts, caller, &format!("self::{callee}"), namespace))
+            .flatten()
+    });
+    let Some(TreePlace {
+        item: TreeItem::Found { file, item },
+        past,
+        ..
+    }) = placed
     else {
         return None;
     };
     let file = file.as_ref();
     let wanted = target.kind_predicate();
     let is_type = ResolveTarget::Type.kind_predicate();
-    let mut item_is_type = false;
-    for (id, kind) in decls.call_decls(file, &item) {
-        let (wanted_kind, type_kind) = (wanted(kind), is_type(kind));
-        if !(wanted_kind || type_kind) {
-            continue;
+    // The segments the walk did not consume stand for inline `mod`s and a
+    // type's associated items. Each one past the item must be declared
+    // inside the one before it, and the member is picked from the last
+    // (`qualifier`), so `a::m::S::new()` never reaches the `S` beside `m`.
+    // A turbofish segment (`S::<u8>::new`) names none of them.
+    let mut qualifier = item.as_str();
+    let mut nested: Option<u32> = None;
+    if past > 0 {
+        // The Rust parser files no node for a `union`, only its `impl`
+        // blocks, so an `Impl` also names the item as a type.
+        if !decls
+            .call_decls(file, qualifier)
+            .any(|(_, kind)| kind.is_qualifier() || kind == NodeKind::Impl)
+        {
+            return None;
         }
-        let Some(id) = module_item(decls, id) else {
-            continue;
-        };
-        if wanted_kind {
-            return Some(id);
+        let segs: Vec<&str> = callee.split("::").collect();
+        let middle = &segs[segs.len().saturating_sub(past)..segs.len().saturating_sub(1)];
+        for &seg in middle {
+            let name = seg.split('<').next().unwrap_or(seg);
+            if name.is_empty() {
+                continue;
+            }
+            let outer = owner_key(qualifier)?;
+            if declares_twin_qualifiers(decls, file, outer) {
+                return None;
+            }
+            let (id, _) = decls.call_decls(file, name).find(|&(id, kind)| {
+                kind.is_qualifier() && decls.owner(id).and_then(owner_key) == Some(outer)
+            })?;
+            qualifier = name;
+            nested = Some(id);
         }
-        item_is_type = true;
     }
+    let item_is_type = match nested {
+        Some(id) => is_type(decls.kind(id)),
+        None => {
+            let mut item_is_type = false;
+            for (id, kind) in decls.call_decls(file, &item) {
+                let (wanted_kind, type_kind) = (wanted(kind), is_type(kind));
+                if !(wanted_kind || type_kind) {
+                    continue;
+                }
+                let Some(id) = module_item(decls, id) else {
+                    continue;
+                };
+                if wanted_kind {
+                    return Some(id);
+                }
+                item_is_type = true;
+            }
+            item_is_type
+        }
+    };
     let bare = member.split('<').next().unwrap_or(member);
     // The candidates with their `impl` overloads: a body-local
     // `impl Foo { fn new }` before the module-level one makes the module-level
@@ -1826,24 +1923,28 @@ pub fn module_tree_member<F: ModuleTreeFacts, D: ResolveFacts>(
     let pick = candidates
         .iter()
         .find_map(|&id| past_body_local(decls, id, usable))?;
-    if !item_is_type {
+    if !item_is_type && past == 0 {
         return Some(pick);
     }
-    let item_key = owner_key(&item)?;
+    let item_key = owner_key(qualifier)?;
+    if declares_twin_qualifiers(decls, file, item_key) {
+        return None;
+    }
     let owned_by_item =
         |id: u32| usable(id) && decls.owner(id).and_then(owner_key) == Some(item_key);
-    if let Some(id) = candidates
+    let owned = candidates
         .iter()
-        .find_map(|&id| past_body_local(decls, id, owned_by_item))
-    {
-        return Some(id);
+        .find_map(|&id| past_body_local(decls, id, owned_by_item));
+    // An inline `mod` (or a `union`'s `impl`) holds its members itself.
+    if owned.is_some() || !item_is_type {
+        return owned;
     }
     prefer_owned(
         decls,
         file,
         pick,
         bare,
-        Some(item.as_str()),
+        Some(qualifier),
         &[],
         target,
         PickScope {
@@ -4261,7 +4362,7 @@ mod tests {
 
     fn member(tree: &Tree, decls: &Fake, caller: &str, callee: &str) -> Option<u32> {
         let (_, last) = callee.rsplit_once("::").expect("a path");
-        module_tree_member(tree, decls, caller, callee, last, CALLABLE)
+        module_tree_member(tree, decls, caller, &[], callee, last, CALLABLE)
     }
 
     /// R14: a head no crate table row names binds nothing, and neither do

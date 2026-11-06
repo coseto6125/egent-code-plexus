@@ -175,8 +175,9 @@ fn test_qualified_function_reference_python_unresolvable_qualifier_returns_no_ed
     assert_eq!(function_refs(&g, "run"), none());
 }
 
+/// Stands for: `self.f` names the enclosing class's `f`, never the module's `mod.f`.
 #[test]
-fn test_qualified_function_reference_python_self_qualifier_returns_no_edge() {
+fn test_qualified_function_reference_python_self_qualifier_binds_own_method() {
     let g = py(&[
         ("mod.py", "def f(x):\n    return x\n"),
         (
@@ -184,7 +185,7 @@ fn test_qualified_function_reference_python_self_qualifier_returns_no_edge() {
             "import mod\n\nclass C:\n    def f(self, x):\n        return x\n\n    def run(self, items):\n        return map(self.f, items)\n",
         ),
     ]);
-    assert_eq!(function_refs(&g, "run"), none());
+    assert_one_cross_file(&function_refs(&g, "run"), "app.py", "f");
 }
 
 // ---- TypeScript: `ns.f` after `import * as ns`, `Util.f` ----
@@ -289,8 +290,10 @@ fn test_qualified_function_reference_typescript_unresolvable_qualifier_returns_n
     assert_eq!(function_refs(&g, "run"), none());
 }
 
+/// Stands for: `this.f` names the class's own `f`; the chain `ns.sub.f` binds nothing.
 #[test]
-fn test_qualified_function_reference_typescript_this_and_chain_qualifier_return_no_edge() {
+fn test_qualified_function_reference_typescript_this_qualifier_binds_own_method_and_chain_binds_nothing(
+) {
     let g = ts(&[
         TS_LIB,
         (
@@ -298,7 +301,7 @@ fn test_qualified_function_reference_typescript_this_and_chain_qualifier_return_
             "import * as ns from './lib';\nexport class C {\n  f(x: number): number {\n    return x;\n  }\n  run(items: number[]): number[] {\n    return items.map(this.f).map(ns.sub.f);\n  }\n}\n",
         ),
     ]);
-    assert_eq!(function_refs(&g, "run"), none());
+    assert_one_cross_file(&function_refs(&g, "run"), "app.ts", "f");
 }
 
 // ---- JavaScript: `ns.f` after `import * as ns`, `Util.f` ----

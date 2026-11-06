@@ -105,6 +105,19 @@ call_user_func_literal ruby pre-existing gap
 call_user_func_literal rust pre-existing gap
 call_user_func_literal swift pre-existing gap
 call_user_func_literal typescript pre-existing gap
+callable_reference c only PHP names a callable by a string or an [object, 'method'] array
+callable_reference cpp only PHP names a callable by a string or an [object, 'method'] array
+callable_reference csharp only PHP names a callable by a string or an [object, 'method'] array
+callable_reference dart only PHP names a callable by a string or an [object, 'method'] array
+callable_reference go only PHP names a callable by a string or an [object, 'method'] array
+callable_reference java only PHP names a callable by a string or an [object, 'method'] array
+callable_reference javascript only PHP names a callable by a string or an [object, 'method'] array
+callable_reference kotlin only PHP names a callable by a string or an [object, 'method'] array
+callable_reference python only PHP names a callable by a string or an [object, 'method'] array
+callable_reference ruby only PHP names a callable by a string or an [object, 'method'] array
+callable_reference rust only PHP names a callable by a string or an [object, 'method'] array
+callable_reference swift only PHP names a callable by a string or an [object, 'method'] array
+callable_reference typescript only PHP names a callable by a string or an [object, 'method'] array
 callmeta csharp pre-existing gap
 callmeta dart pre-existing gap
 callmeta go pre-existing gap
@@ -520,6 +533,19 @@ generic_arity ruby only C# declares two same-name types that differ by generic a
 generic_arity rust only C# declares two same-name types that differ by generic arity
 generic_arity swift only C# declares two same-name types that differ by generic arity
 generic_arity typescript only C# declares two same-name types that differ by generic arity
+generic_receiver c only Go declares a method on a generic receiver type
+generic_receiver cpp only Go declares a method on a generic receiver type
+generic_receiver csharp only Go declares a method on a generic receiver type
+generic_receiver dart only Go declares a method on a generic receiver type
+generic_receiver java only Go declares a method on a generic receiver type
+generic_receiver javascript only Go declares a method on a generic receiver type
+generic_receiver kotlin only Go declares a method on a generic receiver type
+generic_receiver php only Go declares a method on a generic receiver type
+generic_receiver python only Go declares a method on a generic receiver type
+generic_receiver ruby only Go declares a method on a generic receiver type
+generic_receiver rust only Go declares a method on a generic receiver type
+generic_receiver swift only Go declares a method on a generic receiver type
+generic_receiver typescript only Go declares a method on a generic receiver type
 grammar c pre-existing gap
 grammar cpp pre-existing gap
 grammar csharp pre-existing gap
@@ -533,6 +559,18 @@ grammar python pre-existing gap
 grammar ruby pre-existing gap
 grammar rust pre-existing gap
 grammar typescript pre-existing gap
+header_resolution csharp only C and C++ split a declaration into a header the other language reads
+header_resolution dart only C and C++ split a declaration into a header the other language reads
+header_resolution go only C and C++ split a declaration into a header the other language reads
+header_resolution java only C and C++ split a declaration into a header the other language reads
+header_resolution javascript only C and C++ split a declaration into a header the other language reads
+header_resolution kotlin only C and C++ split a declaration into a header the other language reads
+header_resolution php only C and C++ split a declaration into a header the other language reads
+header_resolution python only C and C++ split a declaration into a header the other language reads
+header_resolution ruby only C and C++ split a declaration into a header the other language reads
+header_resolution rust only C and C++ split a declaration into a header the other language reads
+header_resolution swift only C and C++ split a declaration into a header the other language reads
+header_resolution typescript only C and C++ split a declaration into a header the other language reads
 heritage c pre-existing gap
 heritage cpp pre-existing gap
 heritage csharp pre-existing gap
@@ -780,6 +818,19 @@ mixin_trait ruby pre-existing gap
 mixin_trait rust pre-existing gap
 mixin_trait swift pre-existing gap
 mixin_trait typescript pre-existing gap
+mod_rs_paths c only Rust maps a module with children to a mod.rs file
+mod_rs_paths cpp only Rust maps a module with children to a mod.rs file
+mod_rs_paths csharp only Rust maps a module with children to a mod.rs file
+mod_rs_paths dart only Rust maps a module with children to a mod.rs file
+mod_rs_paths go only Rust maps a module with children to a mod.rs file
+mod_rs_paths java only Rust maps a module with children to a mod.rs file
+mod_rs_paths javascript only Rust maps a module with children to a mod.rs file
+mod_rs_paths kotlin only Rust maps a module with children to a mod.rs file
+mod_rs_paths php only Rust maps a module with children to a mod.rs file
+mod_rs_paths python only Rust maps a module with children to a mod.rs file
+mod_rs_paths ruby only Rust maps a module with children to a mod.rs file
+mod_rs_paths swift only Rust maps a module with children to a mod.rs file
+mod_rs_paths typescript only Rust maps a module with children to a mod.rs file
 module_trait c pre-existing gap
 module_trait cpp pre-existing gap
 module_trait csharp pre-existing gap

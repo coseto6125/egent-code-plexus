@@ -18,7 +18,9 @@
 use super::path_literals::{
     build_raw_path_literal, enclosing_symbol_and_owner_pub, extract_ruby_string_value,
 };
-use crate::calls::{attach_to_enclosing, range_width, start_pos, Pos, PosRange};
+use crate::calls::{
+    attach_to_enclosing, range_width, reference_function, start_pos, Pos, PosRange,
+};
 use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
 use ecp_core::graph::NodeKind;
 use rustc_hash::FxHashMap;
@@ -74,6 +76,9 @@ pub fn extract_ruby_calls_and_path_literals(
             "call" => {
                 if let Some(callee) = ruby_callee(n, source, &mut receiver_types) {
                     attach_to_enclosing(start_pos(n), callee, nodes);
+                }
+                if let Some(name) = typed_method_object(n, source, &mut receiver_types) {
+                    reference_function(start_pos(n), &name, nodes);
                 }
             }
             "string" => {
@@ -146,6 +151,37 @@ fn ruby_callee(
                 ReceiverType::Unknown => CallSite::untyped_member(method_name),
             })
         }
+    }
+}
+
+/// `recv.method(:m)` where `recv` is a call the receiver typing types
+/// (`Item.new.method(:m)`, `Item.find(1).method(:m)`): the method `T.m`, as
+/// the call `recv.m` is typed. The name scan reads a `self`, constant or
+/// scoped receiver itself; a local or any other receiver is of no known type
+/// and names nothing.
+fn typed_method_object(
+    call: Node<'_>,
+    source: &[u8],
+    receiver_types: &mut ReceiverTypes<'_>,
+) -> Option<String> {
+    if call.child_by_field_name("method")?.utf8_text(source).ok()? != "method" {
+        return None;
+    }
+    let receiver = call
+        .child_by_field_name("receiver")
+        .filter(|receiver| receiver.kind() == "call")?;
+    let symbol = call.child_by_field_name("arguments")?.named_child(0)?;
+    if symbol.kind() != "simple_symbol" {
+        return None;
+    }
+    let name = symbol
+        .utf8_text(source)
+        .ok()?
+        .strip_prefix(':')
+        .filter(|name| !name.is_empty())?;
+    match receiver_types.resolve(receiver) {
+        ReceiverType::Typed(ty) => Some(format!("{ty}.{name}")),
+        ReceiverType::TypeRooted | ReceiverType::Unknown => None,
     }
 }
 

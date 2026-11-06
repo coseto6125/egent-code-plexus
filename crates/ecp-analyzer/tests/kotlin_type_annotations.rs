@@ -76,3 +76,33 @@ fn test_generic_return_annotation_binds_the_element_type() {
     );
     assert_eq!(annotated(&g, "all"), [pair("src/app.kt", "Tok")]);
 }
+
+/// Contract: a class property (`val` / `var`, nullable or not) and a
+/// constructor `val` property typed with a project class reach it, like a
+/// parameter does. A builtin, a type parameter, a plain constructor
+/// parameter and an untyped property bind nothing.
+#[test]
+fn test_property_annotation_binds_project_type() {
+    let g = graph(
+        &KotlinProvider::new().unwrap(),
+        &[(
+            "src/App.kt",
+            "class St\n\
+             class C<T>(val st_ctor: St, val n: Int, val tp: T, plain_param: St) {\n    val st_field: St = St()\n    var st_var: St? = null\n    val plain: Int = 1\n    val untyped = 1\n}\n",
+        )],
+    );
+    let st = vec![pair("src/App.kt", "St")];
+    assert_eq!(annotated(&g, "st_ctor"), st, "constructor val");
+    assert_eq!(annotated(&g, "st_field"), st, "val property");
+    assert_eq!(annotated(&g, "st_var"), st, "nullable var property");
+    let none = Vec::<(String, String)>::new();
+    assert_eq!(annotated(&g, "n"), none, "builtin constructor val");
+    assert_eq!(annotated(&g, "tp"), none, "type parameter");
+    assert_eq!(annotated(&g, "plain"), none, "builtin property");
+    assert_eq!(annotated(&g, "untyped"), none, "no annotation");
+    assert_eq!(
+        annotated(&g, "plain_param"),
+        none,
+        "plain parameter is no property"
+    );
+}

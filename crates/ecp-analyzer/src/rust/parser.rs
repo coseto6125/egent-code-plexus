@@ -88,6 +88,7 @@ pub enum RustRole {
     Export,
     Heritage,
     TypeAnnotation,
+    TupleFields,
     Decorator,
     AxumHandler,
     ActixMethod,
@@ -251,6 +252,7 @@ impl ParseSpec for RustSpec {
             "export" => RustRole::Export,
             "heritage" => RustRole::Heritage,
             "type" => RustRole::TypeAnnotation,
+            "tuple_fields" => RustRole::TupleFields,
             "decorator" => RustRole::Decorator,
             "axum.route.handler" => RustRole::AxumHandler,
             "actix.route.method" => RustRole::ActixMethod,
@@ -293,6 +295,7 @@ impl ParseSpec for RustSpec {
                     m.type_annotation = Some(t_str.to_string());
                 }
             }
+            RustRole::TupleFields => push_tuple_fields(node, source, &mut cx.nodes),
             RustRole::Decorator => {
                 if let Ok(d_str) = std::str::from_utf8(&source[node.start_byte()..node.end_byte()])
                 {
@@ -667,6 +670,42 @@ impl UseWalk<'_> {
             rebase_on_file_module(path.to_string(), self.mods)
         } else {
             join_path(prefix, path)
+        }
+    }
+}
+
+/// A tuple field has no name token for the query to capture, so it becomes
+/// a `Property` named by its position (`self.0`), owned by the struct or
+/// enum, with its type text for the `type_annotation` edge.
+fn push_tuple_fields(list: Node<'_>, source: &[u8], nodes: &mut Vec<RawNode>) {
+    let owner = enclosing_struct_type(list, source);
+    let mut cursor = list.walk();
+    if !cursor.goto_first_child() {
+        return;
+    }
+    let mut exported = false;
+    let mut position = 0usize;
+    loop {
+        let field = cursor.node();
+        if field.kind() == "visibility_modifier" {
+            exported = true;
+        } else if cursor.field_name() == Some("type") {
+            nodes.push(RawNode {
+                is_exported: exported,
+                type_annotation: Some(node_text(field, source).to_string()),
+                owner_class: owner.clone(),
+                ..node::decl(
+                    position.to_string(),
+                    NodeKind::Property,
+                    node_span(&field),
+                    &source[field.start_byte()..field.end_byte()],
+                )
+            });
+            position += 1;
+            exported = false;
+        }
+        if !cursor.goto_next_sibling() {
+            break;
         }
     }
 }

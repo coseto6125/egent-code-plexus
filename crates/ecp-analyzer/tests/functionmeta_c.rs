@@ -178,3 +178,77 @@ fn c_attribute_decorator_captured() {
     // GCC attribute may appear; non-empty is sufficient for this test.
     let _ = dec_names; // attribute presence is grammar-version dependent
 }
+
+/// The flat `params` of `name`, each `StrRef` resolved.
+fn params_of(g: &ZeroCopyGraph, name: &str) -> Vec<String> {
+    let pool = g.string_pool.as_slice();
+    meta(g, name)
+        .params
+        .iter()
+        .map(|p| p.resolve(pool).to_string())
+        .collect()
+}
+
+/// Stands for: a K&R definition has its identifier list's parameters, typed
+/// by the declarations before the body, so it counts what its prototype
+/// counts.
+#[test]
+fn test_extract_params_kr_definition_reads_names_and_declared_types() {
+    let g = analyze("int kr(a, b) int a; char *b; { return a; }\n");
+    let params = params_of(&g, "kr");
+    assert_eq!(
+        params.len(),
+        4,
+        "two parameters, a name and a type each: {params:?}"
+    );
+    assert_eq!(params[..3].to_vec(), ["a", "int", "b"]);
+    assert!(
+        !params[3].trim().is_empty(),
+        "`char *b` declares a type: {params:?}"
+    );
+}
+
+/// Stands for: a K&R parameter no declaration types (implicit `int`) keeps
+/// its place with an empty, unknown type.
+#[test]
+fn test_extract_params_kr_parameter_without_declaration_has_empty_type() {
+    let g = analyze("int kr2(a, b) int a; { return a; }\n");
+    assert_eq!(params_of(&g, "kr2"), ["a", "int", "b", ""]);
+}
+
+/// Stands for: a parameter's type keeps its declarator's shape (pointer,
+/// function pointer) without any name, and a K&R declaration too. An array
+/// the name declares reads as the pointer the language adjusts it to.
+#[test]
+fn test_extract_params_declarator_shape_is_part_of_type() {
+    let g = analyze(
+        "void f(char *s, int a[], int (*cb)(int), const int n);\nint kr(p) char **p; { return 0; }\n",
+    );
+    assert_eq!(
+        params_of(&g, "f"),
+        [
+            "s",
+            "char *",
+            "a",
+            "int *",
+            "cb",
+            "int (*)(int)",
+            "n",
+            "int"
+        ]
+    );
+    assert_eq!(params_of(&g, "kr"), ["p", "char **"]);
+}
+
+/// Stands for: an unnamed `void *` is one parameter, not the `(void)` list.
+#[test]
+fn test_extract_params_unnamed_void_pointer_counts_one_parameter() {
+    let g = analyze("void release(void *);\nvoid none(void);\n");
+    let release = params_of(&g, "release");
+    assert_eq!(
+        release.len(),
+        2,
+        "one parameter, a name and a type: {release:?}"
+    );
+    assert!(params_of(&g, "none").is_empty());
+}

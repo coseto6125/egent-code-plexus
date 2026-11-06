@@ -17,8 +17,8 @@ use super::path_literals::{
     build_raw_path_literal, enclosing_symbol_and_owner_pub, strip_java_string_value,
 };
 use crate::calls::{
-    attach_to_enclosing, construction_call, node_range, range_width, span_holds, span_width,
-    start_pos, Pos, PosRange,
+    attach_to_enclosing, construction_call, node_range, range_width, reference_function,
+    span_holds, span_width, start_pos, Pos, PosRange,
 };
 use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
 use ecp_core::graph::NodeKind;
@@ -300,6 +300,11 @@ pub fn extract_java_calls_and_path_literals(
                     attach_to_enclosing(start_pos(n), callee, nodes);
                 }
             }
+            "method_reference" => {
+                if let Some(name) = bound_method_reference(n, source, &local_types) {
+                    reference_function(start_pos(n), &name, nodes);
+                }
+            }
             "string_literal" | "text_block" => {
                 if let Some(rpl) = build_raw_path_literal(n, source) {
                     path_literals.push(rpl);
@@ -326,6 +331,36 @@ pub fn extract_java_calls_and_path_literals(
         }
     }
     (path_literals, sql_refs)
+}
+
+/// `c::m` and `c::<A>m` where `c` is a local or parameter of a declared type
+/// `T`: the method `T.m`, typed as a call `c.m()` is. The name scan drops
+/// `c::m`, as `c` is a local; a receiver of no known type names nothing.
+fn bound_method_reference(
+    reference: Node<'_>,
+    source: &[u8],
+    locals: &LocalTypes,
+) -> Option<String> {
+    let last = reference.named_child_count().checked_sub(1)?;
+    let known_shape = match last {
+        1 => true,
+        2 => reference
+            .named_child(1)
+            .is_some_and(|between| between.kind() == "type_arguments"),
+        _ => false,
+    };
+    if !known_shape {
+        return None;
+    }
+    let (receiver, member) = (
+        reference.named_child(0)?,
+        reference.named_child(last as u32)?,
+    );
+    if receiver.kind() != "identifier" || member.kind() != "identifier" {
+        return None;
+    }
+    let ty = locals.lookup(start_pos(reference), receiver.utf8_text(source).ok()?)?;
+    Some(format!("{ty}.{}", member.utf8_text(source).ok()?))
 }
 
 /// Name of the innermost enclosing Class/Interface node at `pos`.

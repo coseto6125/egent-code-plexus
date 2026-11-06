@@ -15,7 +15,11 @@
 //!    than just `"Bark"`, feeding the resolver's Tier 2.5 qualifier lookup.
 
 use super::path_literals::{build_raw_path_literal, strip_go_string_value};
-use crate::calls::{attach_to_enclosing, node_range, range_width, start_pos, Pos, PosRange};
+use crate::calls::{
+    attach_to_enclosing, is_call_callee, is_same_kind_field, node_range, range_width,
+    reference_function, start_pos, Pos, PosRange,
+};
+use crate::function_meta::go::go_type_params;
 use ecp_core::analyzer::types::{CallSite, RawImport, RawNode, RawPathLiteral, RawSqlRef};
 use std::collections::HashMap;
 use tree_sitter::Node;
@@ -173,6 +177,7 @@ pub fn collect_local_types(root: Node<'_>, source: &[u8], recv_map: &ReceiverMap
 }
 
 fn collect_function_scope(function: Node<'_>, source: &[u8], scopes: &mut Vec<Scope>) {
+    let first_scope = scopes.len();
     let mut bindings = HashMap::new();
     let mut values = HashMap::new();
     let scope_start = start_pos(function);
@@ -197,6 +202,12 @@ fn collect_function_scope(function: Node<'_>, source: &[u8], scopes: &mut Vec<Sc
             bindings,
             values,
         });
+    }
+    let type_params = go_type_params(&function, source);
+    if !type_params.is_empty() {
+        for scope in &mut scopes[first_scope..] {
+            scope.bindings.retain(|_, ty| !type_params.contains(ty));
+        }
     }
 }
 
@@ -423,7 +434,13 @@ fn collect_short_var(node: &Node<'_>, source: &[u8], out: &mut HashMap<String, S
         return;
     };
     // right is an `expression_list`; grab first child.
-    let first_rhs = right.named_child(0).unwrap_or(right);
+    let mut first_rhs = right.named_child(0).unwrap_or(right);
+    // `&T{...}` wraps the literal in a unary_expression.
+    if first_rhs.kind() == "unary_expression" {
+        first_rhs = first_rhs
+            .child_by_field_name("operand")
+            .unwrap_or(first_rhs);
+    }
     // composite_literal: type_name { ... }
     if first_rhs.kind() != "composite_literal" {
         return;
@@ -469,12 +486,17 @@ pub(super) fn extract_go_calls_and_path_literals_with_imports(
 ) -> (Vec<RawPathLiteral>, Vec<RawSqlRef>) {
     let mut path_literals: Vec<RawPathLiteral> = Vec::new();
     let mut sql_refs: Vec<RawSqlRef> = Vec::new();
-    let mut stack: Vec<Node<'_>> = vec![root];
-    while let Some(n) = stack.pop() {
+    let mut stack: Vec<(Node<'_>, Option<Node<'_>>)> = vec![(root, None)];
+    while let Some((n, parent)) = stack.pop() {
         match n.kind() {
             "call_expression" => {
                 if let Some(callee) = go_callee_name(n, source, local_types, imports) {
                     attach_to_enclosing(start_pos(n), callee, nodes);
+                }
+            }
+            "selector_expression" => {
+                if let Some(name) = method_value(n, parent, source, local_types) {
+                    reference_function(start_pos(n), &name, nodes);
                 }
             }
             // `Foo{..}`, `&Foo{..}` and `pkg.Foo{..}` construct a named type; a
@@ -510,10 +532,36 @@ pub(super) fn extract_go_calls_and_path_literals_with_imports(
         }
         let mut c = n.walk();
         for child in n.children(&mut c) {
-            stack.push(child);
+            stack.push((child, Some(n)));
         }
     }
     (path_literals, sql_refs)
+}
+
+/// `t.M` in value position (`apply(t.M)`, `f := t.M`) where `t` is a local
+/// or parameter of a declared type `T`: the method value `T.M`, typed as the
+/// call `t.M()` is. The name scan drops `t.M`, as `t` is a local. A callee,
+/// the operand of a longer selector and a receiver of no known type name
+/// nothing; a field `t.F` is no callable, so Pass 2 binds no edge to it.
+fn method_value(
+    selector: Node<'_>,
+    parent: Option<Node<'_>>,
+    source: &[u8],
+    locals: &LocalTypes,
+) -> Option<String> {
+    let operand = selector
+        .child_by_field_name("operand")
+        .filter(|operand| operand.kind() == "identifier")?;
+    let field = selector
+        .child_by_field_name("field")
+        .filter(|field| field.kind() == "field_identifier")?;
+    if is_call_callee(selector, parent)
+        || parent.is_some_and(|parent| is_same_kind_field(selector, parent, "operand"))
+    {
+        return None;
+    }
+    let ty = locals.lookup(start_pos(selector), operand.utf8_text(source).ok()?)?;
+    Some(format!("{ty}.{}", field.utf8_text(source).ok()?))
 }
 
 /// Derive the callee name for a `call_expression` node.
@@ -596,20 +644,24 @@ fn go_callee_name(
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-/// Extract the bare type identifier from a type node, stripping pointer `*`.
-/// Returns `None` for generic / qualified types (they can't be matched against
-/// a single class name in the resolver anyway).
+/// Extract the bare type identifier from a type node, stripping pointer `*`
+/// and type arguments (`Wrap[int]` → `Wrap`). Returns `None` for qualified
+/// types (they can't be matched against a single class name in the resolver).
 fn bare_type_name(ty_node: Node<'_>, source: &[u8]) -> Option<String> {
     match ty_node.kind() {
         "type_identifier" => node_text(ty_node, source),
+        "generic_type" => {
+            let base = ty_node.child_by_field_name("type")?;
+            (base.kind() == "type_identifier")
+                .then(|| node_text(base, source))
+                .flatten()
+        }
         "pointer_type" => {
             // pointer_type has one named child: the underlying type.
             let inner = ty_node.named_child(0)?;
-            if inner.kind() == "type_identifier" {
-                node_text(inner, source)
-            } else {
-                None
-            }
+            matches!(inner.kind(), "type_identifier" | "generic_type")
+                .then(|| bare_type_name(inner, source))
+                .flatten()
         }
         _ => None,
     }

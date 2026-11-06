@@ -29,6 +29,7 @@
 ;; One Property node per property_element so `$x, $y;` emits two nodes.
 (property_declaration
   (visibility_modifier)? @export
+  type: (_)? @type.property
   (property_element
     name: (variable_name (name) @name.property))) @property
 
@@ -36,6 +37,7 @@
 ;; `visibility` field is always present; the `$` prefix is anonymous.
 (property_promotion_parameter
   visibility: (visibility_modifier) @export
+  type: (_)? @type.property
   name: (variable_name (name) @name.property)) @property
 
 ;; Namespaces

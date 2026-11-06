@@ -103,13 +103,7 @@ fn extract_one(
     // on the lines immediately before this function. We scan source lines.
     let decorators = collect_go_directives(lines, fn_node.start_position().row);
 
-    let mut type_params = scoped_type_params(
-        fn_node,
-        source,
-        &["type_parameter_list"],
-        go_declared_type_params,
-    );
-    type_params.extend(receiver_type_params(fn_node, source));
+    let type_params = go_type_params(fn_node, source);
 
     Some(RawFunctionMeta {
         span: ts_span(fn_node),
@@ -219,6 +213,21 @@ fn extract_params(fn_node: &Node<'_>, source: &[u8]) -> Vec<String> {
         }
     }
     result
+}
+
+/// The type variables `fn_node` can name: its own `[T any]` list, those of
+/// each enclosing declaration, and the `[K, V]` of a generic receiver. A type
+/// that a variable carries by one of these names is a placeholder, not the
+/// project type of that name.
+pub fn go_type_params(fn_node: &Node<'_>, source: &[u8]) -> Vec<String> {
+    let mut type_params = scoped_type_params(
+        fn_node,
+        source,
+        &["type_parameter_list"],
+        go_declared_type_params,
+    );
+    type_params.extend(receiver_type_params(fn_node, source));
+    type_params
 }
 
 /// The variables a method receiver declares: `func (b *Box[K, V]) Put(..)`

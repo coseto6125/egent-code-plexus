@@ -1,3 +1,4 @@
+use ecp_core::analyzer::c_family::{self, CCallable};
 use ecp_core::analyzer::csharp_access;
 use ecp_core::analyzer::csharp_extension::ExtensionDecl;
 use ecp_core::analyzer::import_binding::{
@@ -344,6 +345,11 @@ pub struct SymbolTable {
     /// rule may refuse: static or private ones
     /// ([`ecp_core::analyzer::csharp_access`]). Sparse.
     csharp_method_flags: FxHashMap<u32, u16>,
+
+    /// C / C++ function and method id → what its `FunctionMeta` tells the
+    /// family rule (see [`Self::note_c_callable`]). Sparse: empty outside C
+    /// and C++.
+    c_callables: FxHashMap<u32, CCallable>,
 }
 
 impl SymbolTable {
@@ -691,6 +697,46 @@ impl SymbolTable {
     /// for `node_id`; 0 (public, instance) for any other id.
     pub(crate) fn csharp_method_flags(&self, node_id: u32) -> u16 {
         self.csharp_method_flags.get(&node_id).copied().unwrap_or(0)
+    }
+
+    /// Record the `FunctionMeta::flags` and the flat `params` list of the
+    /// C or C++ function or method `node_id`: whether it is a header
+    /// prototype, and which prototype its definition settles
+    /// ([`c_family`]). Any other node is ignored.
+    pub fn note_c_callable(&mut self, node_id: u32, flags: u16, params: &[String]) {
+        let i = node_id as usize;
+        if matches!(
+            self.node_kinds.get(i),
+            Some(NodeKind::Function | NodeKind::Method)
+        ) && self
+            .node_file_meta
+            .get(i)
+            .is_some_and(|meta| c_family::is_c_family(meta.language))
+        {
+            self.c_callables.insert(
+                node_id,
+                CCallable::new(flags, params.iter().map(String::as_str)),
+            );
+        }
+    }
+
+    /// What [`Self::note_c_callable`] recorded for `node_id`.
+    pub(crate) fn c_callable(&self, node_id: u32) -> Option<CCallable> {
+        self.c_callables.get(&node_id).copied()
+    }
+
+    /// The Tier 3 field of a `caller` in `caller_file` over `candidates`
+    /// under the C / C++ rules ([`c_family::c_family_field`]); `None` when
+    /// it is `candidates`.
+    pub(crate) fn c_family_field<I: Iterator<Item = (u32, FileMeta)>>(
+        &self,
+        caller: FileMeta,
+        caller_file: &str,
+        candidates: impl Fn() -> I,
+    ) -> Option<Vec<(u32, FileMeta)>> {
+        c_family::c_family_field(self, caller, caller_file, candidates, |id| {
+            self.c_callable(id)
+        })
     }
 
     /// The C# extension declarations named `name`, as

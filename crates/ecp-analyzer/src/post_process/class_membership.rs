@@ -10,13 +10,13 @@
 use crate::resolution::index::SymbolTable;
 use ecp_core::analyzer::lexical::{skipped_nodes, SharedPaths};
 use ecp_core::analyzer::membership::{
-    self, MemberLookup, MemberRow, CLASS_MEMBERSHIP_IMPL_REASON, CLASS_MEMBERSHIP_REASON,
+    self, MemberLookup, MemberRow, CLASS_MEMBERSHIP_IMPL_REASON, CLASS_MEMBERSHIP_OWNER_REASON,
+    CLASS_MEMBERSHIP_REASON,
 };
 use ecp_core::analyzer::types::{LocalGraph, RawNode};
 use ecp_core::contracts::raw_records::{FileOrd, RawIdx, RawIndexMap};
 use ecp_core::graph::Edge;
 use ecp_core::pool::StringPool;
-use ecp_core::registry::os_path_to_slash;
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -45,6 +45,7 @@ pub fn emit_edges(
 ) -> usize {
     let reason = string_pool.add(CLASS_MEMBERSHIP_REASON);
     let reason_impl = string_pool.add(CLASS_MEMBERSHIP_IMPL_REASON);
+    let reason_owner = string_pool.add(CLASS_MEMBERSHIP_OWNER_REASON);
 
     // Per-file work is independent: writes go to a thread-local edge buffer
     // and only `symbol_table` (read-only) is shared. Same parallel pattern as
@@ -61,9 +62,6 @@ pub fn emit_edges(
                 return Vec::new();
             }
             let raws = &local_graph.nodes;
-            let path_str_cow = os_path_to_slash(&local_graph.file_path);
-            let path_str: &str = &path_str_cow;
-
             let file = FileOrd(file_ord as u32);
             let mut local_edges: Vec<Edge> = Vec::new();
             membership::class_membership(
@@ -71,7 +69,6 @@ pub fn emit_edges(
                 member_row,
                 || IndexLookup {
                     symbol_table,
-                    path: path_str,
                     raw_map,
                     file,
                     merged: raw_map.has_merged(file),
@@ -84,6 +81,7 @@ pub fn emit_edges(
                         confidence: 1.0,
                         reason: match m.reason {
                             CLASS_MEMBERSHIP_REASON => reason,
+                            CLASS_MEMBERSHIP_OWNER_REASON => reason_owner,
                             _ => reason_impl,
                         },
                     })
@@ -113,17 +111,12 @@ fn member_row(n: &RawNode) -> MemberRow<'_> {
 /// The index's answers to membership's lookups over one file's path.
 struct IndexLookup<'a> {
     symbol_table: &'a SymbolTable,
-    path: &'a str,
     raw_map: &'a RawIndexMap,
     file: FileOrd,
     merged: bool,
 }
 
 impl MemberLookup for IndexLookup<'_> {
-    fn lookup_in_file(&self, name: &str) -> Option<u32> {
-        self.symbol_table.lookup_in_file(self.path, name)
-    }
-
     fn node(&self, raw: usize) -> Option<u32> {
         self.raw_map.node(self.file, RawIdx(raw as u32))
     }
@@ -144,6 +137,7 @@ mod tests {
     use ecp_core::analyzer::lexical::{file_uids, raw_decl};
     use ecp_core::analyzer::types::LocalGraph;
     use ecp_core::graph::{NodeKind, RelType};
+    use ecp_core::registry::os_path_to_slash;
     use std::path::PathBuf;
 
     fn raw(name: &str, kind: NodeKind, span: (u32, u32, u32, u32)) -> RawNode {
@@ -387,8 +381,7 @@ mod tests {
     #[test]
     fn java_style_same_named_constructor_gets_has_method_without_self_loop() {
         // Java emits `class Foo { public Foo() {} }` as Class "Foo" containing
-        // Method "Foo". lookup_in_file returns the class for both names; the
-        // member binds its own row.
+        // Method "Foo". The method binds the class row, never its own row.
         let nodes = vec![
             raw("Foo", NodeKind::Class, (1, 0, 10, 0)),
             raw("Foo", NodeKind::Method, (2, 4, 4, 4)),

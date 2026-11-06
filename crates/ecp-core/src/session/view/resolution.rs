@@ -10,6 +10,7 @@ use super::{
     GAP_CS_ACCESS_DIRTY_TARGET, GAP_CS_EXTENSION_DIRTY_DECLARATION, GAP_CS_PARTIAL_BARE_CALL,
     TYPE_ANNOTATION_REASON,
 };
+use crate::analyzer::c_family::{c_family_field, is_c_family, CCallable};
 use crate::analyzer::csharp_access::{self, CallAccess};
 use crate::analyzer::csharp_extension::{self, ReceiverSite};
 use crate::analyzer::decorates::{decorates_edges, DECORATES_REASON};
@@ -2125,6 +2126,36 @@ impl<'a> OverlayFacts<'a> {
         id < self.base_len() || self.dirty_flags.contains_key(&id)
     }
 
+    /// The index's `SymbolTable::c_callable`: the flags and the parameter
+    /// list of a C or C++ function or method, from the archived
+    /// `FunctionMeta` of a base node and from the fresh parse of a dirty
+    /// one. `None` when no meta was paired with it.
+    fn c_callable(&self, id: u32) -> Option<CCallable> {
+        // The kind test first: it is cheap, and most candidates fail it.
+        if !matches!(self.kind_of(id), NodeKind::Function | NodeKind::Method)
+            || !is_c_family(self.meta_of(id).language)
+        {
+            return None;
+        }
+        match id.checked_sub(self.base_len()) {
+            Some(offset) => {
+                let node = &self.nodes[offset as usize];
+                let &(file, start) = self.rust.dirty.get(&*node.rel_path)?;
+                let symbol = file.symbols.get((id - start) as usize)?;
+                symbol
+                    .flags
+                    .map(|flags| CCallable::new(flags, symbol.params.iter().map(String::as_str)))
+            }
+            None => base_function_meta(self.graph, id).map(|meta| {
+                let pool = &self.graph.string_pool;
+                CCallable::new(
+                    meta.flags.to_native(),
+                    meta.params.iter().map(|text| text.resolve(pool)),
+                )
+            }),
+        }
+    }
+
     /// The namespaces the C# file `file` declares (`.`-joined), the index's
     /// `SymbolTable::csharp_namespaces`: a dirty file's from its fresh parse,
     /// a clean one's from its archived Namespace nodes.
@@ -2629,6 +2660,8 @@ fn resolve_overlay_name_ref(
             let names = match target {
                 ResolveTarget::Callable => callables,
                 ResolveTarget::Value => values,
+                // A Python value read that may name a type alias.
+                ResolveTarget::Type => types,
                 _ => return Vec::new(),
             };
             let tiers = OverlayTiers::new(
@@ -2883,14 +2916,22 @@ impl<'v, 'a> NameTierFacts for OverlayTiers<'v, 'a, '_> {
 
     /// The overlay's module trees ([`RustModules`]); none in the `Imports`
     /// pass ([`OverlayFacts::tree_free`]).
-    fn module_tree_member(&self, callee: &str, member: &str, target: ResolveTarget) -> Option<u32> {
+    fn module_tree_member(&self, site: &ladder::QualifiedSite<'_>) -> Option<u32> {
         let facts = self.members.facts;
         if facts.tree_free.get() {
             return None;
         }
         let importer = self.source();
         facts.with_rust_tree(self.file_ord, |tree| {
-            ladder::module_tree_member(tree, facts, importer, callee, member, target)
+            ladder::module_tree_member(
+                tree,
+                facts,
+                importer,
+                site.imports,
+                site.callee,
+                site.member,
+                site.target,
+            )
         })
     }
 
@@ -2904,7 +2945,7 @@ impl<'v, 'a> NameTierFacts for OverlayTiers<'v, 'a, '_> {
             site,
             self.qualifiers.qualifiers,
             heritage,
-            || self.module_tree_member(site.callee, site.member, site.target),
+            || self.module_tree_member(&site),
         );
         (hit, None)
     }
@@ -2983,7 +3024,14 @@ impl<'v, 'a> NameTierFacts for OverlayTiers<'v, 'a, '_> {
                 .chain(overlay_candidates.iter().copied())
                 .filter(admits)
         };
-        let hit = name_tiers::global_tier(self, name, imports, target, call, candidates);
+        let hit = match c_family_field(facts, self.caller, self.source(), candidates, |id| {
+            facts.c_callable(id)
+        }) {
+            Some(field) => {
+                name_tiers::global_tier(self, name, imports, target, call, || field.iter().copied())
+            }
+            None => name_tiers::global_tier(self, name, imports, target, call, candidates),
+        };
         debug_assert!(hit
             .edge()
             .is_none_or(|(target, _)| !self.replaced.contains_key(&target)));
@@ -6017,7 +6065,7 @@ pub(super) fn resolve_edges(
                 params: &sym.params,
                 type_params: &sym.type_params,
             };
-            for (target, confidence) in type_annotation_targets(decl, |name| {
+            for (target, confidence, reason) in type_annotation_targets(decl, |name| {
                 *annotation_types.entry(name).or_insert_with(|| {
                     resolve_type(
                         graph,
@@ -6039,7 +6087,7 @@ pub(super) fn resolve_edges(
                     target,
                     rel_type: RelType::Accesses,
                     confidence,
-                    reason: TYPE_ANNOTATION_REASON,
+                    reason: reason.reason(),
                 });
             }
 

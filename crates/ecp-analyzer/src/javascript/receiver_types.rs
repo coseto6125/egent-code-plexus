@@ -12,10 +12,15 @@
 //! destructured `execute()` emits the export it holds, `@import<N>.run`.
 
 use super::path_literals::{build_raw_path_literal, strip_js_string_value, LiteralContext};
-use crate::calls::{attach_to_enclosing_span, new_expression_call, start_pos, CallSiteIndex};
+use crate::calls::{
+    attach_to_enclosing_span, new_expression_call, reference_function_span, start_pos,
+    unparenthesized, CallSiteIndex,
+};
 use crate::dynamic_imports::DynamicImports;
 use crate::framework_helpers::{enclosing_class, node_span, Span};
+use crate::typescript::receiver_types::bound_method_value;
 use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
+use std::cell::OnceCell;
 use tree_sitter::Node;
 
 /// Walk the JavaScript AST once, attaching callees to enclosing
@@ -39,6 +44,7 @@ pub fn extract_js_calls_and_path_literals(
     let mut path_literals: Vec<RawPathLiteral> = Vec::new();
     let mut sql_refs: Vec<RawSqlRef> = Vec::new();
     let mut constructions: Vec<(Span, String)> = Vec::new();
+    let this_facts = OnceCell::new();
     let mut stack = vec![(root, None, LiteralContext::default())];
     while let Some((n, parent, context)) = stack.pop() {
         match n.kind() {
@@ -47,6 +53,14 @@ pub fn extract_js_calls_and_path_literals(
                     if let Some(site) = attach_to_enclosing_span(node_span(&n), callee, nodes) {
                         call_sites.insert(n.id(), site);
                     }
+                }
+            }
+            // No annotation types a JavaScript local, so only `this.m` names
+            // a method value.
+            "member_expression" => {
+                if let Some(name) = bound_method_value(n, parent, source, None, nodes, &this_facts)
+                {
+                    reference_function_span(node_span(&n), &name, nodes);
                 }
             }
             "new_expression" => {
@@ -101,7 +115,7 @@ fn js_callee_name(
     dynamic: &DynamicImports,
     nodes: &[RawNode],
 ) -> Option<String> {
-    let function = call.child_by_field_name("function")?;
+    let function = unparenthesized(call.child_by_field_name("function")?);
     match function.kind() {
         "identifier" => dynamic.bare_callee(call, function, source),
         "member_expression" => {

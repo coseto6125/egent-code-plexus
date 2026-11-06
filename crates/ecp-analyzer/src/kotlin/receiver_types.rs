@@ -26,7 +26,8 @@ use super::path_literals::{
     build_raw_path_literal, enclosing_symbol_and_owner_pub, strip_kotlin_string_value,
 };
 use crate::calls::{
-    attach_to_enclosing, node_range, range_width, span_holds, span_width, start_pos, Pos, PosRange,
+    attach_to_enclosing, node_range, range_width, reference_function, span_holds, span_width,
+    start_pos, Pos, PosRange,
 };
 use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
 use ecp_core::graph::NodeKind;
@@ -301,7 +302,7 @@ fn kotlin_callee(
 
             let pos = start_pos(call);
             let ty: Option<String> = match receiver.kind() {
-                "this_expression" => enclosing_class_name(nodes, pos),
+                "this_expression" => this_class(receiver, source, nodes, pos),
                 "super_expression" => enclosing_superclass(nodes, pos),
                 "simple_identifier" => {
                     let var =
@@ -382,6 +383,11 @@ pub fn extract_kotlin_calls_and_path_literals(
                     attach_to_enclosing(start_pos(n), callee, nodes);
                 }
             }
+            "callable_reference" | "navigation_expression" => {
+                if let Some(name) = bound_callable_reference(n, source, &local_types, nodes) {
+                    reference_function(start_pos(n), &name, nodes);
+                }
+            }
             "string_literal" | "multiline_string_literal" => {
                 if let Some(rpl) = build_raw_path_literal(n, source) {
                     path_literals.push(rpl);
@@ -418,6 +424,47 @@ pub fn extract_kotlin_calls_and_path_literals(
         }
     }
     (path_literals, sql_refs)
+}
+
+/// The method a bound callable reference names, typed as the call
+/// `c.m()` / `this.m()` is: `c::m` with `c` a local or parameter of a
+/// declared type `T` names `T.m`, and `this::m` names `m` of the enclosing
+/// class. tree-sitter-kotlin parses `this::m` as a `navigation_expression`
+/// whose suffix starts with `::`. A receiver of no known type names nothing;
+/// a type receiver (`Cb::m`) is the name scan's.
+fn bound_callable_reference(
+    reference: Node<'_>,
+    source: &[u8],
+    locals: &LocalTypes,
+    nodes: &[RawNode],
+) -> Option<String> {
+    if reference.named_child_count() != 2 {
+        return None;
+    }
+    let (receiver, member) = (reference.named_child(0)?, reference.named_child(1)?);
+    let pos = start_pos(reference);
+    let (ty, member) = match (reference.kind(), receiver.kind()) {
+        ("callable_reference", "type_identifier") => {
+            let var = receiver.utf8_text(source).ok()?;
+            let ty = locals
+                .binds_local(pos, var)
+                .then(|| locals.lookup(pos, var))??;
+            (ty.to_string(), member)
+        }
+        ("navigation_expression", "this_expression")
+            if member.child(0).is_some_and(|op| op.kind() == "::") =>
+        {
+            let name = member
+                .named_children(&mut member.walk())
+                .find(|n| n.kind() == "simple_identifier")?;
+            (this_class(receiver, source, nodes, pos)?, name)
+        }
+        _ => return None,
+    };
+    if member.kind() != "simple_identifier" {
+        return None;
+    }
+    Some(format!("{ty}.{}", member.utf8_text(source).ok()?))
 }
 
 /// Whether a type enclosing `pos` declares a property `name` as its own
@@ -472,6 +519,20 @@ fn constructed_class(call: Node<'_>, source: &[u8], nodes: &[RawNode]) -> Option
         .iter()
         .any(|n| n.kind == NodeKind::Class && n.name == name)
         .then(|| name.to_string())
+}
+
+/// The class a `this` stands for at `pos`: the innermost one, or for
+/// `this@Outer` the enclosing class labelled `Outer`, and none when no
+/// enclosing class carries the label (`this@forEach` names a lambda).
+fn this_class(this: Node<'_>, source: &[u8], nodes: &[RawNode], pos: Pos) -> Option<String> {
+    let Some(label) = this.named_child(0) else {
+        return enclosing_class_name(nodes, pos);
+    };
+    let label = label.utf8_text(source).ok()?;
+    nodes
+        .iter()
+        .any(|n| n.kind == NodeKind::Class && n.name == label && span_holds(n.span, pos))
+        .then(|| label.to_string())
 }
 
 fn enclosing_class_name(nodes: &[RawNode], pos: Pos) -> Option<String> {

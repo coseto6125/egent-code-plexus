@@ -1589,8 +1589,11 @@ fn test_overlay_rust_external_pub_use_return_type_rejects_project_namesake() {
     );
 }
 
+/// Stands for: a bare path whose head is a child module of the caller
+/// (`a::b::foo()` beside `mod a;`) is `self::a::b::foo()`, so both sides bind
+/// `src/a/b.rs`, never the same-named `other::foo`.
 #[test]
-fn test_overlay_rust_unanchored_nested_module_matches_unresolved_reindex() {
+fn test_overlay_rust_bare_nested_module_path_matches_reindex() {
     parity(
         &RustProvider::new().unwrap(),
         &[
@@ -1600,7 +1603,7 @@ fn test_overlay_rust_unanchored_nested_module_matches_unresolved_reindex() {
             ("src/other.rs", "pub fn foo() {}"),
         ],
         &[("src/lib.rs", "mod a; mod other;\nfn run() { a::b::foo(); }")],
-        &[],
+        &[("src/a/b.rs".into(), "foo".into(), "".into(), 100)],
     );
 }
 
@@ -1958,6 +1961,31 @@ fn test_overlay_rust_unique_qualifier_confidence_matches_reindex() {
     );
 }
 
+// A path segment the tree and the file do not confirm (`missing`) binds
+// nothing on both sides; a spelled inline module (`deep::inner`) still binds.
+#[test]
+fn test_overlay_rust_missing_middle_segment_matches_reindex() {
+    let lib = "pub mod a;\nmod deep { pub mod inner { pub fn g() {} } }\nfn run() {}";
+    for (call, target) in [
+        ("a::missing::top", None),
+        ("crate::a::missing::top", None),
+        ("self::deep::nope::g", None),
+        ("self::deep::inner::g", Some(("src/lib.rs", "g", "inner"))),
+    ] {
+        let dirty = lib.replace("fn run() {}", &format!("fn run() {{ {call}(); }}"));
+        let expected: Vec<Target> = target
+            .into_iter()
+            .map(|(file, name, owner)| (file.into(), name.into(), owner.into(), 85))
+            .collect();
+        parity(
+            &RustProvider::new().unwrap(),
+            &[("src/lib.rs", lib), ("src/a/mod.rs", "pub fn top() {}")],
+            &[("src/lib.rs", &dirty)],
+            &expected,
+        );
+    }
+}
+
 #[test]
 fn test_overlay_rust_mod_rs_relative_heads_match_reindex() {
     for (call, target) in [
@@ -1983,6 +2011,63 @@ fn test_overlay_rust_mod_rs_relative_heads_match_reindex() {
             &expected,
         );
     }
+}
+
+// Stands for: a path segment past the item binds only when it is declared
+// inside the segment before it, out of a dirty caller as in a reindex:
+// `a::m::S::new()` never reaches the `S` beside `m`.
+#[test]
+fn test_overlay_rust_path_segment_not_declared_inside_previous_matches_reindex() {
+    parity(
+        &RustProvider::new().unwrap(),
+        &[
+            ("src/lib.rs", "pub mod a;\nfn run() {}"),
+            (
+                "src/a/mod.rs",
+                "pub struct S;\npub struct Other;\nimpl S { pub fn new() {} }\n\
+                 pub mod m { pub struct T; }",
+            ),
+        ],
+        &[(
+            "src/lib.rs",
+            "pub mod a;\nfn run() { a::m::S::new(); crate::a::m::S::new(); a::S::Other::new(); }",
+        )],
+        &[],
+    );
+}
+
+// Stands for: a path through a module or type its file declares twice
+// (`v1::Config` beside `v2::Config`, `outer::a::b` beside `a::b`) binds
+// nothing, out of a dirty caller or a dirty target file as in a reindex.
+#[test]
+fn test_overlay_rust_path_through_twin_qualifier_matches_reindex() {
+    let twins = "pub mod v1 { pub struct Config; impl Config { pub fn new() {} } }\n\
+                 pub mod v2 { pub struct Config; impl Config { pub fn new() {} } }";
+    let caller =
+        "pub mod api;\nfn run() { api::v2::Config::new(); crate::api::v1::Config::new(); }";
+    let bare = "pub mod api;\nfn run() {}";
+    for (base_api, edits) in [
+        (twins, &[("src/lib.rs", caller)][..]),
+        ("", &[("src/api/mod.rs", twins), ("src/lib.rs", caller)][..]),
+    ] {
+        parity(
+            &RustProvider::new().unwrap(),
+            &[("src/lib.rs", bare), ("src/api/mod.rs", base_api)],
+            edits,
+            &[],
+        );
+    }
+    let nested = "mod outer { pub mod a { pub mod b { pub fn wrong() {} } } }\n\
+                  mod a { pub mod b { pub fn right() {} } }\nfn run() {}";
+    parity(
+        &RustProvider::new().unwrap(),
+        &[("src/lib.rs", nested)],
+        &[(
+            "src/lib.rs",
+            &nested.replace("fn run() {}", "fn run() { crate::a::b::wrong(); }"),
+        )],
+        &[],
+    );
 }
 
 #[test]
@@ -3124,6 +3209,61 @@ fn test_overlay_python_constant_read_and_callback_shifted_matches_reindex() {
     );
     assert_eq!(full.len(), 2, "one constant read, one callback: {full:?}");
     assert_eq!(overlay, full);
+}
+
+// A Python type alias (a `Typedef`) read as a value keeps its `value_read`
+// edge on both sides, whether the reader or the alias's own file is dirty.
+#[test]
+fn test_overlay_python_type_alias_value_read_matches_reindex() {
+    let aliases = "IntOrStr = int | str\n";
+    let app = "from aliases import IntOrStr\n\ndef check(x):\n    return isinstance(x, IntOrStr)\n";
+    let files = [("aliases.py", aliases), ("app.py", app)];
+    let shifted_app = format!("\n{app}");
+    let shifted_aliases = format!("\n{aliases}");
+    for dirty in [
+        ("app.py", shifted_app.as_str()),
+        ("aliases.py", shifted_aliases.as_str()),
+    ] {
+        let (full, overlay) = field_read_edges(
+            &PythonProvider::new().unwrap(),
+            &files,
+            &[dirty],
+            &["value_read"],
+        );
+        assert_eq!(full.len(), 1, "{}: one alias read: {full:?}", dirty.0);
+        assert_eq!(full[0].2, RelType::ReadsField);
+        assert_eq!(overlay, full, "{} dirty", dirty.0);
+    }
+}
+
+// The alias read keeps its edge beside an unrelated `Num = 3` in another
+// file (a Global-tier value Python rejects), whichever file is dirty.
+#[test]
+fn test_overlay_python_type_alias_beside_unrelated_variable_matches_reindex() {
+    let aliases = "Num = int | float\n";
+    let consts = "Num = 3\n";
+    let app = "from aliases import Num\n\ndef check(x):\n    return isinstance(x, Num)\n";
+    let files = [
+        ("aliases.py", aliases),
+        ("consts.py", consts),
+        ("app.py", app),
+    ];
+    let shifted_app = format!("\n{app}");
+    let shifted_consts = format!("\n{consts}");
+    for dirty in [
+        ("app.py", shifted_app.as_str()),
+        ("consts.py", shifted_consts.as_str()),
+    ] {
+        let (full, overlay) = field_read_edges(
+            &PythonProvider::new().unwrap(),
+            &files,
+            &[dirty],
+            &["value_read"],
+        );
+        assert_eq!(full.len(), 1, "{}: one alias read: {full:?}", dirty.0);
+        assert_eq!(full[0].2, RelType::ReadsField);
+        assert_eq!(overlay, full, "{} dirty", dirty.0);
+    }
 }
 
 #[test]

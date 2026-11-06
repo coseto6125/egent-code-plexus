@@ -46,7 +46,8 @@
   body: (block
     (expression_statement
       (assignment
-        left: (identifier) @property.name) @property)))
+        left: (identifier) @property.name
+        type: (type)? @type) @property)))
 
 ;; Properties — instance attributes assigned via self in any method
 (class_definition
@@ -57,7 +58,8 @@
           (assignment
             left: (attribute
               object: (identifier) @_self (#eq? @_self "self")
-              attribute: (identifier) @property.name)) @property)))))
+              attribute: (identifier) @property.name)
+            type: (type)? @type) @property)))))
 
 ;; Variables — module-level assignments (plain `x = …` and annotated `x: T = …`).
 ;; Anchored to direct children of `module`; function-body and class-body locals
@@ -75,6 +77,15 @@
     (assignment
       left: (identifier) @variable.name
       (type)? @type) @variable))
+
+;; PEP 695 `type Al = …` / `type Al[T] = …` (the parameter list parses as generic_type or subscript): reuses the Variable capture;
+;; parser.rs reclassifies it to Typedef from the root node kind.
+(module
+  (type_alias_statement
+    left: (type
+      [(identifier) @variable.name
+       (generic_type (identifier) @variable.name)
+       (subscript value: (identifier) @variable.name)])) @variable)
 
 ;; Decorators — attach raw decorator text to the parent function or class so
 ;; downstream consumers (Task #10/11 flag wiring, Tier 3 route detectors) can

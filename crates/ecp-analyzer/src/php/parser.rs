@@ -551,7 +551,7 @@ impl ParseSpec for PhpSpec {
         Some(match capture {
             "function" | "class" | "interface" | "method" | "property" | "namespace" | "trait"
             | "enum" | "enum_case_node" | "const" => PhpRole::Root,
-            "type.function" | "type.method" => PhpRole::Type,
+            "type.function" | "type.method" | "type.property" => PhpRole::Type,
             "decorator" => PhpRole::Decorator,
             "export" => PhpRole::Export,
             "heritage" => PhpRole::Heritage,

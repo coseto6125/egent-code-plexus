@@ -96,8 +96,9 @@ pub fn calls(graph: &ZeroCopyGraph, caller: &str) -> Vec<(String, String)> {
 
 /// (target file, target name) of every type_annotation edge out of source.
 pub fn annotated(graph: &ZeroCopyGraph, source: &str) -> Vec<(String, String)> {
-    refs(graph, source, RelType::Accesses, "type_annotation")
+    ["type_annotation", "type_annotation:type_argument"]
         .into_iter()
+        .flat_map(|reason| refs(graph, source, RelType::Accesses, reason))
         .map(|(file, name, _, _)| (file, name))
         .collect()
 }

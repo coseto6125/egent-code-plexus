@@ -37,6 +37,7 @@
 //! regression suite and `crates/ecp-analyzer/benches/resolver_lookup.rs` for
 //! the before/after bench numbers.
 
+use ecp_core::analyzer::c_family;
 use ecp_core::analyzer::csharp_access::{self, CallAccess};
 use ecp_core::analyzer::csharp_extension::{self, ReceiverSite};
 use ecp_core::analyzer::import_binding::{
@@ -761,20 +762,16 @@ impl<'r, 'a> NameTierFacts for IndexTiers<'r, 'a, '_> {
         })
     }
 
-    fn module_tree_member(
-        &self,
-        callee: &str,
-        member: &str,
-        target: ResolveTarget,
-    ) -> Option<NodeId> {
+    fn module_tree_member(&self, site: &ladder::QualifiedSite<'_>) -> Option<NodeId> {
         let resolver = self.facts.0;
         ladder::module_tree_member(
             &resolver.module_tree()?,
             resolver.symbol_table,
             self.source,
-            callee,
-            member,
-            target,
+            site.imports,
+            site.callee,
+            site.member,
+            site.target,
         )
     }
 
@@ -806,9 +803,18 @@ impl<'r, 'a> NameTierFacts for IndexTiers<'r, 'a, '_> {
     ) -> Resolution {
         let table = self.facts.0.symbol_table;
         let free_only = call.is_some_and(|call| call.free_only);
-        name_tiers::global_tier(self, name, imports, target, call, || {
-            table.global_field_candidates(name, target, free_only)
-        })
+        let candidates = || table.global_field_candidates(name, target, free_only);
+        // The language test first: the caller's `FileMeta` costs a path
+        // lookup, and only a C / C++ caller reads it here.
+        let field = c_family::is_c_family(self.language)
+            .then(|| table.c_family_field(NameTierFacts::caller(self), self.source, candidates))
+            .flatten();
+        match field {
+            Some(field) => {
+                name_tiers::global_tier(self, name, imports, target, call, || field.iter().copied())
+            }
+            None => name_tiers::global_tier(self, name, imports, target, call, candidates),
+        }
     }
 
     fn decl_file(&self, id: NodeId) -> Option<&str> {
@@ -2448,6 +2454,104 @@ mod tests {
             "rust caller must not cross language boundary to move target, got {:?}",
             out
         );
+    }
+
+    // ── C / C++ family (`c_family`) ─────────────────────────────────────
+
+    #[test]
+    fn test_c_family_field_rust_caller_c_function_returns_no_edge() {
+        let st = st_with(&[("lib.c", "c_only", NodeKind::Function)]);
+        let out = Resolver::new(&st).resolve_symbol(
+            &PathBuf::from("src/main.rs"),
+            "c_only",
+            &[],
+            ResolveTarget::Callable,
+        );
+        assert!(out.is_empty(), "{out:?}");
+    }
+
+    #[test]
+    fn test_c_family_field_c_caller_cpp_header_struct_returns_header_struct() {
+        let st = st_with(&[("t.h", "St", NodeKind::Struct)]);
+        let out = Resolver::new(&st).resolve_symbol(
+            &PathBuf::from("m.c"),
+            "St",
+            &[],
+            ResolveTarget::Type,
+        );
+        assert_eq!(out, vec![(0, ResolutionTier::Global.base_confidence())]);
+    }
+
+    #[test]
+    fn test_c_family_field_c_caller_namespaced_cpp_function_returns_no_edge() {
+        let mut st = SymbolTable::new();
+        st.register_node_owned("t.h", "helper", 0, NodeKind::Function, "ns");
+        let out = Resolver::new(&st).resolve_symbol(
+            &PathBuf::from("m.c"),
+            "helper",
+            &[],
+            ResolveTarget::Callable,
+        );
+        assert!(out.is_empty(), "{out:?}");
+    }
+
+    #[test]
+    fn test_c_family_field_cpp_prototype_and_definition_returns_definition() {
+        let mut st = st_with(&[
+            ("types.hpp", "f", NodeKind::Function),
+            ("cb.cpp", "f", NodeKind::Function),
+        ]);
+        st.note_c_callable(0, ecp_core::graph::FunctionMeta::FLAG_EXTERN, &[]);
+        st.note_c_callable(1, 0, &[]);
+        let out = Resolver::new(&st).resolve_symbol(
+            &PathBuf::from("main.cpp"),
+            "f",
+            &[],
+            ResolveTarget::Callable,
+        );
+        assert_eq!(out, vec![(1, ResolutionTier::Global.base_confidence())]);
+    }
+
+    #[test]
+    fn test_c_family_field_cpp_prototype_and_two_definitions_returns_no_edge() {
+        let mut st = st_with(&[
+            ("types.hpp", "f", NodeKind::Function),
+            ("a.cpp", "f", NodeKind::Function),
+            ("b.cpp", "f", NodeKind::Function),
+        ]);
+        st.note_c_callable(0, ecp_core::graph::FunctionMeta::FLAG_EXTERN, &[]);
+        st.note_c_callable(1, 0, &[]);
+        st.note_c_callable(2, 0, &[]);
+        let out = Resolver::new(&st).resolve_symbol(
+            &PathBuf::from("main.cpp"),
+            "f",
+            &[],
+            ResolveTarget::Callable,
+        );
+        assert!(out.is_empty(), "{out:?}");
+    }
+
+    #[test]
+    fn test_c_family_field_cpp_prototype_and_definition_without_meta_returns_no_edge() {
+        let mut st = st_with(&[
+            ("types.hpp", "f", NodeKind::Function),
+            ("cb.cpp", "f", NodeKind::Function),
+        ]);
+        st.note_c_callable(0, ecp_core::graph::FunctionMeta::FLAG_EXTERN, &[]);
+        let out = Resolver::new(&st).resolve_symbol(
+            &PathBuf::from("main.cpp"),
+            "f",
+            &[],
+            ResolveTarget::Callable,
+        );
+        assert!(out.is_empty(), "{out:?}");
+    }
+
+    #[test]
+    fn test_note_c_callable_non_c_family_function_is_ignored() {
+        let mut st = st_with(&[("lib.rs", "f", NodeKind::Function)]);
+        st.note_c_callable(0, ecp_core::graph::FunctionMeta::FLAG_EXTERN, &[]);
+        assert!(st.c_callable(0).is_none());
     }
 
     #[test]

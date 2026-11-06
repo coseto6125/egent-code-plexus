@@ -150,3 +150,70 @@ fn test_reference_return_annotation_binds_project_type() {
     );
     assert_eq!(annotated(&g, "peek"), Vec::<(String, String)>::new());
 }
+
+/// Contract: a struct field typed with a project struct reaches that struct,
+/// like a parameter does, so `ecp impact` on `St` lists the field. A field
+/// typed with a builtin or the struct's own type parameter binds nothing.
+#[test]
+fn test_struct_field_annotation_binds_project_type() {
+    let g = graph(
+        &RustProvider::new().unwrap(),
+        &[(
+            "src/app.rs",
+            "pub struct St { pub x: i32 }\n\
+             pub struct Holder<T> {\n    pub st_field: St,\n    pub plain: i32,\n    pub generic_field: T,\n}\n",
+        )],
+    );
+    assert_eq!(annotated(&g, "st_field"), [pair("src/app.rs", "St")]);
+    assert_eq!(annotated(&g, "plain"), Vec::<(String, String)>::new());
+    assert_eq!(
+        annotated(&g, "generic_field"),
+        Vec::<(String, String)>::new()
+    );
+}
+
+/// Contract: a tuple-struct field has no name token, so it is a `Property`
+/// named by its position, and it binds its type like a named field.
+#[test]
+fn test_tuple_struct_field_annotation_binds_project_type() {
+    let g = graph(
+        &RustProvider::new().unwrap(),
+        &[(
+            "src/app.rs",
+            "pub struct St;\npub struct Pair(pub St, pub i32);\n",
+        )],
+    );
+    assert_eq!(annotated(&g, "0"), [pair("src/app.rs", "St")]);
+    assert_eq!(annotated(&g, "1"), Vec::<(String, String)>::new());
+}
+
+/// Contract: enum variant fields, struct-form and tuple-form, bind their
+/// type; a unit variant has no field and no edge.
+#[test]
+fn test_enum_variant_field_annotation_binds_project_type() {
+    let g = graph(
+        &RustProvider::new().unwrap(),
+        &[(
+            "src/app.rs",
+            "pub struct St;\npub struct Al;\n\
+             pub enum E { V { st_var: St }, W(Al), Z }\n",
+        )],
+    );
+    assert_eq!(annotated(&g, "st_var"), [pair("src/app.rs", "St")]);
+    assert_eq!(annotated(&g, "0"), [pair("src/app.rs", "Al")]);
+    assert_eq!(annotated(&g, "Z"), Vec::<(String, String)>::new());
+}
+
+/// Edge: an empty tuple struct `struct Unit();` emits no field, and the same
+/// file parsed twice gives the same single edge.
+#[test]
+fn test_empty_tuple_struct_emits_no_field_edge() {
+    let src = [(
+        "src/app.rs",
+        "pub struct St;\npub struct Unit();\npub struct Empty {}\n",
+    )];
+    let g = graph(&RustProvider::new().unwrap(), &src);
+    assert_eq!(annotated(&g, "0"), Vec::<(String, String)>::new());
+    let again = graph(&RustProvider::new().unwrap(), &src);
+    assert_eq!(annotated(&again, "0"), annotated(&g, "0"));
+}

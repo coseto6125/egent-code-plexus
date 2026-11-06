@@ -248,7 +248,8 @@ fn test_dart_driver_enum_variables_typedef_function_emit_once_each() {
 /// The optional `(type (_))` child and a qualified annotation name can
 /// fire more than one match for one declaration. After the consecutive
 /// dedupe on (name, span, kind), each declarator and the annotation
-/// appear once, typed by the type name.
+/// appear once, typed by the whole type text, so a generic keeps the type
+/// arguments that `type_annotation_targets` binds.
 #[test]
 fn test_dart_driver_duplicate_captures_dedupe_to_first() {
     let src = concat!(
@@ -271,7 +272,13 @@ fn test_dart_driver_duplicate_captures_dedupe_to_first() {
     );
     assert_eq!(
         types(&g),
-        [Some("List"), Some("List"), None, Some("Map"), Some("Map")]
+        [
+            Some("List"),
+            Some("List"),
+            None,
+            Some("Map<String, int>"),
+            Some("Map<String, int>")
+        ]
     );
     assert_eq!(at(&g, 0).content_hash, at(&g, 1).content_hash);
 

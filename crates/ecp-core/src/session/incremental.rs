@@ -428,7 +428,6 @@ pub(super) fn replay(
             |source, target| push(defines(source, target, ENUM_VARIANT_DEFINES_REASON)),
         );
         let lookup = FileMembers {
-            decls: table,
             raw_map: &raw_map,
             ord,
             merged,
@@ -899,21 +898,15 @@ impl<'a> PathDecls<'a> {
     }
 }
 
-/// Class membership's lookups for one input: its own rows' nodes, and its
-/// path's [`PathDecls`] for the owner pass's type.
-struct FileMembers<'t, 'a> {
-    decls: &'t PathDecls<'a>,
+/// Class membership's lookups for one input: its own rows' nodes.
+struct FileMembers<'t> {
     raw_map: &'t RawIndexMap,
     ord: FileOrd,
     merged: bool,
     lexical_parents: &'t FxHashMap<u32, u32>,
 }
 
-impl MemberLookup for FileMembers<'_, '_> {
-    fn lookup_in_file(&self, name: &str) -> Option<u32> {
-        self.decls.by_name.get(name)?.first().copied()
-    }
-
+impl MemberLookup for FileMembers<'_> {
     fn node(&self, raw: usize) -> Option<u32> {
         self.raw_map.node(self.ord, RawIdx(raw as u32))
     }
@@ -2328,7 +2321,7 @@ mod tests {
 
     // ── class membership (F7b1) ─────────────────────────────────────────────
 
-    use crate::analyzer::membership::{CLASS_MEMBERSHIP_IMPL_REASON, CLASS_MEMBERSHIP_REASON};
+    use crate::analyzer::membership::{CLASS_MEMBERSHIP_OWNER_REASON, CLASS_MEMBERSHIP_REASON};
 
     fn member(source: u32, target: u32) -> (u32, u32, String) {
         (source, target, CLASS_MEMBERSHIP_REASON.to_string())
@@ -2476,8 +2469,9 @@ mod tests {
         );
     }
 
-    /// A Rust `impl` method outside its struct's span binds through its
-    /// owner, with the owner pass's reason.
+    /// A Rust method outside its struct's span, with no `Impl` row around
+    /// it, binds through its owner with the owner pass's reason, as the index
+    /// does for the same rows; `rust_impl` names only an `impl` block owner.
     #[test]
     fn test_replay_impl_method_outside_struct_span_binds_by_owner() {
         let bytes = clean_base();
@@ -2493,7 +2487,7 @@ mod tests {
         let base = view.base_len();
         assert_eq!(
             rel_edges(graph, &view, RelType::HasMethod),
-            [(base, base + 1, CLASS_MEMBERSHIP_IMPL_REASON.to_string())]
+            [(base, base + 1, CLASS_MEMBERSHIP_OWNER_REASON.to_string())]
         );
     }
 

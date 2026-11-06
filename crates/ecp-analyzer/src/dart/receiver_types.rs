@@ -29,7 +29,8 @@ use super::path_literals::{
     build_raw_path_literal, has_template_substitution, strip_dart_string_value,
 };
 use crate::calls::{
-    attach_to_enclosing, node_range, range_width, span_holds, start_pos, Pos, PosRange,
+    attach_to_enclosing, is_call_callee, is_same_kind_field, node_range, range_width,
+    reference_function, span_holds, start_pos, unparenthesized, Pos, PosRange,
 };
 use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
 use ecp_core::graph::NodeKind;
@@ -284,12 +285,17 @@ pub fn extract_dart_calls_and_path_literals(
 ) -> (Vec<RawPathLiteral>, Vec<RawSqlRef>) {
     let mut path_literals: Vec<RawPathLiteral> = Vec::new();
     let mut sql_refs: Vec<RawSqlRef> = Vec::new();
-    let mut stack: Vec<Node<'_>> = vec![root];
-    while let Some(n) = stack.pop() {
+    let mut stack: Vec<(Node<'_>, Option<Node<'_>>)> = vec![(root, None)];
+    while let Some((n, parent)) = stack.pop() {
         match n.kind() {
             "call_expression" => {
                 if let Some(callee) = dart_callee_name(n, source, bindings, nodes) {
                     attach_to_enclosing(start_pos(n), callee, nodes);
+                }
+            }
+            "member_expression" | "null_aware_member_expression" => {
+                if let Some(name) = method_value(n, parent, source, bindings) {
+                    reference_function(start_pos(n), &name, nodes);
                 }
             }
             "string_literal" => {
@@ -318,7 +324,7 @@ pub fn extract_dart_calls_and_path_literals(
         }
         let mut c = n.walk();
         for child in n.children(&mut c) {
-            stack.push(child);
+            stack.push((child, Some(n)));
         }
     }
     (path_literals, sql_refs)
@@ -330,7 +336,7 @@ fn dart_callee_name(
     bindings: &DartBindings,
     nodes: &[RawNode],
 ) -> Option<String> {
-    let function = call.child_by_field_name("function")?;
+    let function = unparenthesized(call.child_by_field_name("function")?);
     let pos = start_pos(call);
 
     match function.kind() {
@@ -399,6 +405,41 @@ fn dart_callee_name(
             .ok()
             .map(str::to_string),
     }
+}
+
+/// `c.m` in value position (`xs.forEach(c.m)`, `final f = this.m`) where `c`
+/// is a local or parameter of a declared type `T`, or `this`: the method
+/// `T.m` (the enclosing class's for `this`), typed as the call `c.m()` is.
+/// The name scan drops `c.m`, as `c` is a local, and records no `this.m`. A
+/// callee, the object of a longer member expression and a receiver of no
+/// known type name nothing; a field `c.f` is no callable, so Pass 2 binds no
+/// edge to it.
+fn method_value(
+    member: Node<'_>,
+    parent: Option<Node<'_>>,
+    source: &[u8],
+    bindings: &DartBindings,
+) -> Option<String> {
+    let property = member
+        .child_by_field_name("property")
+        .filter(|property| property.kind() == "identifier")?
+        .utf8_text(source)
+        .ok()?;
+    let object = member.child_by_field_name("object")?;
+    if is_call_callee(member, parent)
+        || parent.is_some_and(|parent| is_same_kind_field(member, parent, "object"))
+    {
+        return None;
+    }
+    let pos = start_pos(member);
+    let ty = match object.kind() {
+        "this" => bindings.enclosing_class(pos)?.0.as_str(),
+        "identifier" => bindings
+            .lookup_local(pos, object.utf8_text(source).ok()?)
+            .filter(|ty| !ty.is_empty())?,
+        _ => return None,
+    };
+    Some(format!("{ty}.{property}"))
 }
 
 /// Whether `call` calls a local, a parameter or a field of an enclosing

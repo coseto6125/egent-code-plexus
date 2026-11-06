@@ -56,7 +56,8 @@
 //!   ([`crate::analyzer::heritage::heritage_rel`]): each spelling looked up
 //!   as the supertypes pre-pass looks it up, after the dirty supertypes
 //!   exist, at the resolver's confidence.
-//! - **type annotations** — `Accesses` (reason [`TYPE_ANNOTATION_REASON`])
+//! - **type annotations** — `Accesses` (reason [`TYPE_ANNOTATION_REASON`],
+//!   or [`TYPE_ARGUMENT_REASON`] for a non-callable's generic arguments)
 //!   from each dirty declaration to the types its annotation, its return
 //!   type and its parameter types name, by the index's Pass 2 rule
 //!   ([`type_annotation_targets`]), each name looked up as the heritage
@@ -254,14 +255,16 @@ use crate::analyzer::heritage::HeritageNode;
 use crate::analyzer::heritage::HERITAGE_REASONS;
 use crate::analyzer::import_edges::ImportReason;
 use crate::analyzer::lexical::{enclosing_types, path_identities, splits_by_arity, stored_uid};
-use crate::analyzer::membership::{CLASS_MEMBERSHIP_IMPL_REASON, CLASS_MEMBERSHIP_REASON};
+use crate::analyzer::membership::{
+    CLASS_MEMBERSHIP_IMPL_REASON, CLASS_MEMBERSHIP_OWNER_REASON, CLASS_MEMBERSHIP_REASON,
+};
 use crate::analyzer::overrides::OVERRIDES_REASONS;
 use crate::analyzer::record_nodes::{
     EVENT_TOPIC_PUBLISHES_REASON, EVENT_TOPIC_SUBSCRIBES_REASON, PATH_LITERAL_SINK_REASONS,
     SCHEMA_FIELD_HAS_PROPERTY_REASON, TX_SCOPE_REASON,
 };
 use crate::analyzer::type_ladder::{
-    type_annotation_targets, AnnotatedDecl, TYPE_ANNOTATION_REASON,
+    type_annotation_targets, AnnotatedDecl, TYPE_ANNOTATION_REASON, TYPE_ARGUMENT_REASON,
 };
 use crate::analyzer::types::{
     innermost_enclosing, owner_key, LocalGraph, RawEventTopic, RawExportAlias, RawImport,
@@ -1454,7 +1457,7 @@ fn replays_record_edge(rel: RelType) -> bool {
 /// Every reason [`OverlayView::build`] puts on a [`ViewEdge`]. A cached view
 /// stores each reason as its index here; a view with an unlisted reason is
 /// never stored, so it costs a build per query as before the cache.
-const VIEW_EDGE_REASONS: [&str; 45] = [
+const VIEW_EDGE_REASONS: [&str; 47] = [
     OVERLOAD_SET_REASON,
     CLOSURE_REFERENCE_REASON,
     NEAREST_COPY_REASON,
@@ -1500,6 +1503,8 @@ const VIEW_EDGE_REASONS: [&str; 45] = [
     HERITAGE_REASONS[0],
     HERITAGE_REASONS[1],
     TYPE_ANNOTATION_REASON,
+    CLASS_MEMBERSHIP_OWNER_REASON,
+    TYPE_ARGUMENT_REASON,
 ];
 
 pub(super) fn reason_index(reason: &str) -> Option<u8> {

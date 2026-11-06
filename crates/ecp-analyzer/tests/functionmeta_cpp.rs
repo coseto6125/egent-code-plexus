@@ -214,3 +214,41 @@ fn cpp_regular_function_no_async_flag() {
     assert!(!m.is_async(), "regular function → not async");
     assert!(!m.is_generator());
 }
+
+/// The flat `params` of `name`, each `StrRef` resolved.
+fn params_of(g: &ZeroCopyGraph, name: &str) -> Vec<String> {
+    let pool = g.string_pool.as_slice();
+    meta(g, name)
+        .params
+        .iter()
+        .map(|p| p.resolve(pool).to_string())
+        .collect()
+}
+
+/// Stands for: only a sole `void` with no declarator is the empty `(void)`
+/// list; an unnamed `void *` is one parameter, so a header prototype counts
+/// what its named definition counts.
+#[test]
+fn test_extract_params_unnamed_void_pointer_counts_one_parameter() {
+    let g = analyze("void release(void *);\nvoid two(void *, void **);\nvoid none(void);\n");
+    let count = |name: &str| params_of(&g, name).len() / 2;
+    assert_eq!(count("release"), 1);
+    assert_eq!(count("two"), 2);
+    assert!(params_of(&g, "none").is_empty());
+}
+
+/// Stands for: a C-style `...` is one parameter, recorded as `c.rs` records
+/// it: the name `...` with no type, which `CCallable` reads as a known type.
+/// A C++-parsed `.h` prototype then counts what its C definition counts.
+#[test]
+fn test_extract_params_c_style_variadic_counts_one_parameter() {
+    let g = analyze("int lg(const char *fmt, ...);\nint pk(...);\n");
+    let lg = params_of(&g, "lg");
+    assert_eq!(
+        lg.len(),
+        4,
+        "two parameters, a name and a type each: {lg:?}"
+    );
+    assert_eq!(lg[2..].to_vec(), ["...", ""]);
+    assert_eq!(params_of(&g, "pk"), ["...", ""]);
+}
