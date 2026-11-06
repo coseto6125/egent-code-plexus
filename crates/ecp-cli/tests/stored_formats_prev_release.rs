@@ -371,6 +371,11 @@ fn test_prev_release_graph_refused_and_rebuilt_lexical_table_present() {
     let engine = Engine::load(&graph_path).expect("the rebuilt graph loads");
     let graph = engine.graph().unwrap();
     assert_eq!(graph.version.to_native(), GRAPH_FORMAT_VERSION);
+    assert_eq!(
+        graph.containers.len(),
+        graph.nodes.len(),
+        "the rebuilt graph names a container for every node (graph v21)"
+    );
     assert!(graph.lexical_parents.is_empty(), "no language opts in yet");
     let pool = graph.string_pool.as_slice();
     for idx in 0..graph.nodes.len() as u32 {

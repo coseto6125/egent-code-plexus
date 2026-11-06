@@ -1438,7 +1438,10 @@ impl OverlayView {
 /// 16 (FU-2026-10-26-0ee756874fb8): the view stores a dirty file's
 /// `type_annotation` `Accesses` edges with one more reason, and masks the
 /// base ones; a 15 view has neither.
-pub const VIEW_CACHE_FORMAT: u32 = 16;
+/// 17: a dirty file resolves through the receiver core, the Rust module
+/// tree and the admission gate the index uses, so a 16 view holds edges a
+/// reindex no longer makes.
+pub const VIEW_CACHE_FORMAT: u32 = 17;
 
 /// The base edge kinds the record replay rebuilds, so masks at a re-parsed
 /// file's nodes. `HasProperty` has its own arm in

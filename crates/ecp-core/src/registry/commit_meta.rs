@@ -198,7 +198,13 @@ use std::path::Path;
 /// declarations across the header barrier, bare Rust paths into a child
 /// module, PHP callables and bound method values; module and namespace
 /// owners no longer claim free functions through `HasMethod`.
-pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema54");
+/// schema55: parses carry interface properties, type-parameter markers and
+/// C/C++ function-pointer members a schema54 parse lacks; the resolver
+/// walks Rust paths parent to child, reads glob and in-crate imports, binds
+/// no bare field read to an interface property and no type parameter of an
+/// enclosing declaration to a project type. A schema54 parse cache entry
+/// would replay the old parse.
+pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema55");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitBuildMeta {
