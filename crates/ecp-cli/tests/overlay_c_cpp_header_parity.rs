@@ -15,11 +15,15 @@
 //! | C caller, prototype + vendor definition | `Calls` to the prototype       |
 //! | C++ caller, prototype + `static` C definition | `Calls` to the prototype |
 //! | C++ caller, prototype + `static` definition in another file | none     |
+//! | C++ caller, prototype + overload of the same arity, other types | none   |
+//! | C caller, vendor prototype + header definition | `Calls` to the definition |
+//! | C++ caller, unnamed `void *` prototype + definition | `Calls` to the definition |
+//! | C++ caller, prototype + K&R C definition | `Calls` to the definition    |
 //!
 //! Where the header or the definition is dirty too, the prototype (or the
 //! definition) is an overlay symbol, so the overlay reads its flags from
-//! the fresh parse instead of the base graph, and its parameter count from
-//! the fresh parse's parameters.
+//! the fresh parse instead of the base graph, and its parameter count and
+//! types from the fresh parse's parameters.
 
 use crate::parity;
 
@@ -379,5 +383,139 @@ fn test_overlay_c_family_field_cpp_caller_static_definition_in_other_file_matche
         reason: None,
         source_file: "main.cpp",
         expected: &[],
+    });
+}
+
+const TYPES_HEADER: &str = "void f(int);\n";
+const TYPES_OTHER_OVERLOAD: &str = "void f(double) {}\n";
+const TYPES_USER_BARE: &str = "#include \"api.hpp\"\nvoid run() { }\n";
+const TYPES_USER: &str = "#include \"api.hpp\"\nvoid run() { f(1); }\n";
+
+/// Stands for: an overload of the same parameter count and other types
+/// settles no prototype, whether the overload is clean or dirty (its types
+/// then come from the fresh parse).
+#[test]
+fn test_overlay_c_family_field_cpp_caller_overload_of_same_arity_other_types_matches_reindex() {
+    assert_case(&Case {
+        label: "C++ caller, prototype + same-arity overload, caller dirty",
+        files: &[
+            ("api.hpp", TYPES_HEADER),
+            ("other.cpp", TYPES_OTHER_OVERLOAD),
+            ("main.cpp", TYPES_USER_BARE),
+        ],
+        edits: &[("main.cpp", TYPES_USER)],
+        rel: RelType::Calls,
+        reason: None,
+        source_file: "main.cpp",
+        expected: &[],
+    });
+    assert_case(&Case {
+        label: "C++ caller, prototype + same-arity overload, overload and caller dirty",
+        files: &[
+            ("api.hpp", TYPES_HEADER),
+            ("other.cpp", ""),
+            ("main.cpp", TYPES_USER_BARE),
+        ],
+        edits: &[
+            ("other.cpp", TYPES_OTHER_OVERLOAD),
+            ("main.cpp", TYPES_USER),
+        ],
+        rel: RelType::Calls,
+        reason: None,
+        source_file: "main.cpp",
+        expected: &[],
+    });
+}
+
+/// Stands for: a vendor prototype the caller cannot reach never pushes the
+/// header definition out.
+#[test]
+fn test_overlay_c_family_field_c_caller_vendor_prototype_matches_reindex() {
+    assert_case(&Case {
+        label: "C caller, vendor prototype + header definition",
+        files: &[
+            ("api.h", "void f(void) {}\n"),
+            ("vendor/unused/api.hpp", "void f(int);\n"),
+            ("main.c", "#include \"api.h\"\nvoid run(void) { }\n"),
+        ],
+        edits: &[("main.c", "#include \"api.h\"\nvoid run(void) { f(); }\n")],
+        rel: RelType::Calls,
+        reason: None,
+        source_file: "main.c",
+        expected: &[("run", "api.h", "f")],
+    });
+}
+
+const VOID_PTR_HEADER: &str = "void release(void *);\n";
+const VOID_PTR_DEFINITION: &str = "#include \"api.h\"\nvoid release(void *p) {}\n";
+const VOID_PTR_USER_BARE: &str = "#include \"api.h\"\nvoid run() { }\n";
+const VOID_PTR_USER: &str = "#include \"api.h\"\nvoid run() { release(0); }\n";
+
+/// Stands for: an unnamed `void *` prototype counts one parameter in the
+/// base graph and in a dirty header alike, so its definition settles it.
+#[test]
+fn test_overlay_c_family_field_cpp_caller_unnamed_void_pointer_matches_reindex() {
+    assert_case(&Case {
+        label: "C++ caller, unnamed void * prototype + definition, caller dirty",
+        files: &[
+            ("api.h", VOID_PTR_HEADER),
+            ("lib.cpp", VOID_PTR_DEFINITION),
+            ("main.cpp", VOID_PTR_USER_BARE),
+        ],
+        edits: &[("main.cpp", VOID_PTR_USER)],
+        rel: RelType::Calls,
+        reason: None,
+        source_file: "main.cpp",
+        expected: &[("run", "lib.cpp", "release")],
+    });
+    assert_case(&Case {
+        label: "C++ caller, unnamed void * prototype + definition, header and caller dirty",
+        files: &[
+            ("api.h", ""),
+            ("lib.cpp", VOID_PTR_DEFINITION),
+            ("main.cpp", VOID_PTR_USER_BARE),
+        ],
+        edits: &[("api.h", VOID_PTR_HEADER), ("main.cpp", VOID_PTR_USER)],
+        rel: RelType::Calls,
+        reason: None,
+        source_file: "main.cpp",
+        expected: &[("run", "lib.cpp", "release")],
+    });
+}
+
+const KR_HEADER: &str = "int kr(int, int);\n";
+const KR_DEFINITION: &str = "int kr(a, b) int a; int b; { return a; }\n";
+const KR_USER_BARE: &str = "#include \"api.h\"\nvoid run() { }\n";
+const KR_USER: &str = "#include \"api.h\"\nvoid run() { kr(1, 2); }\n";
+
+/// Stands for: a K&R C definition settles its prototype, whether it is
+/// clean or dirty.
+#[test]
+fn test_overlay_c_family_field_cpp_caller_kr_definition_matches_reindex() {
+    assert_case(&Case {
+        label: "C++ caller, prototype + K&R C definition, caller dirty",
+        files: &[
+            ("api.h", KR_HEADER),
+            ("lib.c", KR_DEFINITION),
+            ("main.cpp", KR_USER_BARE),
+        ],
+        edits: &[("main.cpp", KR_USER)],
+        rel: RelType::Calls,
+        reason: None,
+        source_file: "main.cpp",
+        expected: &[("run", "lib.c", "kr")],
+    });
+    assert_case(&Case {
+        label: "C++ caller, prototype + K&R C definition, definition and caller dirty",
+        files: &[
+            ("api.h", KR_HEADER),
+            ("lib.c", ""),
+            ("main.cpp", KR_USER_BARE),
+        ],
+        edits: &[("lib.c", KR_DEFINITION), ("main.cpp", KR_USER)],
+        rel: RelType::Calls,
+        reason: None,
+        source_file: "main.cpp",
+        expected: &[("run", "lib.c", "kr")],
     });
 }

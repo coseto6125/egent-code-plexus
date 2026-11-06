@@ -258,6 +258,40 @@ fn test_value_read_python_unimported_type_alias_returns_no_edge() {
     assert_eq!(value_reads(&g, "check"), none());
 }
 
+// Stands for: an unrelated `Num = 3` in another file is a Global-tier value,
+// which Python rejects, so it must not block the alias retry. main binds
+// the alias (then a `Variable`); HEAD binds nothing. Expected: the alias.
+#[test]
+fn test_value_read_python_imported_type_alias_beside_unrelated_variable_returns_cross_file_edge() {
+    let g = graph(
+        &PythonProvider::new().unwrap(),
+        &[
+            ("aliases.py", "Num = int | float\n"),
+            ("consts.py", "Num = 3\n"),
+            (
+                "main.py",
+                "from aliases import Num\n\ndef c_two_files(x):\n    return isinstance(x, Num)\n",
+            ),
+        ],
+    );
+    assert_one_cross_file(&value_reads(&g, "c_two_files"), "aliases.py", "Num");
+}
+
+// The retry reads no unimported alias: with an unrelated variable of the
+// name elsewhere, an unimported alias read still binds nothing.
+#[test]
+fn test_value_read_python_unimported_type_alias_beside_unrelated_variable_returns_no_edge() {
+    let g = graph(
+        &PythonProvider::new().unwrap(),
+        &[
+            ("aliases.py", "Num = int | float\n"),
+            ("consts.py", "Num = 3\n"),
+            ("main.py", "def c_bare(x):\n    return isinstance(x, Num)\n"),
+        ],
+    );
+    assert_eq!(value_reads(&g, "c_bare"), none());
+}
+
 // Only Python reads a type alias as a value. A TypeScript `type` alias has
 // no runtime value, so a bare read of its name binds nothing.
 #[test]

@@ -699,11 +699,11 @@ impl SymbolTable {
         self.csharp_method_flags.get(&node_id).copied().unwrap_or(0)
     }
 
-    /// Record the `FunctionMeta::flags` and the flat `params` length of the
+    /// Record the `FunctionMeta::flags` and the flat `params` list of the
     /// C or C++ function or method `node_id`: whether it is a header
     /// prototype, and which prototype its definition settles
     /// ([`c_family`]). Any other node is ignored.
-    pub fn note_c_callable(&mut self, node_id: u32, flags: u16, params_len: usize) {
+    pub fn note_c_callable(&mut self, node_id: u32, flags: u16, params: &[String]) {
         let i = node_id as usize;
         if matches!(
             self.node_kinds.get(i),
@@ -713,8 +713,10 @@ impl SymbolTable {
             .get(i)
             .is_some_and(|meta| c_family::is_c_family(meta.language))
         {
-            self.c_callables
-                .insert(node_id, CCallable::new(flags, params_len));
+            self.c_callables.insert(
+                node_id,
+                CCallable::new(flags, params.iter().map(String::as_str)),
+            );
         }
     }
 

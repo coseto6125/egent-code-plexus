@@ -13,12 +13,16 @@
 //!   declares; a C++ caller binds the C definition of a function its header
 //!   declares.
 //! - A prototype and one definition are one target, the definition, when
-//!   both have the same owner and parameter count and the caller can reach
-//!   the definition. Two definitions stay ambiguous: no edge.
-//! - A definition of another parameter count is another overload: it never
-//!   settles the prototype, and a C caller binds the header prototype
-//!   rather than a C++ overload. A vendor definition, or a `static` one in
-//!   another file, settles nothing either.
+//!   both have the same owner and parameter types (names dropped, spelling
+//!   normalised) and the caller can reach the definition. Two definitions
+//!   stay ambiguous: no edge.
+//! - A definition of another parameter count or other parameter types is
+//!   another overload: it never settles the prototype, and a C caller binds
+//!   the header prototype rather than a C++ overload. A vendor definition,
+//!   or a `static` one in another file, settles nothing either, and a
+//!   vendor prototype never pushes a reachable definition out.
+//! - A definition whose parameter types the meta cannot read (a K&R name
+//!   no declaration types) settles nothing.
 //! - An own-language definition wins over the other family language's.
 //! - C never binds a C++-only declaration: one inside a namespace, or a
 //!   class. No other language pair crosses: Rust binds no C function.
@@ -379,4 +383,113 @@ fn test_c_family_field_c_caller_variadic_prototype_binds_definition() {
         ),
     ]);
     assert_eq!(calls(&g, "run"), vec![pair("log.cpp", "log_msg")]);
+}
+
+/// Stands for: one parameter count is not one function; `f(double)` is
+/// another overload of the `f(int)` the header declares, so the C++ caller
+/// gets no edge rather than one to the wrong overload. HEAD binds
+/// `run -> other.cpp::f`; main binds nothing.
+#[test]
+fn test_c_family_field_cpp_overload_of_same_arity_other_types_binds_nothing() {
+    let g = graph(&[
+        ("api.hpp", "void f(int);\n"),
+        ("other.cpp", "void f(double) {}\n"),
+        ("main.cpp", "#include \"api.hpp\"\nvoid run() { f(1); }\n"),
+    ]);
+    assert_eq!(calls(&g, "run"), Vec::<(String, String)>::new());
+}
+
+/// Stands for: a C caller binds the prototype its header declares, never a
+/// C++ overload of the same count and other types. HEAD binds
+/// `crun -> other.cpp::g`.
+#[test]
+fn test_c_family_field_c_caller_cpp_overload_of_same_arity_other_types_binds_prototype() {
+    let g = graph(&[
+        ("api.h", "void g(int);\n"),
+        ("other.cpp", "void g(double d) {}\n"),
+        ("m.c", "#include \"api.h\"\nvoid crun(void) { g(1); }\n"),
+    ]);
+    assert_eq!(calls(&g, "crun"), vec![pair("api.h", "g")]);
+}
+
+/// Stands for: the type comparison drops names and reads one spelling, so
+/// whitespace and a C elaborated `struct` keyword do not make the
+/// definition another overload.
+#[test]
+fn test_c_family_field_cpp_prototype_of_other_type_spelling_binds_definition() {
+    let g = graph(&[
+        ("api.hpp", "void h(unsigned   int, struct node *);\n"),
+        (
+            "h.cpp",
+            "#include \"api.hpp\"\nvoid h(unsigned int n, node *p) {}\n",
+        ),
+        (
+            "main.cpp",
+            "#include \"api.hpp\"\nvoid run() { h(1, 0); }\n",
+        ),
+    ]);
+    assert_eq!(calls(&g, "run"), vec![pair("h.cpp", "h")]);
+}
+
+/// Stands for: a vendor prototype the caller cannot reach shapes nothing,
+/// so the header definition of another count stays the caller's target.
+/// HEAD binds nothing (the vendor `f(int)` pushes out `f(void)`, then the
+/// vendor barrier drops itself).
+#[test]
+fn test_c_family_field_c_caller_vendor_prototype_beside_header_definition_binds_definition() {
+    let g = graph(&[
+        ("api.h", "void f(void) {}\n"),
+        ("vendor/unused/api.hpp", "void f(int);\n"),
+        ("main.c", "#include \"api.h\"\nvoid run(void) { f(); }\n"),
+    ]);
+    assert_eq!(calls(&g, "run"), vec![pair("api.h", "f")]);
+}
+
+/// Stands for: an unnamed `void *` is a parameter, not the `(void)` list,
+/// so the header prototype and its named definition count alike. HEAD binds
+/// nothing for the C++ definition and the prototype `api.h` for the C one.
+#[test]
+fn test_c_family_field_cpp_unnamed_void_pointer_prototype_binds_definition() {
+    for (file, definition) in [
+        ("lib.cpp", "#include \"api.h\"\nvoid release(void *p) {}\n"),
+        ("lib.c", "#include \"api.h\"\nvoid release(void *p) {}\n"),
+    ] {
+        let g = graph(&[
+            ("api.h", "void release(void *);\n"),
+            (file, definition),
+            (
+                "main.cpp",
+                "#include \"api.h\"\nvoid run() { release(0); }\n",
+            ),
+        ]);
+        assert_eq!(calls(&g, "run"), vec![pair(file, "release")], "{file}");
+    }
+}
+
+/// Stands for: a K&R definition counts and types its identifier list from
+/// the declarations before its body. HEAD binds the prototype `api.h`.
+#[test]
+fn test_c_family_field_cpp_caller_kr_definition_binds_definition() {
+    let g = graph(&[
+        ("api.h", "int kr(int, int);\n"),
+        ("lib.c", "int kr(a, b) int a; int b; { return a; }\n"),
+        ("main.cpp", "#include \"api.h\"\nvoid run() { kr(1, 2); }\n"),
+    ]);
+    assert_eq!(calls(&g, "run"), vec![pair("lib.c", "kr")]);
+}
+
+/// Stands for: a K&R parameter no declaration types has an unknown type,
+/// so its definition settles nothing and stays beside the prototype. HEAD
+/// binds the prototype `api.h` (it counts the definition 0).
+#[test]
+fn test_c_family_field_cpp_caller_kr_definition_with_untyped_parameter_binds_nothing() {
+    let g = graph(&[
+        ("api.h", "int kr2(int, int);\n"),
+        ("lib.c", "int kr2(a, b) int a; { return a; }\n"),
+        (
+            "main.cpp",
+            "#include \"api.h\"\nvoid run() { kr2(1, 2); }\n",
+        ),
+    ]);
+    assert_eq!(calls(&g, "run"), Vec::<(String, String)>::new());
 }

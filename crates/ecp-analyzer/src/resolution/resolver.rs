@@ -2501,8 +2501,8 @@ mod tests {
             ("types.hpp", "f", NodeKind::Function),
             ("cb.cpp", "f", NodeKind::Function),
         ]);
-        st.note_c_callable(0, ecp_core::graph::FunctionMeta::FLAG_EXTERN, 0);
-        st.note_c_callable(1, 0, 0);
+        st.note_c_callable(0, ecp_core::graph::FunctionMeta::FLAG_EXTERN, &[]);
+        st.note_c_callable(1, 0, &[]);
         let out = Resolver::new(&st).resolve_symbol(
             &PathBuf::from("main.cpp"),
             "f",
@@ -2519,9 +2519,9 @@ mod tests {
             ("a.cpp", "f", NodeKind::Function),
             ("b.cpp", "f", NodeKind::Function),
         ]);
-        st.note_c_callable(0, ecp_core::graph::FunctionMeta::FLAG_EXTERN, 0);
-        st.note_c_callable(1, 0, 0);
-        st.note_c_callable(2, 0, 0);
+        st.note_c_callable(0, ecp_core::graph::FunctionMeta::FLAG_EXTERN, &[]);
+        st.note_c_callable(1, 0, &[]);
+        st.note_c_callable(2, 0, &[]);
         let out = Resolver::new(&st).resolve_symbol(
             &PathBuf::from("main.cpp"),
             "f",
@@ -2537,7 +2537,7 @@ mod tests {
             ("types.hpp", "f", NodeKind::Function),
             ("cb.cpp", "f", NodeKind::Function),
         ]);
-        st.note_c_callable(0, ecp_core::graph::FunctionMeta::FLAG_EXTERN, 0);
+        st.note_c_callable(0, ecp_core::graph::FunctionMeta::FLAG_EXTERN, &[]);
         let out = Resolver::new(&st).resolve_symbol(
             &PathBuf::from("main.cpp"),
             "f",
@@ -2550,7 +2550,7 @@ mod tests {
     #[test]
     fn test_note_c_callable_non_c_family_function_is_ignored() {
         let mut st = st_with(&[("lib.rs", "f", NodeKind::Function)]);
-        st.note_c_callable(0, ecp_core::graph::FunctionMeta::FLAG_EXTERN, 0);
+        st.note_c_callable(0, ecp_core::graph::FunctionMeta::FLAG_EXTERN, &[]);
         assert!(st.c_callable(0).is_none());
     }
 

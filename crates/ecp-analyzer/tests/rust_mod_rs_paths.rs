@@ -241,3 +241,83 @@ fn test_module_path_call_to_associated_function_of_module_type_binds_it() {
     let g = crate_graph(&files, true);
     assert_eq!(targets(&g, "run"), vec![to("src/a/mod.rs", "new")]);
 }
+
+/// The owner of each `Calls` target of `caller`, sorted; `""` for none.
+fn call_owners(graph: &ZeroCopyGraph, caller: &str) -> Vec<String> {
+    let pool = graph.string_pool.as_slice();
+    let mut out: Vec<String> = graph
+        .edges
+        .iter()
+        .filter(|e| e.rel_type == RelType::Calls)
+        .filter(|e| graph.nodes[e.source as usize].name.resolve(pool) == caller)
+        .map(|e| {
+            graph.nodes[e.target as usize]
+                .owner_class
+                .resolve(pool)
+                .to_string()
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+const NESTED_A: &str = "pub struct S;\npub struct Other;\nimpl S { pub fn new() {} }\n\
+                        pub fn f() {}\n\
+                        pub mod m { pub fn f() {} pub struct T; impl T { pub fn make() {} } }\n";
+
+// Stands for: each segment past the item must be declared inside the one
+// before it. HEAD binds `a::m::S::new()` and `crate::a::m::S::new()` to
+// `S::new` (the `S` beside `m`, not in it); main binds the first.
+// Expected: no edge for any spelling, `a::S::Other::new()` included.
+#[test]
+fn test_module_path_call_through_segment_not_declared_inside_previous_records_no_edge() {
+    let files = [
+        (
+            "src/lib.rs",
+            "pub mod a;\npub fn bad() { a::m::S::new(); crate::a::m::S::new(); \
+             a::S::Other::new(); }\n",
+        ),
+        ("src/a/mod.rs", NESTED_A),
+    ];
+    let g = crate_graph(&files, true);
+    assert_eq!(targets(&g, "bad"), vec![]);
+}
+
+// Stands for: the member comes from the last qualifier. `a::m::f()` binds
+// `m`'s own `f`, never the `f` beside `m`, and `a::m::T::make()` reaches
+// the type `T` inside `m`. HEAD and main bind `m::f` (another tier, 0.85);
+// HEAD binds `T::make`, main none.
+#[test]
+fn test_module_path_call_into_inline_module_member_binds_the_last_qualifiers_member() {
+    let files = [
+        (
+            "src/lib.rs",
+            "pub mod a;\npub fn run() { a::m::f(); }\npub fn mk() { a::m::T::make(); }\n",
+        ),
+        ("src/a/mod.rs", NESTED_A),
+    ];
+    let g = crate_graph(&files, true);
+    assert_eq!(targets(&g, "run"), vec![to("src/a/mod.rs", "f")]);
+    assert_eq!(call_owners(&g, "run"), vec!["m".to_string()]);
+    assert_eq!(targets(&g, "mk"), vec![to("src/a/mod.rs", "make")]);
+    assert_eq!(call_owners(&g, "mk"), vec!["T".to_string()]);
+}
+
+// Stands for: the Rust parser files no node for a `union`, only its
+// `impl`, and that `impl` names the item as a type. HEAD and main bind
+// nothing; expected: the associated function.
+#[test]
+fn test_module_path_call_to_union_associated_function_binds_it() {
+    let files = [
+        (
+            "src/lib.rs",
+            "pub mod a;\npub fn r_union() { a::U::mk(); crate::a::U::mk(); }\n",
+        ),
+        (
+            "src/a/mod.rs",
+            "pub union U { x: u32 }\nimpl U { pub fn mk() -> U { U { x: 0 } } }\n",
+        ),
+    ];
+    let g = crate_graph(&files, true);
+    assert_eq!(targets(&g, "r_union"), vec![to("src/a/mod.rs", "mk")]);
+}

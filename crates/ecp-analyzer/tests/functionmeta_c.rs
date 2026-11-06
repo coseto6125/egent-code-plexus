@@ -178,3 +178,40 @@ fn c_attribute_decorator_captured() {
     // GCC attribute may appear; non-empty is sufficient for this test.
     let _ = dec_names; // attribute presence is grammar-version dependent
 }
+
+/// The flat `params` of `name`, each `StrRef` resolved.
+fn params_of(g: &ZeroCopyGraph, name: &str) -> Vec<String> {
+    let pool = g.string_pool.as_slice();
+    meta(g, name)
+        .params
+        .iter()
+        .map(|p| p.resolve(pool).to_string())
+        .collect()
+}
+
+/// Stands for: a K&R definition has its identifier list's parameters, typed
+/// by the declarations before the body, so it counts what its prototype
+/// counts. HEAD returns an empty list.
+#[test]
+fn test_extract_params_kr_definition_reads_names_and_declared_types() {
+    let g = analyze("int kr(a, b) int a; char *b; { return a; }\n");
+    assert_eq!(params_of(&g, "kr"), ["a", "int", "b", "char"]);
+}
+
+/// Stands for: a K&R parameter no declaration types (implicit `int`) keeps
+/// its place with an empty, unknown type. HEAD returns an empty list.
+#[test]
+fn test_extract_params_kr_parameter_without_declaration_has_empty_type() {
+    let g = analyze("int kr2(a, b) int a; { return a; }\n");
+    assert_eq!(params_of(&g, "kr2"), ["a", "int", "b", ""]);
+}
+
+/// Stands for: an unnamed `void *` is one parameter, not the `(void)` list.
+/// HEAD already returns it (the C declarator text is `*`); this guards the
+/// `(void)` rule against that shape.
+#[test]
+fn test_extract_params_unnamed_void_pointer_counts_one_parameter() {
+    let g = analyze("void release(void *);\nvoid none(void);\n");
+    assert_eq!(params_of(&g, "release"), ["*", "void"]);
+    assert!(params_of(&g, "none").is_empty());
+}

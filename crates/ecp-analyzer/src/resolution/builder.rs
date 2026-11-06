@@ -3114,7 +3114,7 @@ fn pass1_8_function_metas(
                     if csharp && raw_node.kind == NodeKind::Method {
                         symbol_table.note_csharp_method_flags(node_idx, rfm.flags);
                     }
-                    symbol_table.note_c_callable(node_idx, rfm.flags, rfm.params.len());
+                    symbol_table.note_c_callable(node_idx, rfm.flags, &rfm.params);
                     if rfm.flags & csharp_extension::EXTENSION_FLAG != 0 {
                         // `params` alternates name and type: [1] is the
                         // `this` parameter's type, [2..] the other names

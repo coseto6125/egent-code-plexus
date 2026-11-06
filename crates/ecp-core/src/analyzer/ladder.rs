@@ -1787,9 +1787,11 @@ pub fn anchored_module_file<F: ModuleTreeFacts>(
 /// type's file never bind. [`qualified`] then applies the method rule
 /// ([`rust_path_may_bind`]). A path with segments past the item
 /// ([`TreePlace::past`]) binds only when the file confirms each of them but
-/// the member: the item and every middle segment name a module or a type
-/// the file declares. `a::missing::top()` then binds nothing, never the
-/// `top` of `a`'s file.
+/// the member: the item names a module or a type the file declares (an
+/// `impl` block counts), every middle segment one declared inside the
+/// segment before it, and the member is picked from the last of them.
+/// `a::missing::top()` and `a::m::S::new()` (no `S` inside `m`) then bind
+/// nothing, never the `top` or `S::new` of `a`'s file.
 pub fn module_tree_member<F: ModuleTreeFacts, D: ResolveFacts>(
     facts: &F,
     decls: &D,
@@ -1828,39 +1830,59 @@ pub fn module_tree_member<F: ModuleTreeFacts, D: ResolveFacts>(
         return None;
     };
     let file = file.as_ref();
-    // The segments the walk did not consume stand for inline `mod`s and a
-    // type's associated items. A turbofish segment (`S::<u8>::new`) names
-    // none of them.
-    let confirmed = |name: &str| {
-        let name = name.split('<').next().unwrap_or(name);
-        name.is_empty()
-            || decls
-                .call_decls(file, name)
-                .any(|(_, kind)| kind.is_qualifier())
-    };
-    if past > 0 {
-        let segs: Vec<&str> = callee.split("::").collect();
-        let middle = &segs[segs.len().saturating_sub(past)..segs.len().saturating_sub(1)];
-        if !confirmed(item.as_str()) || !middle.iter().all(|&seg| confirmed(seg)) {
-            return None;
-        }
-    }
     let wanted = target.kind_predicate();
     let is_type = ResolveTarget::Type.kind_predicate();
-    let mut item_is_type = false;
-    for (id, kind) in decls.call_decls(file, &item) {
-        let (wanted_kind, type_kind) = (wanted(kind), is_type(kind));
-        if !(wanted_kind || type_kind) {
-            continue;
+    // The segments the walk did not consume stand for inline `mod`s and a
+    // type's associated items. Each one past the item must be declared
+    // inside the one before it, and the member is picked from the last
+    // (`qualifier`), so `a::m::S::new()` never reaches the `S` beside `m`.
+    // A turbofish segment (`S::<u8>::new`) names none of them.
+    let mut qualifier = item.as_str();
+    let mut nested: Option<u32> = None;
+    if past > 0 {
+        // The Rust parser files no node for a `union`, only its `impl`
+        // blocks, so an `Impl` also names the item as a type.
+        if !decls
+            .call_decls(file, qualifier)
+            .any(|(_, kind)| kind.is_qualifier() || kind == NodeKind::Impl)
+        {
+            return None;
         }
-        let Some(id) = module_item(decls, id) else {
-            continue;
-        };
-        if wanted_kind {
-            return Some(id);
+        let segs: Vec<&str> = callee.split("::").collect();
+        let middle = &segs[segs.len().saturating_sub(past)..segs.len().saturating_sub(1)];
+        for &seg in middle {
+            let name = seg.split('<').next().unwrap_or(seg);
+            if name.is_empty() {
+                continue;
+            }
+            let outer = owner_key(qualifier)?;
+            let (id, _) = decls.call_decls(file, name).find(|&(id, kind)| {
+                kind.is_qualifier() && decls.owner(id).and_then(owner_key) == Some(outer)
+            })?;
+            qualifier = name;
+            nested = Some(id);
         }
-        item_is_type = true;
     }
+    let item_is_type = match nested {
+        Some(id) => is_type(decls.kind(id)),
+        None => {
+            let mut item_is_type = false;
+            for (id, kind) in decls.call_decls(file, &item) {
+                let (wanted_kind, type_kind) = (wanted(kind), is_type(kind));
+                if !(wanted_kind || type_kind) {
+                    continue;
+                }
+                let Some(id) = module_item(decls, id) else {
+                    continue;
+                };
+                if wanted_kind {
+                    return Some(id);
+                }
+                item_is_type = true;
+            }
+            item_is_type
+        }
+    };
     let bare = member.split('<').next().unwrap_or(member);
     // The candidates with their `impl` overloads: a body-local
     // `impl Foo { fn new }` before the module-level one makes the module-level
@@ -1871,24 +1893,25 @@ pub fn module_tree_member<F: ModuleTreeFacts, D: ResolveFacts>(
     let pick = candidates
         .iter()
         .find_map(|&id| past_body_local(decls, id, usable))?;
-    if !item_is_type {
+    if !item_is_type && past == 0 {
         return Some(pick);
     }
-    let item_key = owner_key(&item)?;
+    let item_key = owner_key(qualifier)?;
     let owned_by_item =
         |id: u32| usable(id) && decls.owner(id).and_then(owner_key) == Some(item_key);
-    if let Some(id) = candidates
+    let owned = candidates
         .iter()
-        .find_map(|&id| past_body_local(decls, id, owned_by_item))
-    {
-        return Some(id);
+        .find_map(|&id| past_body_local(decls, id, owned_by_item));
+    // An inline `mod` (or a `union`'s `impl`) holds its members itself.
+    if owned.is_some() || !item_is_type {
+        return owned;
     }
     prefer_owned(
         decls,
         file,
         pick,
         bare,
-        Some(item.as_str()),
+        Some(qualifier),
         &[],
         target,
         PickScope {

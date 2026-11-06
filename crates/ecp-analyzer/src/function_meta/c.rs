@@ -207,7 +207,8 @@ fn collect_c_decorators(fn_node: &Node<'_>, source: &[u8], lines: &[&str]) -> Ve
 }
 
 /// Extract flat `[name1, type1, name2, type2, ...]` from C function parameters.
-/// Handles named and unnamed parameters (`void` param list → empty).
+/// Handles named and unnamed parameters (`void` param list → empty) and a
+/// K&R identifier list.
 fn extract_params(fn_node: &Node<'_>, source: &[u8]) -> Vec<String> {
     // Find the function_declarator inside the fn_node to get to parameters.
     let Some(decl_node) = find_function_declarator(*fn_node) else {
@@ -224,8 +225,8 @@ fn extract_params(fn_node: &Node<'_>, source: &[u8]) -> Vec<String> {
             if child.kind() == "parameter_declaration" {
                 // Type: the `type` field (or entire source span minus the name).
                 // Name: `declarator` field — may be absent for unnamed params.
-                let name = child
-                    .child_by_field_name("declarator")
+                let declarator = child.child_by_field_name("declarator");
+                let name = declarator
                     .map(|d| {
                         // Declarator may be a pointer_declarator wrapping an identifier.
                         extract_declarator_name(d, source)
@@ -236,7 +237,7 @@ fn extract_params(fn_node: &Node<'_>, source: &[u8]) -> Vec<String> {
                     .map(|t| node_text(&t, source).to_string())
                     .unwrap_or_default();
                 // Skip `void` single-param declarations (`int foo(void)`).
-                if ty == "void" && name.is_empty() {
+                if ty == "void" && declarator.is_none() {
                     if !cursor.goto_next_sibling() {
                         break;
                     }
@@ -244,6 +245,13 @@ fn extract_params(fn_node: &Node<'_>, source: &[u8]) -> Vec<String> {
                 }
                 result.push(name);
                 result.push(ty);
+            } else if child.kind() == "identifier" {
+                // A K&R list (`int kr(a, b) int a; int b; { .. }`) names its
+                // parameters; their types come from the declarations before
+                // the body, and stay empty (unknown) when none declares one.
+                let name = node_text(&child, source);
+                result.push(name.to_string());
+                result.push(old_style_param_type(fn_node, name, source).unwrap_or_default());
             } else if child.kind() == "variadic_parameter" {
                 result.push("...".to_string());
                 result.push(String::new());
@@ -254,6 +262,28 @@ fn extract_params(fn_node: &Node<'_>, source: &[u8]) -> Vec<String> {
         }
     }
     result
+}
+
+/// The type that a K&R definition's parameter declarations (`int a;`
+/// between the declarator and the body) give the parameter `name`.
+fn old_style_param_type(fn_node: &Node<'_>, name: &str, source: &[u8]) -> Option<String> {
+    let mut cursor = fn_node.walk();
+    let found = fn_node
+        .children(&mut cursor)
+        .filter(|child| child.kind() == "declaration")
+        .find_map(|declaration| {
+            let mut declarators = declaration.walk();
+            let declares = declaration
+                .children_by_field_name("declarator", &mut declarators)
+                .any(|d| extract_declarator_name(d, source) == name);
+            if !declares {
+                return None;
+            }
+            declaration
+                .child_by_field_name("type")
+                .map(|ty| node_text(&ty, source).to_string())
+        });
+    found
 }
 
 /// Walk a function definition / declaration node to find the inner `function_declarator`.

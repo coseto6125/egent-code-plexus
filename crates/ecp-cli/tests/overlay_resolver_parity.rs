@@ -2013,6 +2013,29 @@ fn test_overlay_rust_mod_rs_relative_heads_match_reindex() {
     }
 }
 
+// Stands for: a path segment past the item binds only when it is declared
+// inside the segment before it, out of a dirty caller as in a reindex.
+// HEAD's reindex binds `a::m::S::new()` to the `S` beside `m`.
+#[test]
+fn test_overlay_rust_path_segment_not_declared_inside_previous_matches_reindex() {
+    parity(
+        &RustProvider::new().unwrap(),
+        &[
+            ("src/lib.rs", "pub mod a;\nfn run() {}"),
+            (
+                "src/a/mod.rs",
+                "pub struct S;\npub struct Other;\nimpl S { pub fn new() {} }\n\
+                 pub mod m { pub struct T; }",
+            ),
+        ],
+        &[(
+            "src/lib.rs",
+            "pub mod a;\nfn run() { a::m::S::new(); crate::a::m::S::new(); a::S::Other::new(); }",
+        )],
+        &[],
+    );
+}
+
 #[test]
 fn test_overlay_rust_clean_caller_redirects_to_dirty_target() {
     parity(
@@ -3166,6 +3189,37 @@ fn test_overlay_python_type_alias_value_read_matches_reindex() {
     for dirty in [
         ("app.py", shifted_app.as_str()),
         ("aliases.py", shifted_aliases.as_str()),
+    ] {
+        let (full, overlay) = field_read_edges(
+            &PythonProvider::new().unwrap(),
+            &files,
+            &[dirty],
+            &["value_read"],
+        );
+        assert_eq!(full.len(), 1, "{}: one alias read: {full:?}", dirty.0);
+        assert_eq!(full[0].2, RelType::ReadsField);
+        assert_eq!(overlay, full, "{} dirty", dirty.0);
+    }
+}
+
+// The alias read keeps its edge beside an unrelated `Num = 3` in another
+// file (a Global-tier value Python rejects), whichever file is dirty. HEAD's
+// reindex has no edge.
+#[test]
+fn test_overlay_python_type_alias_beside_unrelated_variable_matches_reindex() {
+    let aliases = "Num = int | float\n";
+    let consts = "Num = 3\n";
+    let app = "from aliases import Num\n\ndef check(x):\n    return isinstance(x, Num)\n";
+    let files = [
+        ("aliases.py", aliases),
+        ("consts.py", consts),
+        ("app.py", app),
+    ];
+    let shifted_app = format!("\n{app}");
+    let shifted_consts = format!("\n{consts}");
+    for dirty in [
+        ("app.py", shifted_app.as_str()),
+        ("consts.py", shifted_consts.as_str()),
     ] {
         let (full, overlay) = field_read_edges(
             &PythonProvider::new().unwrap(),

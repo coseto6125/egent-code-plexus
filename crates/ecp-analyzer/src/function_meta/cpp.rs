@@ -397,16 +397,17 @@ fn extract_params(fn_node: &Node<'_>, source: &[u8]) -> Vec<String> {
             if child.kind() == "parameter_declaration"
                 || child.kind() == "optional_parameter_declaration"
             {
-                let name = child
-                    .child_by_field_name("declarator")
+                let declarator = child.child_by_field_name("declarator");
+                let name = declarator
                     .map(|d| extract_declarator_name(d, source))
                     .unwrap_or_default();
                 let ty = child
                     .child_by_field_name("type")
                     .map(|t| node_text(&t, source).to_string())
                     .unwrap_or_default();
-                // Skip void-only param lists.
-                if ty == "void" && name.is_empty() {
+                // Skip void-only param lists. An unnamed `void *` has a
+                // declarator but no name: it is a parameter.
+                if ty == "void" && declarator.is_none() {
                     if !cursor.goto_next_sibling() {
                         break;
                     }

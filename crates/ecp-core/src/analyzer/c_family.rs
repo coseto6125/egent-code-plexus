@@ -15,24 +15,27 @@
 //!   (owner-less) function, struct, enum, typedef, variable, constant or
 //!   macro. A class, a method and anything inside a namespace or a type
 //!   stay C++ only. A `static` function has internal linkage, so it never
-//!   crosses. Beside an owner-less prototype, a crossing definition of
-//!   another parameter count is another overload, not the declared
-//!   function, so it stays out. An own-language definition with no prototype beside it
+//!   crosses, and a vendor one never crosses to a non-vendor caller. Beside
+//!   an owner-less prototype, a crossing definition of another parameter
+//!   list is another overload, not the declared function, so it stays out.
+//!   An own-language definition with no prototype beside it
 //!   always wins, so a name that a C file and a C++ file both define keeps
 //!   its old binding.
 //! - **Declaration and definition are one target.** A C / C++ function
 //!   declared without a body (a header prototype: `FunctionMeta::FLAG_EXTERN`
 //!   on a `Function`) leaves the field when a definition in it settles it:
-//!   the same owner, the same parameter count, and a definition the caller
+//!   the same owner, the same parameter types, and a definition the caller
 //!   can reach (no vendor one for a non-vendor caller, no `static` one in
 //!   another file). Two definitions stay ambiguous, and so does a prototype
-//!   that no definition settles. A callable whose parse paired no meta has
-//!   no known parameter count: it settles nothing.
+//!   that no definition settles. A callable whose parse paired no meta, or
+//!   whose meta lacks a parameter's type (a K&R name without its
+//!   declaration), has no known parameter types: it settles nothing.
 
 use crate::analyzer::same_file_pick::PickFacts;
 use crate::file_category::{FileMeta, Language};
 use crate::graph::{FunctionMeta, NodeKind};
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashSet, FxHasher};
+use std::hash::{Hash, Hasher};
 
 pub fn is_c_family(language: Language) -> bool {
     matches!(language, Language::C | Language::Cpp)
@@ -46,15 +49,35 @@ pub struct CCallable {
     /// The parameter count: `FunctionMeta::params` holds a name and a type
     /// per parameter. `f(void)` and `f()` both count 0, a `...` counts 1.
     arity: u16,
+    /// A hash of the normalised parameter types ([`hash_type`]); `None`
+    /// when a parameter other than `...` has no type text.
+    signature: Option<u64>,
 }
 
 impl CCallable {
-    /// The facts of a callable whose meta carries `flags` and a flat
-    /// `params` list of `params_len` entries.
-    pub fn new(flags: u16, params_len: usize) -> Self {
+    /// The facts of a callable whose meta carries `flags` and the flat
+    /// `params` list `[name1, type1, name2, type2, ..]`.
+    pub fn new<'s>(flags: u16, params: impl IntoIterator<Item = &'s str>) -> Self {
+        let mut hasher = FxHasher::default();
+        let mut known = true;
+        let mut name = "";
+        let mut len = 0usize;
+        for text in params {
+            if len % 2 == 0 {
+                name = text;
+            } else if !text.trim().is_empty() {
+                hash_type(&mut hasher, text);
+            } else if name == "..." {
+                hash_type(&mut hasher, name);
+            } else {
+                known = false;
+            }
+            len += 1;
+        }
         Self {
             flags,
-            arity: u16::try_from(params_len / 2).unwrap_or(u16::MAX),
+            arity: u16::try_from(len / 2).unwrap_or(u16::MAX),
+            signature: known.then(|| hasher.finish()),
         }
     }
 
@@ -63,9 +86,49 @@ impl CCallable {
     }
 }
 
-/// A prototype's or a definition's owner and parameter count: a definition
-/// settles the prototype with the same key.
-type Key<'f> = (Option<&'f str>, u16);
+/// Feed the parameter type `ty` to `hasher` in one spelling: whitespace
+/// kept only between two identifier characters (`T *` == `T*`), and a
+/// leading elaborated keyword dropped (`struct foo` == `foo`), so a C
+/// header and a C++ definition of one function agree.
+fn hash_type(hasher: &mut FxHasher, ty: &str) {
+    let ty = ty.trim();
+    let ty = ["struct ", "enum ", "union ", "class "]
+        .iter()
+        .find_map(|keyword| ty.strip_prefix(keyword))
+        .map_or(ty, str::trim_start);
+    let (mut gap, mut prev_ident) = (false, false);
+    for c in ty.chars() {
+        if c.is_whitespace() {
+            gap = true;
+            continue;
+        }
+        let ident = c.is_alphanumeric() || c == '_';
+        if gap && prev_ident && ident {
+            ' '.hash(hasher);
+        }
+        c.hash(hasher);
+        (gap, prev_ident) = (false, ident);
+    }
+    // Ends the parameter, so `(a, bc)` and `(ab, c)` differ.
+    hasher.write_u8(0xff);
+}
+
+/// A prototype's or a definition's owner, parameter count and parameter
+/// types: a definition settles the prototype with the same key when the
+/// types are known.
+type Key<'f> = (Option<&'f str>, u16, Option<u64>);
+
+/// Whether a definition keyed `definition` may be the function the
+/// prototype keyed `prototype` declares: the same owner and count, and no
+/// known pair of parameter lists that differ.
+fn may_declare(prototype: Key<'_>, definition: Key<'_>) -> bool {
+    prototype.0 == definition.0
+        && prototype.1 == definition.1
+        && match (prototype.2, definition.2) {
+            (Some(declared), Some(defined)) => declared == defined,
+            _ => true,
+        }
+}
 
 /// The key of the prototype `id`; `None` when `id` is no prototype.
 fn prototype_key<'f, F: PickFacts + ?Sized>(
@@ -77,7 +140,7 @@ fn prototype_key<'f, F: PickFacts + ?Sized>(
         return None;
     }
     let meta = callable(id).filter(|meta| meta.flags & FunctionMeta::FLAG_EXTERN != 0)?;
-    Some((facts.owner(id), meta.arity))
+    Some((facts.owner(id), meta.arity, meta.signature))
 }
 
 /// The key of the definition `id`, a function or method with a body. A
@@ -95,12 +158,13 @@ fn definition_key<'f, F: PickFacts + ?Sized>(
     }
     let meta = callable(id)?;
     (kind == NodeKind::Method || meta.flags & FunctionMeta::FLAG_EXTERN == 0)
-        .then(|| (facts.owner(id), meta.arity))
+        .then(|| (facts.owner(id), meta.arity, meta.signature))
 }
 
 /// The keys the definitions in `entries` settle for a caller in
 /// `caller_file`. A definition the caller cannot reach settles nothing, or
 /// the prototype would leave and the barrier then drop the definition too.
+/// Neither does one whose parameter types are unknown.
 fn settled_keys<'f, F: PickFacts + ?Sized>(
     facts: &'f F,
     caller: FileMeta,
@@ -116,6 +180,7 @@ fn settled_keys<'f, F: PickFacts + ?Sized>(
                     || facts.file_of(id) == Some(caller_file))
         })
         .filter_map(|&(id, _)| definition_key(facts, callable, id))
+        .filter(|&(_, _, signature)| signature.is_some())
         .collect()
 }
 
@@ -169,6 +234,10 @@ where
                     },
                 )
             })
+            // The vendor barrier before the prototypes: a vendor prototype
+            // the caller cannot reach must not push a reachable definition
+            // out as another overload.
+            .filter(|&(_, meta)| caller.admits(meta))
             .collect();
         prototypes.extend(
             crossing
@@ -177,11 +246,15 @@ where
         );
         // A crossing definition is owner-less, so only an owner-less
         // prototype declares it.
-        let declared = prototypes.iter().any(|&(owner, _)| owner.is_none());
+        let declared = prototypes.iter().any(|&(owner, _, _)| owner.is_none());
         let own = field.len();
         field.extend(crossing.into_iter().filter(|&(id, _)| {
             !declared
-                || definition_key(facts, &callable, id).is_none_or(|key| prototypes.contains(&key))
+                || definition_key(facts, &callable, id).is_none_or(|key| {
+                    prototypes
+                        .iter()
+                        .any(|&prototype| may_declare(prototype, key))
+                })
         }));
         settled.extend(settled_keys(
             facts,

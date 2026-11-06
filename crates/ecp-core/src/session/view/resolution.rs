@@ -2127,7 +2127,7 @@ impl<'a> OverlayFacts<'a> {
     }
 
     /// The index's `SymbolTable::c_callable`: the flags and the parameter
-    /// count of a C or C++ function or method, from the archived
+    /// list of a C or C++ function or method, from the archived
     /// `FunctionMeta` of a base node and from the fresh parse of a dirty
     /// one. `None` when no meta was paired with it.
     fn c_callable(&self, id: u32) -> Option<CCallable> {
@@ -2144,10 +2144,15 @@ impl<'a> OverlayFacts<'a> {
                 let symbol = file.symbols.get((id - start) as usize)?;
                 symbol
                     .flags
-                    .map(|flags| CCallable::new(flags, symbol.params.len()))
+                    .map(|flags| CCallable::new(flags, symbol.params.iter().map(String::as_str)))
             }
-            None => base_function_meta(self.graph, id)
-                .map(|meta| CCallable::new(meta.flags.to_native(), meta.params.len())),
+            None => base_function_meta(self.graph, id).map(|meta| {
+                let pool = &self.graph.string_pool;
+                CCallable::new(
+                    meta.flags.to_native(),
+                    meta.params.iter().map(|text| text.resolve(pool)),
+                )
+            }),
         }
     }
 
