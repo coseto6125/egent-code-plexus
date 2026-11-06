@@ -893,7 +893,13 @@ impl ParseSpec for PhpSpec {
                     &["function_call_expression"],
                 );
                 let (raw_path_literals, raw_sql_refs, dynamic_calls) =
-                    extract_php_calls_and_path_literals(root, source, &mut cx.nodes);
+                    extract_php_calls_and_path_literals(
+                        root,
+                        source,
+                        &mut cx.nodes,
+                        cx.path,
+                        &mut cx.blind_spots,
+                    );
                 cx.path_literals = raw_path_literals;
                 cx.sql_refs = raw_sql_refs;
                 // A fan-out names every value the method variable can hold, so its
