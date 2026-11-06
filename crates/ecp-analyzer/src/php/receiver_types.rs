@@ -289,10 +289,6 @@ fn local_function_name(name: &str, namespace: Option<&str>) -> String {
 /// `static` / `parent` type.
 fn parameter_class(node: Node<'_>, var: &str, source: &[u8]) -> Option<String> {
     let mut scopes = Vec::new();
-    // The scopes `by_ref.0 ..= by_ref.1` share the variable a by-reference
-    // capture names. A closure further out that captures it by value holds
-    // its own copy, so the shared range ends there.
-    let mut by_ref: Option<(usize, Option<usize>)> = None;
     let mut current = node.parent();
     let declared = loop {
         let n = current?;
@@ -329,13 +325,6 @@ fn parameter_class(node: Node<'_>, var: &str, source: &[u8]) -> Option<String> {
         if !crosses {
             return None;
         }
-        let at = scopes.len() - 1;
-        let shares = captures_by_ref(n, var, source);
-        by_ref = match by_ref {
-            None if shares => Some((at, None)),
-            Some((from, None)) if !shares => Some((from, Some(at))),
-            kept => kept,
-        };
     };
     let ty = declared.child_by_field_name("type")?;
     let nullable = ty.kind() == "optional_type"
@@ -354,12 +343,18 @@ fn parameter_class(node: Node<'_>, var: &str, source: &[u8]) -> Option<String> {
     if matches!(class, "self" | "static" | "parent") {
         return None;
     }
-    // A closure that captures `var` by reference runs when it is called, not
-    // where it is written, so from it outwards a write anywhere counts.
+    // A closure that captures `var` by reference shares it with the scope
+    // around it and runs at any time, so a write anywhere in either scope
+    // counts. A capture by value copies the variable where the closure is
+    // written, so the scope around it counts only its earlier writes.
+    let shares: Vec<bool> = scopes
+        .iter()
+        .map(|&scope| captures_by_ref(scope, var, source))
+        .collect();
     let reassigned = scopes.iter().enumerate().any(|(i, &scope)| {
         let scan = WriteScan {
             coalesce_writes: nullable,
-            anywhere: by_ref.is_some_and(|(from, end)| i >= from && end.is_none_or(|end| i <= end)),
+            anywhere: shares[i] || (i > 0 && shares[i - 1]),
         };
         assigns_variable(scope, var, source, node, scan)
     });

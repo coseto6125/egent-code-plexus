@@ -959,8 +959,9 @@ fn test_bound_method_reference_python_rebinding_in_declaring_function_returns_no
     }
 }
 
-/// Stands for: the expression a rebinding statement evaluates, and every read
-/// before the statement, still see `obj: Cls`.
+/// Stands for: the expression a rebinding statement evaluates, every read
+/// before the statement, and every read after a later `obj: Cls = ...`
+/// annotation still see `obj: Cls`.
 #[test]
 fn test_bound_method_reference_python_read_before_rebinding_keeps_type() {
     for body in [
@@ -969,6 +970,7 @@ fn test_bound_method_reference_python_read_before_rebinding_keeps_type() {
         "obj = map(obj.m, xs)",
         "if (obj := map(obj.m, xs)):\n        pass",
         "f = map(obj.m, xs)\n    obj = loose",
+        "obj = loose\n    obj: Cls = Cls()\n    return list(map(obj.m, xs))",
     ] {
         let g = python_graph(body);
         assert_one_cross_file(&function_refs(&g, "run"), "cls.py", "m");
@@ -1143,11 +1145,18 @@ fn test_bound_method_reference_typescript_for_of_pattern_target_returns_no_edge(
 }
 
 /// Stands for: the iterable of `for (obj of ...)` runs before the first
-/// assignment to `obj`, so it still reads `obj: Cls`.
+/// assignment to `obj`, so it still reads `obj: Cls`. A loop inside a nested
+/// function, a generator included, ends its reach at that function.
 #[test]
 fn test_bound_method_reference_typescript_for_of_iterable_reads_outer_type() {
-    let g = ts_graph("for (obj of xs.map(obj.m)) {}");
-    assert_one_cross_file(&function_refs(&g, "run"), "cls.ts", "m");
+    for body in [
+        "for (obj of xs.map(obj.m)) {}",
+        "function* unused() {\n    for (obj of loose) {}\n  }\n  xs.forEach(obj.m);",
+        "const unused = () => {\n    for (obj of loose) {}\n  };\n  xs.forEach(obj.m);",
+    ] {
+        let g = ts_graph(body);
+        assert_one_cross_file(&function_refs(&g, "run"), "cls.ts", "m");
+    }
 }
 
 #[test]

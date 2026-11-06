@@ -63,11 +63,13 @@ struct ScopeBindings {
     /// Names a `global` statement declares: they name module bindings, so an
     /// enclosing function's variable of that name is not visible.
     globals: HashSet<String>,
-    /// The names this scope's own body writes, each with the byte from which
-    /// a read sees the new value: the end of `xs` in `for obj in xs:`, the end
-    /// of the statement for an assignment. It keeps `global` and `nonlocal`
-    /// names, whose writes replace a binding of another scope.
-    rebinds: HashMap<String, usize>,
+    /// The names this scope's own body binds, each with the bytes from which a
+    /// read sees the new binding: the end of `xs` in `for obj in xs:`, the end
+    /// of the statement for an assignment. `true` marks a write; `false` an
+    /// annotated assignment, which gives the name the type a read resolves
+    /// through. It keeps `global` and `nonlocal` names, whose writes replace
+    /// a binding of another scope.
+    rebinds: HashMap<String, Vec<(usize, bool)>>,
 }
 
 impl ScopeBindings {
@@ -77,10 +79,27 @@ impl ScopeBindings {
         within(self.bytes) && !self.outside.is_some_and(within)
     }
 
+    /// Whether the last binding of `name` before `receiver` is a write.
     fn rebinds_before(&self, name: &str, receiver: Node<'_>) -> bool {
         self.rebinds
             .get(name)
-            .is_some_and(|from| *from <= receiver.start_byte())
+            .and_then(|events| {
+                events
+                    .iter()
+                    .filter(|(from, _)| *from <= receiver.start_byte())
+                    .max_by_key(|(from, _)| *from)
+            })
+            .is_some_and(|&(_, writes)| writes)
+    }
+}
+
+fn note_rebinds(
+    bound: HashMap<String, usize>,
+    writes: bool,
+    rebinds: &mut HashMap<String, Vec<(usize, bool)>>,
+) {
+    for (name, from) in bound {
+        rebinds.entry(name).or_default().push((from, writes));
     }
 }
 
@@ -227,12 +246,14 @@ pub fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
                                     node.start_byte(),
                                     &mut names,
                                 );
+                                let mut bound = HashMap::new();
                                 collect_case_captures(
                                     pattern,
                                     source,
                                     pattern.end_byte(),
-                                    &mut rebinds,
+                                    &mut bound,
                                 );
+                                note_rebinds(bound, true, &mut rebinds);
                             }
                             None
                         }
@@ -254,16 +275,18 @@ pub fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
                     };
                     if let Some(target) = target {
                         collect_shadow_names(target, source, node.start_byte(), &mut names);
-                        // An annotated assignment declares the type that a
-                        // read resolves through; it rebinds nothing.
-                        if node.child_by_field_name("type").is_none() {
-                            let from = match node.kind() {
-                                "for_statement" => node.child_by_field_name("right"),
-                                _ => Some(node),
-                            };
-                            let from = from.map_or(node.end_byte(), |n| n.end_byte());
-                            collect_shadow_names(target, source, from, &mut rebinds);
-                        }
+                        let declares_type = target.kind() == "identifier"
+                            && node.child_by_field_name("type").is_some_and(|ty| {
+                                simple_name_and_type(target, ty, source).is_some()
+                            });
+                        let from = match node.kind() {
+                            "for_statement" => node.child_by_field_name("right"),
+                            _ => Some(node),
+                        };
+                        let from = from.map_or(node.end_byte(), |n| n.end_byte());
+                        let mut bound = HashMap::new();
+                        collect_shadow_names(target, source, from, &mut bound);
+                        note_rebinds(bound, !declares_type, &mut rebinds);
                     }
                     let mut cursor = node.walk();
                     pending.extend(node.named_children(&mut cursor));

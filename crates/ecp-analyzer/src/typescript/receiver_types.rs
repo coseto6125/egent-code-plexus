@@ -262,16 +262,7 @@ fn statement_declaration(n: Node<'_>) -> Option<(Node<'_>, PosRange)> {
             }
             let body = n.child_by_field_name("body")?;
             let scope = std::iter::successors(n.parent(), |p| p.parent())
-                .find(|p| {
-                    matches!(
-                        p.kind(),
-                        "function_declaration"
-                            | "function"
-                            | "function_expression"
-                            | "method_definition"
-                            | "arrow_function"
-                    )
-                })
+                .find(|p| FUNCTION_SCOPES.contains(&p.kind()))
                 .unwrap_or_else(|| {
                     std::iter::successors(Some(n), |p| p.parent())
                         .last()

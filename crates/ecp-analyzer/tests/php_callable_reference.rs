@@ -514,6 +514,19 @@ fn test_array_callable_by_ref_inside_by_value_closure_write_in_outer_closure_ref
     );
 }
 
+/// Stands for: a by-value capture inside a closure that shares `$o` by
+/// reference copies `$o` only when that closure runs, so a later write in the
+/// declaring function can reach the copy.
+#[test]
+fn test_array_callable_by_value_capture_inside_by_ref_closure_outer_write_references_nothing() {
+    assert_eq!(
+        references(
+            "$outer = function () use (&$o, $a) { return function () use ($o, $a) { return function () use (&$o, $a) { return array_map([$o, 'cb_ptr'], $a); }; }; }; $o = $a; return $outer()()();"
+        ),
+        Vec::<String>::new()
+    );
+}
+
 #[test]
 fn test_array_callable_by_value_closure_parameter_assigned_after_closure_references_method() {
     assert_eq!(
