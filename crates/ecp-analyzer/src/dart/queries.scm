@@ -146,6 +146,13 @@
   (initialized_identifier_list
     (initialized_identifier name: (identifier) @property.name))) @property
 
+;; Class `static final` / `static const` fields — `static final a = f(), b = g();`.
+;; tree-sitter-dart uses static_final_declaration_list for these, as at top level.
+(declaration
+  (type)? @type
+  (static_final_declaration_list
+    (static_final_declaration name: (identifier) @property.name))) @property
+
 ;; Getters inside a class — `Type get name => ...` / `Type get name { ... }`
 ;; method_signature wraps getter_signature when the getter is a class member.
 (method_declaration

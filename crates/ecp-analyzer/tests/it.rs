@@ -389,6 +389,7 @@ mod python_anonymous_callbacks;
 mod python_blueprint_route_decorator;
 mod python_celery_events;
 mod python_class_methods;
+mod python_class_namespace_calls;
 mod python_constructor;
 mod python_decorator_capture;
 mod python_driver_parity;

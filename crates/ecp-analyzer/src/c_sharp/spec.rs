@@ -20,8 +20,8 @@ impl LangSpec for CSharpSpec {
         "enum.name"         => NodeKind::Enum,
         "enum_member.name"  => NodeKind::EnumVariant,
         "struct.name"       => NodeKind::Struct,
-        // Special members — all emitted as Method so body-calls attach via
-        // enclosing_containers (which gates on Function|Method|Constructor).
+        // Special members — all emitted as Method so body-calls attach to
+        // them as the smallest enclosing callable.
         "destructor.name"   => NodeKind::Method,
         "event.name"        => NodeKind::Method,
         "event_field.name"  => NodeKind::Method,

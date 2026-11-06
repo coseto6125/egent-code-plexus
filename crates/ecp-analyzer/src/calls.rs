@@ -217,14 +217,11 @@ fn holder_at_pos<'s>(
 
 /// Which tier of [`holder`] a node of `kind` belongs to.
 fn holder_tier(kind: NodeKind) -> Option<usize> {
-    if is_container_kind(kind) {
-        Some(0)
-    } else if is_value_kind(kind) {
-        Some(1)
-    } else if ecp_core::analyzer::heritage::holds_heritage(kind) {
-        Some(2)
-    } else {
-        None
+    match kind {
+        k if is_container_kind(k) => Some(0),
+        k if is_value_kind(k) => Some(1),
+        k if ecp_core::analyzer::heritage::holds_heritage(k) => Some(2),
+        _ => None,
     }
 }
 
@@ -286,9 +283,7 @@ fn holder<'s, K: Ord + Copy>(
 
 /// The declarators of each statement around `at` that declares several
 /// values, up to the statement that `within` spans: `a = h1()` and
-/// `b = h2()` of `const a = h1(), b = h2()`. Go lists the names of
-/// `var A, _ = h1(), h2()` with no declarator node, so each name stands for
-/// one.
+/// `b = h2()` of `const a = h1(), b = h2()`.
 fn declared_in<'s>(at: Node<'_>, source: &'s [u8], within: PosRange) -> Vec<Declarator<'s>> {
     let (start, end) = within;
     let mut declarators = Vec::new();
@@ -300,30 +295,89 @@ fn declared_in<'s>(at: Node<'_>, source: &'s [u8], within: PosRange) -> Vec<Decl
         if from < start || to.0 > end.0 {
             break;
         }
-        let mut cursor = parent.walk();
-        let shared: Vec<Node<'_>> = parent
-            .named_children(&mut cursor)
-            .filter(|child| child.kind().contains("declarator"))
-            .collect();
-        if shared.len() >= 2 {
-            declarators.extend(
-                shared
-                    .into_iter()
-                    .map(|d| Declarator::bare(d.child_by_field_name("name"), d, source)),
-            );
-        } else {
-            let names: Vec<Node<'_>> = parent.children_by_field_name("name", &mut cursor).collect();
-            if names.len() >= 2 {
-                declarators.extend(
-                    names
-                        .into_iter()
-                        .map(|n| Declarator::bare(Some(n), n, source)),
-                );
+        let paired = paired_declarators(parent, source);
+        if paired.is_empty() {
+            let mut cursor = parent.walk();
+            let shared: Vec<Node<'_>> = parent
+                .named_children(&mut cursor)
+                .filter(|child| is_declarator_kind(child.kind()))
+                .collect();
+            if shared.len() >= 2 {
+                declarators.extend(shared.into_iter().map(|d| Declarator {
+                    range: node_range(d),
+                    name: declared_name(d.child_by_field_name("name").unwrap_or(d), source),
+                }));
             }
+        } else {
+            declarators.extend(paired);
         }
         node = parent;
     }
     declarators
+}
+
+/// A node that declares one value of its statement and holds that value's
+/// initializer: `variable_declarator`, C `init_declarator`, Dart
+/// `initialized_identifier`.
+fn is_declarator_kind(kind: &str) -> bool {
+    kind.contains("declarator")
+        || matches!(kind, "initialized_identifier" | "static_final_declaration")
+}
+
+/// Go `var C, D = h1(), h2()`, Swift `let a = f(), b = g()` and C++ members
+/// `int a = f(), b = g();` list names and values in parallel fields, so the
+/// i-th name declares the i-th value. Counts that differ pair nothing:
+/// `var cfg, _ = load()` fills every name from one call.
+fn paired_declarators<'s>(statement: Node<'_>, source: &'s [u8]) -> Vec<Declarator<'s>> {
+    let mut names = named_fields(statement, "name");
+    if names.len() < 2 {
+        names = named_fields(statement, "declarator");
+    }
+    if names.len() < 2 {
+        return Vec::new();
+    }
+    let mut values = named_fields(statement, "value");
+    if values.is_empty() {
+        values = named_fields(statement, "default_value");
+    }
+    if let [list] = values[..] {
+        if list.kind() == "expression_list" {
+            let mut cursor = list.walk();
+            values = list.named_children(&mut cursor).collect();
+        }
+    }
+    if values.len() != names.len() {
+        return Vec::new();
+    }
+    names
+        .into_iter()
+        .zip(values)
+        .map(|(name, value)| Declarator {
+            range: node_range(value),
+            name: declared_name(name, source),
+        })
+        .collect()
+}
+
+fn named_fields<'t>(node: Node<'t>, field: &str) -> Vec<Node<'t>> {
+    let mut cursor = node.walk();
+    node.children_by_field_name(field, &mut cursor)
+        .filter(|child| child.is_named())
+        .collect()
+}
+
+/// The bare name that `name` declares: `b`, the `b` of C `*b`, the `b` a
+/// Swift `pattern` wraps; none for `{ cb }`.
+fn declared_name<'s>(mut name: Node<'_>, source: &'s [u8]) -> Option<&'s str> {
+    while let Some(inner) = name.child_by_field_name("declarator") {
+        name = inner;
+    }
+    if name.kind() == "pattern" && name.named_child_count() == 1 {
+        name = name.named_child(0)?;
+    }
+    (name.named_child_count() == 0)
+        .then(|| name.utf8_text(source).ok())
+        .flatten()
 }
 
 /// Records `name` as a function value the [`holder`] of `at` hands on:
@@ -1922,17 +1976,6 @@ impl<'s> Declarator<'s> {
             name,
         }
     }
-
-    /// A declarator read without the walk's kind memo: `name` declares when
-    /// it is a leaf (`b`, not `{ cb }`).
-    fn bare(name: Option<Node<'_>>, declarator: Node<'_>, source: &'s [u8]) -> Self {
-        Self {
-            range: node_range(declarator),
-            name: name
-                .filter(|name| name.named_child_count() == 0)
-                .and_then(|name| name.utf8_text(source).ok()),
-        }
-    }
 }
 
 /// The member of `run`, the value declarations that share the statement
@@ -1948,22 +1991,26 @@ fn pick_declared<'d, 's: 'd, T>(
     pos: Pos,
     nodes: &[RawNode],
 ) -> Option<usize> {
-    let member = |name: &str| run.iter().map(&node_of).find(|&i| nodes[i].name == name);
-    let mut own_statement = false;
+    // Only the declarators that hold `pos` look up a member: a statement of
+    // M values is then O(M) per call, not O(M²).
+    let mut sibling_declares_only = false;
     for declarator in declarators
         .into_iter()
         .filter(|d| start <= d.range.0 && d.range.1 <= end)
     {
-        let Some(node_idx) = declarator.name.and_then(member) else {
+        let Some(name) = declarator.name else {
             continue;
         };
         if declarator.range.0 <= pos && pos <= declarator.range.1 {
-            return Some(node_idx);
+            if let Some(node_idx) = run.iter().map(&node_of).find(|&i| nodes[i].name == name) {
+                return Some(node_idx);
+            }
+        } else if let [only] = run {
+            sibling_declares_only |= nodes[node_of(only)].name == name;
         }
-        own_statement = true;
     }
     match run {
-        [only] if !own_statement => Some(node_of(only)),
+        [only] if !sibling_declares_only => Some(node_of(only)),
         _ => None,
     }
 }
@@ -1985,6 +2032,10 @@ struct ReadContainers<'s> {
 
 impl<'s> ReadContainers<'s> {
     fn new(nodes: &[RawNode]) -> Self {
+        Self::with_callables(nodes, containers_of(nodes, is_container_kind))
+    }
+
+    fn with_callables(nodes: &[RawNode], callables: Vec<EnclosingContainer>) -> Self {
         let values = containers_of(nodes, is_value_kind);
         let mut value_spans: Vec<EnclosingContainer> = Vec::with_capacity(values.len());
         for (first, value) in values.iter().enumerate() {
@@ -1996,7 +2047,7 @@ impl<'s> ReadContainers<'s> {
             }
         }
         Self {
-            callables: containers_of(nodes, is_container_kind),
+            callables,
             values,
             value_spans,
             declarators: Vec::new(),
@@ -2141,7 +2192,7 @@ fn holder_targets<'s, T>(
     if open.is_empty() {
         return targets;
     }
-    let holders = ReadContainers::new(nodes);
+    let holders = ReadContainers::with_callables(nodes, callables);
     let runs = holders.value_runs(&open, |i| pos_of(&pending[i]));
     for (&i, run) in open.iter().zip(runs) {
         targets[i] = run.and_then(|first| {

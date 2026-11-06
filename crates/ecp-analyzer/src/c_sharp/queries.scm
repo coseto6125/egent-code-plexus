@@ -152,7 +152,7 @@
 
 ;; Event declarations with add/remove accessors — `public event EventHandler E { add{} remove{} }`.
 ;; Body-calls inside add/remove must attach to the event member. Emitted as
-;; Method (not Property) so enclosing_containers includes the span.
+;; Method (not Property) so the accessor calls are held by a callable, not a value.
 (event_declaration
   (attribute_list)* @decorator
   (modifier)* @export

@@ -40,9 +40,8 @@ fn test_overlay_csharp_property_getter_call_matches_reindex() {
 
 #[test]
 fn test_overlay_java_nested_static_block_call_binds_inner_target_like_reindex() {
-    let before =
-        "class O { static void target() {} static class N { static void target() {} static { } } }";
-    let after = "class O { static void target() {} static class N { static void target() {} static { target(); } } }";
+    let before = "class O {\n  static void target() {}\n  static class N {\n    static void target() {}\n    static { }\n  }\n}\n";
+    let after = "class O {\n  static void target() {}\n  static class N {\n    static void target() {}\n    static { target(); }\n  }\n}\n";
     let parity = calls_after_edit(
         &parse,
         &[("O.java", before)],
@@ -53,9 +52,17 @@ fn test_overlay_java_nested_static_block_call_binds_inner_target_like_reindex() 
         parity
             .reindex
             .iter()
-            .any(|edge| edge.callee == "target" && edge.callee_line == 1),
-        "the reindex must hold N -> target, got {:#?}",
+            .any(|edge| edge.callee == "target" && edge.callee_line == 4),
+        "the reindex must hold N -> N.target (line 4, not O.target on line 2), got {:#?}",
         parity.reindex
     );
     assert_eq!(parity.reindex, parity.overlay);
+    assert!(
+        parity
+            .overlay
+            .iter()
+            .any(|edge| edge.callee == "target" && edge.callee_line == 4),
+        "the overlay must bind N -> N.target (line 4, not O.target on line 2), got {:#?}",
+        parity.overlay
+    );
 }

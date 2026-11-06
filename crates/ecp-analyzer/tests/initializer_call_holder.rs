@@ -5,11 +5,19 @@
 //! the declarator names no value node. A call inside a callable keeps that
 //! callable as its holder.
 //!
-//! PHP has only controls: PHP property defaults and class constants accept
-//! constant expressions only, so no PHP initializer can call a function.
-//! Top-level PHP code is a separate gap.
+//! PHP property defaults and class constants take constant expressions, so
+//! they hold no function call. PHP 8.1 allows `new` in a global `const`
+//! initializer: the `const_declaration` query emits a Const node per
+//! `const_element`, and that Const holds the constructor call.
+//!
+//! No multi-value statement with call initializers exists in Python (one
+//! target per assignment statement), Ruby (no multi-declarator form), PHP
+//! (constant expressions only), Rust (one binding per `const`/`static`) and
+//! Kotlin (one property per declaration). Top-level script code (Python, JS,
+//! TS, PHP, Ruby, Swift statements outside every declaration) is a separate
+//! open gap.
 
-use crate::name_ref_support::{calls, function_refs, graph};
+use crate::name_ref_support::{calls, function_refs, graph, value_reads};
 use ecp_analyzer::c::parser::CProvider;
 use ecp_analyzer::c_sharp::parser::CSharpProvider;
 use ecp_analyzer::cpp::parser::CppProvider;
@@ -381,14 +389,13 @@ fn test_build_typescript_arrow_const_call_stays_on_arrow_not_const() {
 }
 
 #[test]
-fn test_build_go_shared_var_statement_call_gets_no_holder() {
+fn test_build_go_shared_var_statement_call_gets_own_declarator() {
     let p = GoProvider::new().unwrap();
     let src = "package p\nfunc h1() int { return 1 }\nfunc h2() int { return 2 }\nvar C, D = h1(), h2()\n";
-    for holder in ["C", "D"] {
-        for target in ["h1", "h2"] {
-            assert_not_holds(&p, "t.go", src, holder, target);
-        }
-    }
+    assert_holds(&p, "t.go", src, "C", "h1");
+    assert_holds(&p, "t.go", src, "D", "h2");
+    assert_not_holds(&p, "t.go", src, "C", "h2");
+    assert_not_holds(&p, "t.go", src, "D", "h1");
 }
 
 #[test]
@@ -473,11 +480,18 @@ fn test_build_javascript_pattern_declarator_call_gets_no_value_holder() {
 }
 
 #[test]
-fn test_build_go_blank_name_shared_var_call_gets_no_value_holder() {
+fn test_build_go_blank_name_shared_var_call_pairs_by_position() {
     let p = GoProvider::new().unwrap();
     let src = "package p\nfunc h1() int { return 1 }\nfunc h2() int { return 2 }\nvar A, _ = h1(), h2()\n";
-    assert_not_holds(&p, "t.go", src, "A", "h1");
+    assert_holds(&p, "t.go", src, "A", "h1");
     assert_not_holds(&p, "t.go", src, "A", "h2");
+}
+
+#[test]
+fn test_build_go_multi_value_call_for_two_names_gets_first_name_holder() {
+    let p = GoProvider::new().unwrap();
+    let src = "package p\nfunc load() (int, error) { return 1, nil }\nvar cfg, _ = load()\n";
+    assert_holds(&p, "t.go", src, "cfg", "load");
 }
 
 #[test]
@@ -490,7 +504,7 @@ fn test_build_java_shared_static_field_statement_call_gets_own_declarator() {
 }
 
 #[test]
-fn test_build_cpp_lone_member_initializer_next_to_multi_declarator_member() {
+fn test_build_cpp_lone_member_initializer_next_to_multi_declarator_member_gets_own_holder() {
     let p = CppProvider::new().unwrap();
     let src = "int f() { return 1; }\nstruct T { int a = 0, *b = nullptr; int c = f(); };";
     assert_holds(&p, "t.cpp", src, "c", "f");
@@ -566,4 +580,116 @@ fn test_build_rust_module_is_no_holder_for_thread_local_call() {
     assert!(callers_of(&g, "helper")
         .iter()
         .all(|(_, name)| name != "tests"));
+}
+
+fn assert_own_declarators(
+    provider: &dyn LanguageProvider,
+    path: &str,
+    src: &str,
+    names: [&str; 2],
+) {
+    assert_holds(provider, path, src, names[0], "f");
+    assert_holds(provider, path, src, names[1], "g");
+    assert_not_holds(provider, path, src, names[0], "g");
+    assert_not_holds(provider, path, src, names[1], "f");
+}
+
+#[test]
+fn test_build_c_file_scope_shared_declaration_call_gets_own_declarator() {
+    let src = "int f(void) { return 1; }\nint g(void) { return 2; }\nint a = f(), b = g();\n";
+    assert_own_declarators(&CProvider::new().unwrap(), "t.c", src, ["a", "b"]);
+}
+
+#[test]
+fn test_build_cpp_namespace_scope_shared_declaration_call_gets_own_declarator() {
+    let src =
+        "int f() { return 1; }\nint g() { return 2; }\nnamespace N { int a = f(), b = g(); }\n";
+    assert_own_declarators(&CppProvider::new().unwrap(), "t.cpp", src, ["a", "b"]);
+}
+
+#[test]
+fn test_build_cpp_struct_shared_member_call_gets_own_declarator() {
+    let src = "int f() { return 1; }\nint g() { return 2; }\nstruct S { int a = f(), b = g(); };\n";
+    assert_own_declarators(&CppProvider::new().unwrap(), "t.cpp", src, ["a", "b"]);
+}
+
+#[test]
+fn test_build_csharp_shared_static_field_statement_call_gets_own_declarator() {
+    let src = "class T { static int f() { return 1; } static int g() { return 2; } static int A = f(), B = g(); }";
+    let p = CSharpProvider::new().unwrap();
+    assert_holds(&p, "T.cs", src, "A", "f");
+    assert_holds(&p, "T.cs", src, "B", "g");
+    assert_not_holds(&p, "T.cs", src, "A", "g");
+    assert_not_holds(&p, "T.cs", src, "B", "f");
+}
+
+#[test]
+fn test_build_typescript_shared_const_statement_call_gets_own_declarator() {
+    let src = "function f() {}\nfunction g() {}\nconst a = f(), b = g();";
+    assert_own_declarators(&TypeScriptProvider::new().unwrap(), "t.ts", src, ["a", "b"]);
+}
+
+#[test]
+fn test_build_swift_top_level_shared_let_call_gets_own_declarator() {
+    let src = "func f() -> Int { 1 }\nfunc g() -> Int { 2 }\nlet a = f(), b = g()\n";
+    assert_own_declarators(&SwiftProvider::new().unwrap(), "t.swift", src, ["a", "b"]);
+}
+
+#[test]
+fn test_build_dart_top_level_shared_final_call_gets_own_declarator() {
+    let src = "int f() => 1;\nint g() => 2;\nfinal a = f(), b = g();\n";
+    assert_own_declarators(&DartProvider::new().unwrap(), "t.dart", src, ["a", "b"]);
+}
+
+#[test]
+fn test_build_dart_class_static_shared_final_call_gets_own_declarator() {
+    let src = "int f() => 1;\nint g() => 2;\nclass T { static final a = f(), b = g(); }\n";
+    assert_own_declarators(&DartProvider::new().unwrap(), "t.dart", src, ["a", "b"]);
+}
+
+#[test]
+fn test_build_ruby_module_body_call_gets_holder() {
+    assert_holds(
+        &RubyProvider::new().unwrap(),
+        "t.rb",
+        "def target(name); end\nmodule M\n  target :x\nend\n",
+        "M",
+        "target",
+    );
+}
+
+#[test]
+fn test_build_java_enum_static_block_call_gets_holder() {
+    assert_holds(
+        &JavaProvider::new().unwrap(),
+        "E.java",
+        "enum E { A; static void target() {} static { target(); } }",
+        "E",
+        "target",
+    );
+}
+
+#[test]
+fn test_build_java_static_block_bare_field_read_gets_no_class_holder() {
+    let p = JavaProvider::new().unwrap();
+    let g = graph(
+        &p,
+        &[(
+            "T.java",
+            "class T { static int F = 1; static { int x = F; } }",
+        )],
+    );
+    assert_eq!(value_reads(&g, "T"), vec![]);
+}
+
+#[test]
+fn test_build_php_global_const_new_initializer_gets_constructor_holder() {
+    let p = PhpProvider::new().unwrap();
+    let src = "<?php\nclass Foo { public function __construct() {} }\nconst X = new Foo();\n";
+    let g = graph(&p, &[("t.php", src)]);
+    let got = calls(&g, "X");
+    assert!(
+        got.iter().any(|(_, n)| n == "__construct" || n == "Foo"),
+        "X must hold the Foo constructor call, got {got:?}"
+    );
 }

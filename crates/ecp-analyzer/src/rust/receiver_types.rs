@@ -995,7 +995,7 @@ fn rust_callee_name(
 ///
 /// The id of each name attached to a holder goes into `called`, and the
 /// name-ref walk reads no value there: one site gives one edge. A name no
-/// node holds (a macro call outside every item) or no callee can be formed
+/// node holds (a macro call outside every callable, value and type) or no callee can be formed
 /// for keeps its reference. The two buffers are scratch space the file's walk
 /// reuses.
 fn macro_argument_calls<'t>(

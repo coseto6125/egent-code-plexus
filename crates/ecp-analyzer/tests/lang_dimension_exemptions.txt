@@ -166,6 +166,19 @@ class_methods ruby pre-existing gap
 class_methods rust pre-existing gap
 class_methods swift pre-existing gap
 class_methods typescript pre-existing gap
+class_namespace_calls c only a Python class body is a name scope that runs top to bottom
+class_namespace_calls cpp only a Python class body is a name scope that runs top to bottom
+class_namespace_calls csharp only a Python class body is a name scope that runs top to bottom
+class_namespace_calls dart only a Python class body is a name scope that runs top to bottom
+class_namespace_calls go only a Python class body is a name scope that runs top to bottom
+class_namespace_calls java only a Python class body is a name scope that runs top to bottom
+class_namespace_calls javascript only a Python class body is a name scope that runs top to bottom
+class_namespace_calls kotlin only a Python class body is a name scope that runs top to bottom
+class_namespace_calls php only a Python class body is a name scope that runs top to bottom
+class_namespace_calls ruby only a Python class body is a name scope that runs top to bottom
+class_namespace_calls rust only a Python class body is a name scope that runs top to bottom
+class_namespace_calls swift only a Python class body is a name scope that runs top to bottom
+class_namespace_calls typescript only a Python class body is a name scope that runs top to bottom
 computed_receiver c pre-existing gap
 computed_receiver cpp pre-existing gap
 computed_receiver csharp pre-existing gap
