@@ -6,12 +6,12 @@
 //! logged with backtrace and the loop continues.
 
 use crate::commands::impact::run_for_symbol;
-use crate::peer::dispatch::dispatch_peer_dirty_event;
+use crate::peer::dispatch::{
+    dispatch_peer_dirty_event, entry_state, same_text_elsewhere, EntryState,
+};
 use chrono::Utc;
-use ecp_core::contracts::dirty_event::PathChange;
 use ecp_core::peer::concern::{ImpactCache, SymbolKey};
 use ecp_core::session::layout;
-use ecp_core::session::overlay::DirtyEventEntry;
 use ecp_core::session::{DirtyEvents, SessionMeta};
 use fs2::FileExt;
 use notify::event::{DataChange, ModifyKind};
@@ -24,21 +24,12 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Our own manifest, split the way `classify` consumes it: entry keys decide
-/// HARD, declaration lists feed SOFT. `states` holds each entry's change and
-/// content hash, so a peer entry with the same text is no concern.
+/// HARD, declaration lists feed SOFT. `states` feeds `same_text_elsewhere`.
 #[derive(Default, Clone)]
 struct MyDirtySurface {
     files: Vec<String>,
     symbols: Vec<ecp_core::session::overlay::SymbolRef>,
     states: FxHashMap<String, EntryState>,
-}
-
-/// What a manifest entry says the file holds: its change and its content
-/// hash (`None` for a tombstone).
-type EntryState = (PathChange, Option<String>);
-
-fn entry_state(entry: &DirtyEventEntry) -> EntryState {
-    (entry.change, entry.content_hash.clone())
 }
 
 pub struct WatcherCfg {
@@ -424,10 +415,11 @@ fn dispatch_peer(
     );
     let soft_guard = soft.lock().expect("soft state lock poisoned");
     for (peer_file, entry) in &peer_dirty.entries {
-        // A warm cover records the commits since the sibling graph, so two
-        // worktrees that pulled the same commit hold equal entries: same
-        // text, no concurrent edit.
-        if other_worktree && my_states.get(peer_file) == Some(&entry_state(entry)) {
+        if same_text_elsewhere(
+            other_worktree,
+            my_states.get(peer_file),
+            &entry_state(entry),
+        ) {
             continue;
         }
         dispatch_peer_dirty_event(
@@ -1057,8 +1049,8 @@ mod tests {
     }
 
     /// Writes a live session `name` under `root/sessions` whose manifest holds
-    /// `src/a.rs` with content hash `hash`.
-    fn live_session(root: &Path, name: &str, hash: &str) -> PathBuf {
+    /// `src/a.rs` with content hash `hash`, or a tombstone for `None`.
+    fn live_session(root: &Path, name: &str, hash: Option<&str>) -> PathBuf {
         let dir = root.join("sessions").join(name);
         std::fs::create_dir_all(&dir).expect("session dir");
         let now = Utc::now().to_rfc3339();
@@ -1079,23 +1071,25 @@ mod tests {
         write_dirty(&dir, &["foo"]);
         let path = layout::dirty_events_path(&dir);
         let mut manifest = DirtyEvents::read(&path).expect("manifest");
-        manifest
-            .entries
-            .get_mut("src/a.rs")
-            .expect("entry")
-            .content_hash = Some(hash.into());
+        let entry = manifest.entries.get_mut("src/a.rs").expect("entry");
+        entry.content_hash = hash.map(str::to_string);
+        if hash.is_none() {
+            entry.change = PathChange::Deleted;
+            entry.fragment_id = None;
+            entry.dirty_symbols.clear();
+        }
         DirtyEvents::write_atomic(&path, &manifest).expect("manifest");
         dir
     }
 
     /// Inbox lines the session `me~aaaaaaaa` gets from one dispatch of `peer`.
-    fn concerns_from(peer: &str, my_hash: &str, peer_hash: &str) -> usize {
+    fn concerns_from(peer: &str, my_hash: Option<&str>, peer_hash: Option<&str>) -> usize {
         let root = tempfile::tempdir().expect("tempdir");
         let my_session_dir = live_session(root.path(), "me~aaaaaaaa", my_hash);
         let peer_dir = live_session(root.path(), peer, peer_hash);
         let cfg = WatcherCfg {
             repo_root: root.path().to_path_buf(),
-            my_session_id: "me".into(),
+            my_session_id: "me~aaaaaaaa".into(),
             my_session_dir: my_session_dir.clone(),
             lock_path: root.path().join("watcher.lock"),
         };
@@ -1109,18 +1103,25 @@ mod tests {
     /// concern for every file of the warm cover.
     #[test]
     fn test_dispatch_peer_other_worktree_same_text_raises_no_concern() {
-        assert_eq!(concerns_from("peer~bbbbbbbb", "h1", "h1"), 0);
+        assert_eq!(concerns_from("peer~bbbbbbbb", Some("h1"), Some("h1")), 0);
     }
 
     #[test]
     fn test_dispatch_peer_other_worktree_different_text_raises_hard() {
-        assert_eq!(concerns_from("peer~bbbbbbbb", "h1", "h2"), 1);
+        assert_eq!(concerns_from("peer~bbbbbbbb", Some("h1"), Some("h2")), 1);
+    }
+
+    /// A tombstone holds no text to compare: two renames of one file to
+    /// different names both delete it, and that deletion is the only signal.
+    #[test]
+    fn test_dispatch_peer_other_worktree_both_deleted_raises_hard() {
+        assert_eq!(concerns_from("peer~bbbbbbbb", None, None), 1);
     }
 
     /// One worktree shares its files on disk, so equal text there is still two
     /// agents on one file.
     #[test]
     fn test_dispatch_peer_same_worktree_same_text_raises_hard() {
-        assert_eq!(concerns_from("peer~aaaaaaaa", "h1", "h1"), 1);
+        assert_eq!(concerns_from("peer~aaaaaaaa", Some("h1"), Some("h1")), 1);
     }
 }

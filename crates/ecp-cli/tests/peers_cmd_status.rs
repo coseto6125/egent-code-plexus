@@ -56,6 +56,10 @@ fn write_dirty(root: &std::path::Path, id: &str, symbols: &[&str]) {
 }
 
 fn write_dirty_in(root: &std::path::Path, id: &str, file: &str, symbols: &[&str]) {
+    write_dirty_hashed(root, id, file, symbols, "h");
+}
+
+fn write_dirty_hashed(root: &std::path::Path, id: &str, file: &str, symbols: &[&str], hash: &str) {
     use ecp_core::contracts::dirty_event::{PathChange, PathClass};
     use ecp_core::contracts::routing::SizeCap;
     use ecp_core::session::overlay::{DirtyEventEntry, DirtyEvents, SymbolKind, SymbolRef};
@@ -67,7 +71,7 @@ fn write_dirty_in(root: &std::path::Path, id: &str, file: &str, symbols: &[&str]
             class: PathClass::SOURCE,
             mtime_ns: 0,
             fragment_id: Some("f".into()),
-            content_hash: Some("h".into()),
+            content_hash: Some(hash.into()),
             parse_failed: false,
             dirty_symbols: symbols
                 .iter()
@@ -157,6 +161,32 @@ fn peers_status_pairs_other_worktrees_same_text_says_none() {
     assert!(
         stdout.contains("no overlapping pairs"),
         "equal text in two worktrees is no overlap: {stdout}"
+    );
+}
+
+#[test]
+fn peers_status_pairs_other_worktrees_different_text_lists_the_file() {
+    let dir = tempdir().unwrap();
+    write_session(dir.path(), "s-one~aaaaaaaa", None);
+    write_session(dir.path(), "s-two~bbbbbbbb", None);
+    write_dirty_hashed(dir.path(), "s-one~aaaaaaaa", "src/a.ts", &["fn_a"], "h1");
+    write_dirty_hashed(dir.path(), "s-two~bbbbbbbb", "src/a.ts", &["fn_a"], "h2");
+
+    let out = Command::new(bin())
+        .args([
+            "peers",
+            "status",
+            "--pairs",
+            "--repo",
+            dir.path().to_str().unwrap(),
+        ])
+        .env("ECP_SESSION_ID", "me-pairs4")
+        .output()
+        .expect("spawn");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("src/a.ts") && !stdout.contains("no overlapping pairs"),
+        "different text in two worktrees is an overlap: {stdout}"
     );
 }
 

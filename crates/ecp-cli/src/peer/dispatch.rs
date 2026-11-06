@@ -1,10 +1,31 @@
 //! Bridge: classify peer dirty entry → append InboxEntry to receiver inbox.
 
+use ecp_core::contracts::dirty_event::PathChange;
 use ecp_core::peer::concern::{classify, ConcernResult, ImpactCache};
 use ecp_core::peer::inbox::{append_entry, ConcernKindSer, InboxEntry};
 use ecp_core::session::overlay::{DirtyEventEntry, SymbolRef};
 use std::io;
 use std::path::Path;
+
+/// What a manifest entry says the file holds: its change and its content hash.
+pub type EntryState = (PathChange, Option<String>);
+
+pub fn entry_state(entry: &DirtyEventEntry) -> EntryState {
+    (entry.change, entry.content_hash.clone())
+}
+
+/// True when `theirs` holds the same text as `mine` in another worktree: a
+/// commit both worktrees pulled (a warm cover records it), not a concurrent
+/// edit. A tombstone or an entry without a hash proves no text, so it stays a
+/// concern. Sessions of one worktree share the file on disk, so equal text
+/// there is still two agents on one file.
+pub fn same_text_elsewhere(
+    other_worktree: bool,
+    mine: Option<&EntryState>,
+    theirs: &EntryState,
+) -> bool {
+    other_worktree && theirs.1.is_some() && mine == Some(theirs)
+}
 
 #[allow(clippy::too_many_arguments)]
 pub fn dispatch_peer_dirty_event(
