@@ -420,11 +420,13 @@ pub(crate) fn shell_word(word: &str) -> String {
 /// overlay asked to cover every file that differs from HEAD. Also returns
 /// the dirty set and cap of that refresh. `own_graph` false refuses the
 /// cover: the overlay is not attached to a foreign graph.
+type WarmEngine = (Engine, Option<DirtySet<ClassifiedPath>>, Option<SizeCap>);
+
 fn warm_engine(
     top: &Path,
     sibling: &Path,
     own_graph: bool,
-) -> Result<(Engine, Option<DirtySet<ClassifiedPath>>, Option<SizeCap>), ReadContextError> {
+) -> Result<WarmEngine, ReadContextError> {
     let mut engine = load(sibling, true)?;
     let cover = if own_graph {
         auto_ensure::cover_warm_attach(top, sibling)

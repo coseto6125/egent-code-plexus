@@ -149,7 +149,9 @@ pub(super) fn impact_by_name(
     let (start_idx, target_kind) = match resolve_target(&merged, &request) {
         TargetResolution::Unique(c) => (c.node as usize, c.kind),
         TargetResolution::Ambiguous(a) => return Err(a.to_error(&request)),
-        TargetResolution::NotFound { named } => return Err(not_found(&request, named)),
+        TargetResolution::NotFound { named } => {
+            return Err(not_found(&request, named, engine.unverified_note()))
+        }
     };
     let same_name_defs = same_name_def_count(graph, view, bare_name, target_kind);
 
@@ -200,7 +202,12 @@ pub(super) fn impact_by_name(
             direct_callers(merged, start_idx as u32).len()
         }))
     .then(|| {
-        let repo = Path::new(args.repo.as_deref().unwrap_or("."));
+        // `--repo` may be a registry name, not a path: the overlay's worktree
+        // top is the work tree this graph answers for.
+        let repo = engine
+            .worktree_root()
+            .or_else(|| args.repo.as_deref().map(Path::new).filter(|p| p.is_dir()))
+            .unwrap_or(Path::new("."));
         unexplained::scan(merged, bare_name, repo)
     });
 
@@ -422,7 +429,7 @@ pub(super) fn ambiguous_candidates(
             (callers.len(), row)
         })
         .collect();
-    rows.sort_by(|a, b| b.0.cmp(&a.0));
+    rows.sort_by_key(|row| std::cmp::Reverse(row.0));
     rows.truncate(MAX_CANDIDATES);
     let more = ambiguity.total() - rows.len();
     let mut fields = Map::new();
@@ -455,11 +462,11 @@ fn ambiguous_callers_command(name: &str, file: Option<&str>, kind: Option<&str>)
     cmd
 }
 
-/// The miss an agent reads: whether the name is declared at all, and the
-/// next command when it is not.
-fn not_found(request: &TargetRequest, named: u32) -> EcpError {
+/// The miss an agent reads: whether the name is declared at all, the next
+/// command when it is not, and `unverified` when the graph may lack HEAD.
+fn not_found(request: &TargetRequest, named: u32, unverified: Option<String>) -> EcpError {
     let target = request.render();
-    EcpError::InvalidArgument(match named {
+    let miss = match named {
         0 => format!(
             "No symbol named '{target}' found in graph. Try `ecp find <name> --mode fuzzy` to find candidates, or check --file / --kind filters"
         ),
@@ -468,6 +475,10 @@ fn not_found(request: &TargetRequest, named: u32) -> EcpError {
             request.name(),
             shell_word(request.name()),
         ),
+    };
+    EcpError::InvalidArgument(match unverified {
+        Some(note) => format!("{miss}. {note}"),
+        None => miss,
     })
 }
 

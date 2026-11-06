@@ -40,7 +40,9 @@ impl Fixture {
             .arg("impact")
             .args(args)
             .current_dir(self.repo.path())
-            .env("HOME", self.repo.path())
+            // A HOME that equals a commitless work tree is refused as a
+            // folder of projects, so HOME is the graph's own temp dir.
+            .env("HOME", self._graph_dir.path())
             .env("ECP_SKIP_BG_REBUILD", "1")
             .env_remove("CLAUDE_CODE_SESSION_ID");
         cmd

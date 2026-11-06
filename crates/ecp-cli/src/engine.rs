@@ -5,7 +5,6 @@ use ecp_core::graph::{ArchivedZeroCopyGraph, GRAPH_FORMAT_VERSION, GRAPH_MAGIC};
 use ecp_core::session::closure::StaleClosure;
 use ecp_core::session::view::{CallGap, HiddenDecl};
 use ecp_core::session::OverlayView;
-use ecp_core::EcpError;
 use memmap2::Mmap;
 use rkyv::rancor::Error;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -142,13 +141,12 @@ impl LineScope<'_> {
     }
 
     /// The closure line speaks for the clean-file edges into the overlay's
-    /// files and for the files its kept configs scope.
+    /// files, and for every result while a config is kept: a dirty manifest
+    /// changes how every file resolves.
     fn keeps_closure(self, stale: &StaleClosure) -> bool {
         match self {
             Self::All => true,
-            Self::Result { files, supplied } => {
-                supplied || stale.configs.iter().any(|c| files.contains(c.as_str()))
-            }
+            Self::Result { supplied, .. } => supplied || !stale.configs.is_empty(),
         }
     }
 }
@@ -280,20 +278,15 @@ impl Engine {
         }
     }
 
-    /// `err` with the unverified note when it is a "No symbol named" miss on
-    /// an engine whose answers may lack what HEAD holds.
-    pub fn unverified_miss(&self, err: EcpError) -> EcpError {
-        match (err, self.unverified_reason()) {
-            (EcpError::InvalidArgument(msg), Some(reason))
-                if msg.starts_with("No symbol named") =>
-            {
-                EcpError::InvalidArgument(format!(
-                    "{msg}. This miss is unverified: the graph is a warm-attach from a sibling \
-                     commit and {reason}. Run `{REINDEX_COMMAND}` for a definitive answer"
-                ))
-            }
-            (err, _) => err,
-        }
+    /// The sentence a miss on this engine appends: why the answer may lack
+    /// what HEAD holds, and the command that settles it.
+    pub fn unverified_note(&self) -> Option<String> {
+        self.unverified_reason().map(|reason| {
+            format!(
+                "This miss is unverified: the graph is a warm-attach from a sibling commit \
+                 and {reason}. Run `{REINDEX_COMMAND}` for a definitive answer"
+            )
+        })
     }
 
     fn graph_caveat(&self) -> Option<String> {
@@ -403,6 +396,12 @@ impl Engine {
                 "session stale: {reason:?}; remove via `ecp admin sessions reset <id>`"
             ))),
         }
+    }
+
+    /// The worktree top an attached overlay belongs to. `None` without an
+    /// overlay.
+    pub fn worktree_root(&self) -> Option<&Path> {
+        self.worktree_root.as_deref()
     }
 
     /// Attach an L1 session overlay dir (`~/.ecp/<repo>/sessions/<sid>/`) so
@@ -951,34 +950,24 @@ mod tests {
         Engine::load_warm(&path).unwrap()
     }
 
-    /// Stands for: an uncovered warm attach adds the unverified note and the
-    /// reindex command to a "No symbol named" miss only; a covered one, and
-    /// every other error, pass through unchanged.
+    /// Stands for: an uncovered warm attach gives a miss the unverified note
+    /// with its reason and the reindex command; a covered one gives none.
     #[test]
-    fn test_unverified_miss_uncovered_warm_attach_wraps_no_symbol_named_only() {
+    fn test_unverified_note_uncovered_warm_attach_names_reason_and_command() {
         let dir = tempfile::tempdir().unwrap();
         let mut engine = warm_engine(dir.path());
-        let miss = || EcpError::InvalidArgument("No symbol named 'beta' found in graph".into());
-        let text = |err: EcpError| match err {
-            EcpError::InvalidArgument(msg) => msg,
-            other => panic!("kind changed: {other}"),
-        };
 
-        let unchecked = text(engine.unverified_miss(miss()));
+        let unchecked = engine.unverified_note().unwrap();
         assert!(unchecked.contains("unverified"), "{unchecked}");
 
         engine.set_head_coverage(HeadCoverage::Uncovered("`git diff` failed".into()));
-        let wrapped = text(engine.unverified_miss(miss()));
-        assert!(wrapped.starts_with("No symbol named 'beta'"), "{wrapped}");
-        assert!(wrapped.contains("unverified") && wrapped.contains("`git diff` failed"));
-        assert!(wrapped.contains(REINDEX_COMMAND), "{wrapped}");
-        let other = text(engine.unverified_miss(EcpError::InvalidArgument("bad flag".into())));
-        assert_eq!(other, "bad flag");
+        let note = engine.unverified_note().unwrap();
+        assert!(note.contains("unverified") && note.contains("`git diff` failed"));
+        assert!(note.contains(REINDEX_COMMAND), "{note}");
 
         engine.set_head_coverage(HeadCoverage::Covered);
         assert_eq!(engine.unverified_reason(), None);
-        let covered = text(engine.unverified_miss(miss()));
-        assert!(!covered.contains("unverified"), "{covered}");
+        assert_eq!(engine.unverified_note(), None);
         assert!(
             engine.caveat().is_none(),
             "a covered warm attach drops its line"

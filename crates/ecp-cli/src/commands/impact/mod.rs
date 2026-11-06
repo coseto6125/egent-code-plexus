@@ -335,7 +335,12 @@ pub fn run(args: ImpactArgs, engine: &Engine) -> Result<(), EcpError> {
             hints.hidden_heuristic_edges
         );
     }
-    let caveat = engine.caveat_for(result_files(&payload));
+    // A baseline answer is about the dirty diff itself, so every overlay
+    // line speaks for it.
+    let caveat = match args.baseline {
+        Some(_) => engine.caveat(),
+        None => engine.caveat_for(result_files(&payload)),
+    };
     emit_with_caveat(
         &payload,
         format,

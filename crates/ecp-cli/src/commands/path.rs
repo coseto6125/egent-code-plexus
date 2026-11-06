@@ -323,8 +323,8 @@ fn ambiguity_caveat(name: &str, same_name_defs: usize) -> Option<String> {
             "route may be incomplete: {same_name_defs} same-named definitions of '{name}' \
              exist in the index or working tree, so bare calls (no import/qualifier context) \
              may be unattributed. Narrow with --from-file / --to-file, and run \
-             `ecp impact --target {name} --file <path> --ambiguous-callers` to list the call \
-             sites the graph could not attribute before trusting a miss."
+             `ecp impact --target {name} --file <path>` and read its `unexplained_refs` \
+             (text references no graph edge explains) before trusting a miss."
         )
     })
 }
