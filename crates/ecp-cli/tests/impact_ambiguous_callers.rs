@@ -2,7 +2,7 @@
 //! that no graph edge explains, scanned by default on a short caller list or
 //! a colliding name, and forced by `--ambiguous-callers`. Synthetic graphs
 //! (no `admin index`) over a real git work tree, so each test controls
-//! exactly which edges the graph holds and which text `git grep` sees. The
+//! exactly which edges the graph holds and which text the scan sees. The
 //! per-language matrix lives in `impact_unexplained_refs.rs`.
 
 use crate::common;
@@ -449,7 +449,7 @@ fn test_unexplained_refs_regex_metacharacter_name_matched_literally() {
 }
 
 #[test]
-fn test_unexplained_refs_git_grep_failure_error_field_impact_succeeds() {
+fn test_unexplained_refs_git_failure_error_field_impact_succeeds() {
     let repo = tempfile::tempdir().unwrap();
     let (fx, _) = one_def(repo.path(), &[("src/use.py", "x = get\n")]);
     std::fs::write(repo.path().join(".git/index"), b"not an index").unwrap();
@@ -458,7 +458,7 @@ fn test_unexplained_refs_git_grep_failure_error_field_impact_succeeds() {
     assert!(
         field["error"]
             .as_str()
-            .is_some_and(|e| e.starts_with("git grep failed")),
+            .is_some_and(|e| e.starts_with("git ls-files failed")),
         "{payload}"
     );
     assert_eq!(field["total"], 0);
@@ -501,6 +501,29 @@ fn test_unexplained_refs_more_than_cap_shown_20_total_exact() {
         lines,
         (1..=20).collect::<Vec<u64>>(),
         "sorted by path, line"
+    );
+}
+
+/// Stands for: the capped list is what an agent reads, so production code
+/// comes before a test that sorts first by path, and a patch that quotes the
+/// name is no site at all.
+#[test]
+fn test_unexplained_refs_source_sites_before_test_sites_and_patch_skipped() {
+    let repo = tempfile::tempdir().unwrap();
+    let (fx, _) = one_def(
+        repo.path(),
+        &[
+            ("a_test.go", "x := get\n"),
+            ("src/use.py", "x = get\n"),
+            ("fix/a.patch", "+x = get\n"),
+            ("fix/b.diff", "+x = get\n"),
+        ],
+    );
+    let payload = impact(fx, repo.path(), |_| {});
+    assert_eq!(
+        site_keys(&payload),
+        vec![("src/use.py".to_string(), 1), ("a_test.go".to_string(), 1)],
+        "{payload}"
     );
 }
 

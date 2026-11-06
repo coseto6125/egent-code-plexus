@@ -324,7 +324,7 @@ pub(super) fn impact_by_name(
 
 /// Whether the `unexplained_refs` text scan runs on an upstream walk. With
 /// `batch` set (`--batch`, and the library callers that fan out over many
-/// symbols) the scan stays opt-in, as before: one `git grep` per target
+/// symbols) the scan stays opt-in, as before: one tracked-file scan per target
 /// would undo the graph load they amortise. `direct_callers` runs last: a
 /// colliding name or the flag decides first.
 fn scan_runs(

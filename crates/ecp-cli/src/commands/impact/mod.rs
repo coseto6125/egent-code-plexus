@@ -189,14 +189,15 @@ pub struct ImpactArgs {
     /// Force the `unexplained_refs` text scan. Without this flag the scan runs
     /// on an upstream or both walk when the target has at most 2 non-test
     /// direct callers, or shares its name with another definition of a
-    /// competing kind. The scan runs one `git grep` for whole-word occurrences
-    /// of the bare name in every tracked file except vendored code and build
-    /// output (`node_modules/`, `vendor/`, `.venv/`, `site-packages/`,
-    /// `dist/`, `build/`, `*.min.js`, lockfiles) and documents (`.md`,
-    /// `.rst`, `.txt`), in every language. It lists each occurrence that no
-    /// edge into a same-named definition explains, as `{path, line, form,
-    /// enclosing}`: `form` is `bare` or `member` for a call, `reference` for
-    /// any other use. At most 20 sites; `total` counts every occurrence and
+    /// competing kind. The scan reads every tracked file once for whole-word
+    /// occurrences of the bare name, except vendored code and build output
+    /// (`node_modules/`, `vendor/`, `.venv/`, `site-packages/`, `dist/`,
+    /// `build/`, `*.min.js`, lockfiles), copies (`.patch`, `.diff`, `.snap`)
+    /// and documents (`.md`, `.rst`, `.txt`), in every language. It lists
+    /// each occurrence that no edge into a same-named definition explains, as
+    /// `{path, line, form, enclosing}`: `form` is `bare` or `member` for a
+    /// call, `reference` for any other use. At most 20 sites, source files
+    /// before tests and examples; `total` counts every occurrence and
     /// `files` the files that hold one. A site whose line holds several
     /// occurrences carries `count`. `total: 0` means the scan ran and found
     /// none; `error` says why the scan failed. Sites are text matches, never

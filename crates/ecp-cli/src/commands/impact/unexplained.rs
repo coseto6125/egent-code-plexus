@@ -1,5 +1,5 @@
 //! `unexplained_refs`: the whole-word occurrences of a target's bare name,
-//! found by one `git grep` at query time, that no graph edge into a
+//! found by one scan of the tracked files at query time, that no graph edge into a
 //! same-named definition explains. A short caller list is where an agent
 //! stops looking, and the references the graph misses there (a function
 //! passed as a value, a template, a file of another language, a bare call
@@ -9,23 +9,27 @@
 //! consulted here only to drop the occurrences it already explains.
 
 use crate::git::safe_exec;
-use ecp_core::graph::{NodeKind, RelType};
+use ecp_core::file_category::determine_category;
+use ecp_core::graph::{FileCategory, NodeKind, RelType};
 use ecp_core::session::MergedGraph;
+use memchr::memmem::Finder;
+use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 /// The non-test direct caller count at or below which the scan runs by
 /// default. The impact answers judged wrong or incomplete had 0 to 2
-/// callers; a higher value runs one more `git grep` per query of a
+/// callers; a higher value runs one more scan per query of a
 /// better-called symbol.
 pub(super) const UNEXPLAINED_SCAN_MAX_CALLERS: usize = 2;
 
 /// Sites listed in the payload. `total` and `files` count every site.
 const MAX_SITES: usize = 20;
 
-const NOTE: &str = "text matches (git grep, whole word) that the graph does not explain; \
+const NOTE: &str = "whole-word text matches in tracked files that the graph does not explain; \
                     read them before you treat the caller list as complete. They are not \
                     counted in the blast radius.";
 
@@ -37,17 +41,16 @@ pub(super) const VENDORED_DIRS: [&str; 4] = ["node_modules", "vendor", ".venv", 
 /// one per package. `build` also covers Laravel's `public/build`.
 const BUILD_DIRS: [&str; 2] = ["dist", "build"];
 
-/// Generated files and documents: a minified bundle repeats source names, a
+/// Generated files, copies and documents, by file-name suffix and by file
+/// name: a minified bundle, a patch or a test snapshot repeats source names, a
 /// document names a symbol in prose, and a lockfile names packages.
-const SKIPPED_FILES: [&str; 7] = [
-    "*.min.js",
-    "*.md",
-    "*.rst",
-    "*.txt",
-    "*.lock",
-    "package-lock.json",
-    "pnpm-lock.yaml",
+const SKIPPED_SUFFIXES: [&str; 8] = [
+    ".min.js", ".patch", ".diff", ".snap", ".md", ".rst", ".txt", ".lock",
 ];
+const SKIPPED_NAMES: [&str; 2] = ["package-lock.json", "pnpm-lock.yaml"];
+
+/// The bytes `git grep -I` reads for a NUL to call a file binary.
+const BINARY_PROBE_BYTES: usize = 8000;
 
 /// Whether a directory of `path` (repo-relative, `/`-separated) is one of
 /// [`VENDORED_DIRS`].
@@ -72,8 +75,9 @@ struct Site<'g> {
     enclosing: Option<&'g str>,
 }
 
-/// The answer of one scan: every unexplained site, sorted by path and line,
-/// or the reason `git grep` gave no answer.
+/// The answer of one scan: every unexplained site, source files first and
+/// then tests, examples and the rest, each by path and line; or the reason
+/// `git` gave no file list.
 pub(super) struct UnexplainedRefs<'g> {
     sites: Vec<Site<'g>>,
     error: Option<String>,
@@ -142,16 +146,19 @@ pub(super) fn scan<'g>(merged: MergedGraph<'g>, name: &str, repo: &Path) -> Unex
     if name.trim().is_empty() {
         return UnexplainedRefs::failed("empty symbol name".to_string());
     }
-    let hits = match git_grep(repo, name) {
-        Ok(stdout) => parse_hits(&stdout, name.as_bytes()),
+    let hits = match tracked_files(repo) {
+        Ok((top, files)) => search(&top, &files, name.as_bytes()),
         Err(reason) => return UnexplainedRefs::failed(reason),
     };
     let mut sites = unexplained(merged, &same_name_defs(merged, name), hits);
-    sites.sort_by(|a, b| {
-        a.hit
-            .path
-            .cmp(&b.hit.path)
-            .then(a.hit.line.cmp(&b.hit.line))
+    // The capped list shows production code before test fixtures that
+    // repeat the name.
+    sites.sort_by_cached_key(|s| {
+        (
+            determine_category(&s.hit.path) != FileCategory::Source,
+            s.hit.path.clone(),
+            s.hit.line,
+        )
     });
     UnexplainedRefs { sites, error: None }
 }
@@ -161,7 +168,7 @@ pub(super) fn scan<'g>(merged: MergedGraph<'g>, name: &str, repo: &Path) -> Unex
 /// plus brand-new working-tree nodes. The on-disk half of what
 /// [`crate::commands::symbol_id::same_name_def_count`] counts, plus what it
 /// skips: same-named definitions of a non-competing kind, later overloads and
-/// lexically scoped defs. Their declarations match the grep too.
+/// lexically scoped defs. Their declarations match the scan too.
 fn same_name_defs(merged: MergedGraph<'_>, name: &str) -> Vec<u32> {
     let view = merged.view();
     let mut defs: Vec<u32> = merged
@@ -187,75 +194,91 @@ fn same_name_defs(merged: MergedGraph<'_>, name: &str) -> Vec<u32> {
     defs
 }
 
-/// Every tracked file from the top of the work tree, so a subdirectory
-/// `--repo` still searches every file the graph covers, minus vendored code,
-/// build output, generated files and documents. No language filter: a
-/// template, a view or a frontend file of another language is the gap.
-fn pathspecs() -> Vec<String> {
-    let dirs = VENDORED_DIRS
-        .iter()
-        .chain(&BUILD_DIRS)
-        .map(|dir| format!(":(top,exclude,glob)**/{dir}/**"));
-    let files = SKIPPED_FILES
-        .iter()
-        .map(|file| format!(":(top,exclude,glob)**/{file}"));
-    std::iter::once(":(top)".to_string())
-        .chain(dirs)
-        .chain(files)
-        .collect()
+/// Whether the scan skips `path` (top-relative, `/`-separated): vendored
+/// code and build output at any depth, generated files and documents.
+fn is_skipped(path: &str) -> bool {
+    let mut parts = path.rsplit('/');
+    let file = parts.next().unwrap_or(path);
+    SKIPPED_SUFFIXES.iter().any(|suffix| file.ends_with(suffix))
+        || SKIPPED_NAMES.contains(&file)
+        || parts.any(|dir| VENDORED_DIRS.contains(&dir) || BUILD_DIRS.contains(&dir))
 }
 
-fn git_grep(repo: &Path, name: &str) -> Result<Vec<u8>, String> {
-    // A fixed string needs no regex escaping and lets git skip lines by a
-    // literal search; `occurrences` applies the exact word boundary.
+/// The top of the work tree that holds `repo`, and every tracked file from
+/// that top, so a subdirectory `--repo` still searches every file the graph
+/// covers. No language filter: a template, a view or a frontend file of
+/// another language is the gap.
+fn tracked_files(repo: &Path) -> Result<(PathBuf, Vec<String>), String> {
+    let top = git(repo, &["rev-parse", "--show-toplevel"])?;
+    let top = PathBuf::from(String::from_utf8_lossy(&top).trim_end_matches(['\n', '\r']));
+    let listed = git(&top, &["ls-files", "-z"])?;
+    let files = listed
+        .split(|&b| b == 0)
+        .filter_map(|path| std::str::from_utf8(path).ok())
+        .filter(|path| !path.is_empty() && !is_skipped(path))
+        .map(str::to_string)
+        .collect();
+    Ok((top, files))
+}
+
+fn git(dir: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
     let out = safe_exec::git()
         .arg("-C")
-        .arg(repo)
-        .args([
-            "grep",
-            "--no-color",
-            "--no-textconv",
-            "--full-name",
-            "-n",
-            "-z",
-            "-I",
-            "-F",
-            "-w",
-            "-e",
-        ])
-        .arg(name)
-        .arg("--")
-        .args(pathspecs())
+        .arg(dir)
+        .args(args)
         .output()
         .map_err(|e| format!("git did not run: {e}"))?;
-    // git grep exits 1 for "no match", which is an answer, not a failure.
-    match out.status.code() {
-        Some(0) => Ok(out.stdout),
-        Some(1) if out.stderr.is_empty() => Ok(Vec::new()),
-        _ => Err(format!(
-            "git grep failed: {}",
+    match out.status.success() {
+        true => Ok(out.stdout),
+        false => Err(format!(
+            "git {} failed: {}",
+            args[0],
             String::from_utf8_lossy(&out.stderr).trim()
         )),
     }
 }
 
-/// Parse `git grep -n -z` records (`path\0line\0content\n`).
-fn parse_hits(stdout: &[u8], name: &[u8]) -> Vec<Hit> {
-    stdout
-        .split(|&b| b == b'\n')
-        .filter_map(|record| {
-            let mut fields = record.splitn(3, |&b| b == 0);
-            let path = std::str::from_utf8(fields.next()?).ok()?;
-            let line = std::str::from_utf8(fields.next()?).ok()?.parse().ok()?;
-            let (form, count) = occurrences(fields.next()?, name)?;
-            Some(Hit {
-                path: path.to_string(),
+/// Every line of `files` under `top` with a whole-word occurrence of `name`.
+/// In-process rather than `git grep`: on a 15k-file tree `git grep` took
+/// 300-450 ms per query against about 50 ms for one parallel pass.
+fn search(top: &Path, files: &[String], name: &[u8]) -> Vec<Hit> {
+    let finder = Finder::new(name);
+    files
+        .par_iter()
+        .flat_map_iter(|rel| search_file(&top.join(rel), rel, &finder, name))
+        .collect()
+}
+
+/// The hits of one file. A path that is gone, no regular file (a submodule,
+/// a symlink) or binary by `git grep -I`'s test gives none.
+fn search_file(path: &Path, rel: &str, finder: &Finder, name: &[u8]) -> Vec<Hit> {
+    let regular = fs::symlink_metadata(path).is_ok_and(|meta| meta.is_file());
+    let Some(text) = regular.then(|| fs::read(path).ok()).flatten() else {
+        return Vec::new();
+    };
+    if memchr::memchr(0, &text[..text.len().min(BINARY_PROBE_BYTES)]).is_some() {
+        return Vec::new();
+    }
+    let mut hits = Vec::new();
+    let (mut line, mut counted, mut line_end) = (1u32, 0usize, 0usize);
+    for at in finder.find_iter(&text) {
+        if at < line_end {
+            continue;
+        }
+        line += memchr::memchr_iter(b'\n', &text[counted..at]).count() as u32;
+        counted = at;
+        let start = memchr::memrchr(b'\n', &text[..at]).map_or(0, |i| i + 1);
+        line_end = memchr::memchr(b'\n', &text[at..]).map_or(text.len(), |i| at + i);
+        if let Some((form, count)) = occurrences(&text[start..line_end], name) {
+            hits.push(Hit {
+                path: rel.to_string(),
                 line,
                 form,
                 count,
-            })
-        })
-        .collect()
+            });
+        }
+    }
+    hits
 }
 
 fn is_ident_char(c: char) -> bool {
@@ -282,7 +305,7 @@ fn first_char(bytes: &[u8]) -> Option<char> {
 /// The form of the first whole-word occurrence of `name` on the line, and
 /// the number of whole-word occurrences; `None` when there is none. An
 /// occurrence is whole-word when no Unicode letter, digit, `_` or `$` touches
-/// it on either side; git's `-w` is looser on non-ASCII, so this decides.
+/// it on either side.
 /// The form is `member` for `x.name(` / `p->name(` / `T::name(`, `bare` for
 /// `name(`, and `reference` for every other use: a value, a type, a
 /// template, a string, a Ruby call without parentheses.
@@ -582,19 +605,45 @@ mod tests {
         assert_eq!(occurrences(b"axb$c", b"a.b$c"), None);
     }
 
-    #[test]
-    fn test_parse_hits_nul_records_parsed_and_partial_words_dropped() {
-        let out =
-            b"src/a.py\x002\x00    get()\nsrc/b.py\x007\x00getter()\nsrc/c:d.py\x001\x00x = get\n";
-        let hits = parse_hits(out, b"get");
-        let got: Vec<(&str, u32, &str)> = hits
+    fn hits_of(text: &[u8], name: &[u8]) -> Vec<(u32, &'static str, u32)> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f");
+        fs::write(&path, text).unwrap();
+        search_file(&path, "f", &Finder::new(name), name)
             .iter()
-            .map(|h| (h.path.as_str(), h.line, h.form))
-            .collect();
+            .map(|h| (h.line, h.form, h.count))
+            .collect()
+    }
+
+    #[test]
+    fn test_search_file_lines_forms_and_partial_words() {
+        let text = b"get()\ngetter()\n  x.get(1) + get(2)\r\n\nreturn get";
         assert_eq!(
-            got,
-            vec![("src/a.py", 2, "bare"), ("src/c:d.py", 1, "reference")]
+            hits_of(text, b"get"),
+            vec![(1, "bare", 1), (3, "member", 2), (5, "reference", 1)]
         );
+    }
+
+    #[test]
+    fn test_search_file_empty_binary_and_unmatched_give_none() {
+        assert_eq!(hits_of(b"", b"get"), vec![]);
+        assert_eq!(hits_of(b"x\0get()\n", b"get"), vec![]);
+        assert_eq!(hits_of(b"getter\nforget\n", b"get"), vec![]);
+    }
+
+    #[test]
+    fn test_search_file_nul_past_probe_still_searched() {
+        let mut text = vec![b'a'; BINARY_PROBE_BYTES];
+        text.extend_from_slice(b"\n\0 get()\n");
+        assert_eq!(hits_of(&text, b"get"), vec![(2, "bare", 1)]);
+    }
+
+    #[test]
+    fn test_search_file_directory_and_missing_path_give_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let finder = Finder::new(b"get");
+        assert!(search_file(dir.path(), "d", &finder, b"get").is_empty());
+        assert!(search_file(&dir.path().join("gone"), "gone", &finder, b"get").is_empty());
     }
 
     #[test]
@@ -608,20 +657,32 @@ mod tests {
     }
 
     #[test]
-    fn test_pathspecs_whole_tree_with_every_exclusion() {
-        let specs = pathspecs();
-        assert_eq!(specs[0], ":(top)");
-        for dir in VENDORED_DIRS.iter().chain(&BUILD_DIRS) {
-            assert!(
-                specs.contains(&format!(":(top,exclude,glob)**/{dir}/**")),
-                "{dir}: {specs:?}"
-            );
+    fn test_is_skipped_vendored_build_generated_and_documents() {
+        for path in [
+            "node_modules/x/i.js",
+            "pkg/dist/a.js",
+            "public/build/app.js",
+            "a/b.min.js",
+            "fixtures/x.patch",
+            "a.diff",
+            "__snapshots__/a.test.ts.snap",
+            "README.md",
+            "docs/x.rst",
+            "notes.txt",
+            "Cargo.lock",
+            "web/package-lock.json",
+            "pnpm-lock.yaml",
+        ] {
+            assert!(is_skipped(path), "{path}");
         }
-        for file in SKIPPED_FILES {
-            assert!(
-                specs.contains(&format!(":(top,exclude,glob)**/{file}")),
-                "{file}: {specs:?}"
-            );
+        for path in [
+            "src/build.rs",
+            "src/dist.py",
+            "src/lock.py",
+            "src/app.js",
+            "build",
+        ] {
+            assert!(!is_skipped(path), "{path}");
         }
     }
 }
