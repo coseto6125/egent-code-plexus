@@ -201,7 +201,9 @@ fn event_kebab_to_camel(ev: &str) -> &'static str {
 
 fn matcher_for(ev: &str) -> &'static str {
     match ev {
-        "pre-tool-use" => "Grep|Glob|Bash|Edit|Write",
+        // Searches reach PostToolUse only: its search delta replaced the
+        // PreToolUse graph hits, and a second process per Grep says nothing.
+        "pre-tool-use" => "Bash|Edit|Write",
         "post-tool-use" => "Grep|Bash|Edit|Write",
         // `Task` is the pre-rename name of the Agent tool — match both so
         // the tripwire works across Claude Code versions.
