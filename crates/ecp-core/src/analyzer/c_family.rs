@@ -374,29 +374,17 @@ where
     if !is_c_family(caller.language) {
         return None;
     }
-    let mut out_of_reach = false;
-    let mut field: Vec<Entry> = Vec::new();
-    for (id, meta) in candidates().filter(|&(_, meta)| caller.admits(meta)) {
-        if reachable(facts, caller_file, id, callable(id)) {
-            field.push((id, meta, meta.language));
-        } else {
-            out_of_reach = true;
-        }
-    }
-    let mut prototypes: Vec<Decl<'_>> = field
-        .iter()
-        .filter_map(|&(id, _, language)| prototype(facts, callable, id, language))
-        .collect();
-    let cross_family = || -> Vec<Entry> {
+    let admitted = || candidates().filter(move |&(_, meta)| caller.admits(meta));
+    let crossing_iter = || {
         candidates()
-            .filter(|&(id, meta)| {
+            .filter(move |&(id, meta)| {
                 is_c_family(meta.language)
                     && meta.language != caller.language
                     && facts.owner(id).is_none()
                     && c_nameable(facts.kind(id))
                     && !callable(id).is_some_and(|c| c.linkage == CLinkage::Internal)
             })
-            .map(|(id, meta)| {
+            .map(move |(id, meta)| {
                 (
                     id,
                     FileMeta {
@@ -409,9 +397,49 @@ where
             // The vendor barrier before the prototypes: a vendor prototype
             // the caller cannot reach must not push a reachable definition
             // out as another overload.
-            .filter(|&(_, meta, _)| caller.admits(meta))
-            .collect()
+            .filter(move |&(_, meta, _)| caller.admits(meta))
     };
+    let cross_family = || -> Vec<Entry> { crossing_iter().collect() };
+    // Common outcome (no prototype in the field, none crossing): decided by
+    // two scans with no collected vector, so the `None` answer allocates
+    // nothing. Any other outcome falls through to the full rule below.
+    let (mut out_of_reach, mut reachable_any, mut has_prototype) = (false, false, false);
+    for (id, meta) in admitted() {
+        if reachable(facts, caller_file, id, callable(id)) {
+            reachable_any = true;
+            if prototype(facts, callable, id, meta.language).is_some() {
+                has_prototype = true;
+                break;
+            }
+        } else {
+            out_of_reach = true;
+        }
+    }
+    if reachable_any
+        && !has_prototype
+        && !crossing_iter()
+            .any(|(id, _, language)| prototype(facts, callable, id, language).is_some())
+    {
+        return out_of_reach.then(|| {
+            admitted()
+                .filter(|&(id, _)| reachable(facts, caller_file, id, callable(id)))
+                .map(|(id, meta)| (id, meta, meta.language))
+                .collect()
+        });
+    }
+    let mut out_of_reach = false;
+    let mut field: Vec<Entry> = Vec::new();
+    for (id, meta) in admitted() {
+        if reachable(facts, caller_file, id, callable(id)) {
+            field.push((id, meta, meta.language));
+        } else {
+            out_of_reach = true;
+        }
+    }
+    let mut prototypes: Vec<Decl<'_>> = field
+        .iter()
+        .filter_map(|&(id, _, language)| prototype(facts, callable, id, language))
+        .collect();
     // Own definitions with no prototype beside them win, unless a crossing
     // prototype declares the name and no definition settles it: then those
     // definitions are other functions of the same name (`f(void)` against
