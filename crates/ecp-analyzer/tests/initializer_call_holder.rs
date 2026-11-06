@@ -601,6 +601,22 @@ fn test_build_c_file_scope_shared_declaration_call_gets_own_declarator() {
 }
 
 #[test]
+fn test_build_c_bare_and_initialized_declarators_call_gets_initialized_one() {
+    let src = "int g(void) { return 2; }\nint a, b = g();\n";
+    let p = CProvider::new().unwrap();
+    assert_holds(&p, "t.c", src, "b", "g");
+    assert_not_holds(&p, "t.c", src, "a", "g");
+}
+
+#[test]
+fn test_build_cpp_bare_and_initialized_declarators_call_gets_initialized_one() {
+    let src = "int g() { return 2; }\nnamespace N { int a, b = g(); }\n";
+    let p = CppProvider::new().unwrap();
+    assert_holds(&p, "t.cpp", src, "b", "g");
+    assert_not_holds(&p, "t.cpp", src, "a", "g");
+}
+
+#[test]
 fn test_build_cpp_namespace_scope_shared_declaration_call_gets_own_declarator() {
     let src =
         "int f() { return 1; }\nint g() { return 2; }\nnamespace N { int a = f(), b = g(); }\n";

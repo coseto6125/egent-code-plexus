@@ -297,11 +297,16 @@ fn declared_in<'s>(at: Node<'_>, source: &'s [u8], within: PosRange) -> Vec<Decl
         }
         let paired = paired_declarators(parent, source);
         if paired.is_empty() {
-            let mut cursor = parent.walk();
-            let shared: Vec<Node<'_>> = parent
-                .named_children(&mut cursor)
-                .filter(|child| is_declarator_kind(child.kind()))
-                .collect();
+            // C `int a, b = g();` lists the bare `a` in a `declarator` field
+            // next to the `init_declarator`; it still counts as a declarator.
+            let mut shared = named_fields(parent, "declarator");
+            if shared.len() < 2 {
+                let mut cursor = parent.walk();
+                shared = parent
+                    .named_children(&mut cursor)
+                    .filter(|child| is_declarator_kind(child.kind()))
+                    .collect();
+            }
             if shared.len() >= 2 {
                 declarators.extend(shared.into_iter().map(|d| Declarator {
                     range: node_range(d),
