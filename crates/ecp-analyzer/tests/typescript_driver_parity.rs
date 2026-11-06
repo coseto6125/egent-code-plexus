@@ -121,7 +121,15 @@ fn test_typescript_driver_conditional_blind_spots_skip_literal_arguments() {
 #[test]
 fn test_typescript_driver_interface_without_import_emits_schema_fields() {
     let g = parse(b"interface User { id: number; name: string; }\n");
-    assert_eq!(names_kinds(&g), [("User", NodeKind::Interface)]);
+    // TS interface property signatures are Property nodes owned by the interface.
+    assert_eq!(
+        names_kinds(&g),
+        [
+            ("User", NodeKind::Interface),
+            ("id", NodeKind::Property),
+            ("name", NodeKind::Property)
+        ]
+    );
     assert_eq!(g.nodes[0].span, (0, 0, 0, 44));
     assert!(g.imports.is_empty());
     let fields = g.schema_fields.as_deref().expect("schema_fields");

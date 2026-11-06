@@ -185,9 +185,10 @@ fn astro_page_snapshot() {
         .parse_file(Path::new("Page.astro"), &src)
         .expect("parse_file");
 
+    // Interface property signatures are Property nodes: +2 (User.id, User.name).
     assert_eq!(
         graph.nodes.len(),
-        4,
+        6,
         "Astro Page.astro: total node count changed"
     );
     assert_eq!(
@@ -315,9 +316,10 @@ fn vue_props_and_emits_snapshot_match() {
         .parse_file(Path::new("PropsAndEmits.vue"), &src)
         .expect("parse_file");
 
+    // Interface property signatures are Property nodes: +2 (ButtonProps.label, disabled).
     assert_eq!(
         graph.nodes.len(),
-        8,
+        10,
         "Vue PropsAndEmits.vue: total node count changed"
     );
     assert_eq!(
@@ -771,9 +773,10 @@ fn astro_typed_props_snapshot_match() {
         .parse_file(Path::new("TypedProps.astro"), &src)
         .expect("parse_file");
 
+    // Interface property signatures are Property nodes: +3 (Props.title, description, imageUrl).
     assert_eq!(
         graph.nodes.len(),
-        4,
+        7,
         "Astro TypedProps.astro: total node count changed"
     );
     assert_eq!(

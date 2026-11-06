@@ -61,11 +61,11 @@ fn test_union_and_generic_returns_bind_through_the_function_meta() {
 }
 
 /// Contract: a class field typed with a project class reaches it, like a
-/// parameter does. An interface property makes no node (ref-gitnexus
-/// parity, `interface_property_signature_not_emitted`), so it gets no edge. A builtin
+/// parameter does. An interface property signature is a Property node owned
+/// by the interface, so it binds its project type too. A builtin
 /// type, a type parameter and an untyped field bind nothing.
 #[test]
-fn test_class_field_annotation_binds_project_type_and_interface_property_makes_no_node() {
+fn test_class_field_annotation_binds_project_type_and_interface_property_binds_project_type() {
     let g = graph(
         &TypeScriptProvider::new().unwrap(),
         &[(
@@ -78,12 +78,9 @@ fn test_class_field_annotation_binds_project_type_and_interface_property_makes_n
     let st = vec![pair("src/app.ts", "St")];
     assert_eq!(annotated(&g, "st_field"), st, "class field");
     assert_eq!(annotated(&g, "st_init"), st, "class field with initializer");
+    // TS interface property signature: a Property node that binds its project type.
+    assert_eq!(annotated(&g, "st_prop"), st, "interface property");
     let none = Vec::<(String, String)>::new();
-    assert_eq!(
-        annotated(&g, "st_prop"),
-        none,
-        "interface property: no node"
-    );
     assert_eq!(annotated(&g, "tparam"), none, "type parameter");
     assert_eq!(annotated(&g, "plain"), none, "builtin class field");
     assert_eq!(annotated(&g, "untyped"), none, "no annotation");

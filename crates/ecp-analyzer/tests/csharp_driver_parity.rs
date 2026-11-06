@@ -258,8 +258,11 @@ fn test_csharp_driver_partial_generic_and_nested_class_emit_markers_and_owner() 
         decorators(&g),
         [
             &[][..],
+            // Generic declaration: a `__type_params__:<names>` decorator sits
+            // between the arity and partial markers.
             &[
                 RawNode::generic_arity_marker(1),
+                "__type_params__:T".to_string(),
                 RawNode::partial_marker("N")
             ][..],
             &[][..],
