@@ -266,3 +266,94 @@ fn test_callable_reference_braced_namespace_function_references_function() {
         .collect();
     assert_eq!(got, one("cb_bare"));
 }
+
+// Stands for: `[$o, 'm']` names the method of `$o`'s declared class only while
+// `$o` is that parameter. main binds `Cb.cb_ptr` after any of these rewrites.
+#[test]
+fn test_array_callable_parameter_reassigned_in_body_references_nothing() {
+    assert_eq!(
+        references("$o = $a; array_map([$o, 'cb_ptr'], $a);"),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn test_array_callable_parameter_foreach_target_references_nothing() {
+    assert_eq!(
+        references("foreach ($a as $o) {} array_map([$o, 'cb_ptr'], $a);"),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn test_array_callable_parameter_list_destructured_references_nothing() {
+    assert_eq!(
+        references("[$o] = $a; array_map([$o, 'cb_ptr'], $a);"),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn test_array_callable_parameter_never_assigned_still_references_method() {
+    assert_eq!(references("array_map([$o, 'cb_ptr'], $a);"), one("cb_ptr"));
+}
+
+#[test]
+fn test_array_callable_closure_without_use_of_parameter_references_nothing() {
+    assert_eq!(
+        references("return function () use ($a) { return array_map([$o, 'cb_ptr'], $a); };"),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn test_array_callable_closure_capturing_parameter_references_method() {
+    assert_eq!(
+        references("return function () use ($o, $a) { return array_map([$o, 'cb_ptr'], $a); };"),
+        one("cb_ptr")
+    );
+}
+
+#[test]
+fn test_array_callable_closure_reassigning_captured_parameter_references_nothing() {
+    assert_eq!(
+        references(
+            "return function () use ($o, $a) { $o = $a; return array_map([$o, 'cb_ptr'], $a); };"
+        ),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn test_array_callable_arrow_function_captures_parameter_by_value() {
+    assert_eq!(
+        references("return fn () => array_map([$o, 'cb_ptr'], $a);"),
+        one("cb_ptr")
+    );
+}
+
+// Stands for: PHP 8 names the first parameter of `is_callable` `$value`, so a
+// named `value:` argument is the callable and a named `callback:` one is not.
+#[test]
+fn test_string_callable_is_callable_named_value_argument_references_method() {
+    assert_eq!(
+        references("is_callable(value: [$o, 'cb_ptr']);"),
+        one("cb_ptr")
+    );
+}
+
+#[test]
+fn test_string_callable_is_callable_named_callback_argument_references_nothing() {
+    assert_eq!(
+        references("is_callable(callback: [$o, 'cb_ptr']);"),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn test_string_callable_array_map_named_callback_argument_references_method() {
+    assert_eq!(
+        references("array_map(callback: [$o, 'cb_ptr'], array: $a);"),
+        one("cb_ptr")
+    );
+}

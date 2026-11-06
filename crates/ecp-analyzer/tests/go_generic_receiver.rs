@@ -6,7 +6,7 @@
 //! languages are skipped: this change touches only the Go receiver and local
 //! type binding, which no other language shares.
 
-use crate::name_ref_support::{calls, graph};
+use crate::name_ref_support::{calls, function_refs, graph};
 use ecp_analyzer::go::parser::GoProvider;
 use ecp_core::graph::{RelType, ZeroCopyGraph};
 
@@ -196,4 +196,59 @@ fn test_has_method_go_empty_type_argument_list_owns_no_bracketed_name() {
 #[test]
 fn test_has_method_go_generic_receiver_is_deterministic() {
     assert_eq!(owned(&built(SRC)), owned(&built(SRC)));
+}
+
+// Stands for: a variable typed by a type parameter (`var x T`) holds a
+// placeholder, so `x.m` in value position never binds the project type `T`.
+// The parameter is seen from a func literal, which Go cannot give a list of
+// its own, and from a generic receiver. Both read the one `go_type_params`.
+const TYPE_PARAM_VALUES: &str = r#"package p
+
+type T struct{}
+
+func (t T) m() {}
+
+type Box[T any] struct{}
+
+func inLiteral[T any]() {
+	f := func() {
+		var x T
+		g := x.m
+		_ = g
+	}
+	f()
+}
+
+func (b Box[T]) viaReceiver() {
+	var x T
+	g := x.m
+	_ = g
+}
+
+func plain() {
+	var x T
+	g := x.m
+	_ = g
+}
+"#;
+
+#[test]
+fn test_function_refs_go_func_literal_in_generic_function_binds_nothing() {
+    let g = built(TYPE_PARAM_VALUES);
+    assert_eq!(function_refs(&g, "inLiteral"), Vec::new());
+}
+
+#[test]
+fn test_function_refs_go_generic_receiver_type_parameter_binds_nothing() {
+    let g = built(TYPE_PARAM_VALUES);
+    assert_eq!(function_refs(&g, "viaReceiver"), Vec::new());
+}
+
+/// Control: the same body in a function with no type parameter binds `T.m`.
+#[test]
+fn test_function_refs_go_plain_function_binds_method_of_project_type() {
+    let g = built(TYPE_PARAM_VALUES);
+    let found = function_refs(&g, "plain");
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].1, "m");
 }

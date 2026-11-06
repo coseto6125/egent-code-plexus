@@ -19,8 +19,9 @@ use crate::calls::{
     attach_to_enclosing, is_call_callee, is_same_kind_field, node_range, range_width,
     reference_function, start_pos, Pos, PosRange,
 };
+use crate::function_meta::go::go_type_params;
 use ecp_core::analyzer::types::{CallSite, RawImport, RawNode, RawPathLiteral, RawSqlRef};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use tree_sitter::Node;
 
 // ── receiver map ─────────────────────────────────────────────────────────────
@@ -202,7 +203,7 @@ fn collect_function_scope(function: Node<'_>, source: &[u8], scopes: &mut Vec<Sc
             values,
         });
     }
-    let type_params = type_param_names(&function, source);
+    let type_params = go_type_params(&function, source);
     if !type_params.is_empty() {
         for scope in &mut scopes[first_scope..] {
             scope.bindings.retain(|_, ty| !type_params.contains(ty));
@@ -664,50 +665,6 @@ fn bare_type_name(ty_node: Node<'_>, source: &[u8]) -> Option<String> {
         }
         _ => None,
     }
-}
-
-/// Names declared as type parameters by `function` — its own
-/// `[T any]` list, or the `[T]` of a generic receiver. Such a name is a
-/// placeholder, so a variable typed `T` must not bind to a struct named `T`.
-fn type_param_names(function: &Node<'_>, source: &[u8]) -> HashSet<String> {
-    let mut names = HashSet::new();
-    if let Some(list) = function.child_by_field_name("type_parameters") {
-        let mut c = list.walk();
-        for decl in list.children(&mut c) {
-            let mut nc = decl.walk();
-            names.extend(
-                decl.children_by_field_name("name", &mut nc)
-                    .filter_map(|n| node_text(n, source)),
-            );
-        }
-    }
-    let receiver_ty = function
-        .child_by_field_name("receiver")
-        .and_then(|r| {
-            r.children(&mut r.walk())
-                .find(|c| c.kind() == "parameter_declaration")
-        })
-        .and_then(|p| p.child_by_field_name("type"))
-        .map(|ty| {
-            if ty.kind() == "pointer_type" {
-                ty.named_child(0).unwrap_or(ty)
-            } else {
-                ty
-            }
-        });
-    if let Some(args) = receiver_ty
-        .filter(|ty| ty.kind() == "generic_type")
-        .and_then(|ty| ty.child_by_field_name("type_arguments"))
-    {
-        let mut stack = vec![args];
-        while let Some(n) = stack.pop() {
-            if n.kind() == "type_identifier" {
-                names.extend(node_text(n, source));
-            }
-            stack.extend(n.children(&mut n.walk()));
-        }
-    }
-    names
 }
 
 /// Decode the UTF-8 text span of `node` from `source`.

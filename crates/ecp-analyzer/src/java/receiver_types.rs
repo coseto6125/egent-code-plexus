@@ -333,18 +333,26 @@ pub fn extract_java_calls_and_path_literals(
     (path_literals, sql_refs)
 }
 
-/// `c::m` where `c` is a local or parameter of a declared type `T`: the
-/// method `T.m`, typed as a call `c.m()` is. The name scan drops `c::m`,
-/// as `c` is a local; a receiver of no known type names nothing.
+/// `c::m` and `c::<A>m` where `c` is a local or parameter of a declared type
+/// `T`: the method `T.m`, typed as a call `c.m()` is. The name scan drops
+/// `c::m`, as `c` is a local; a receiver of no known type names nothing.
 fn bound_method_reference(
     reference: Node<'_>,
     source: &[u8],
     locals: &LocalTypes,
 ) -> Option<String> {
-    if reference.named_child_count() != 2 {
+    let last = reference.named_child_count().checked_sub(1)?;
+    let known_shape = match last {
+        1 => true,
+        2 => reference
+            .named_child(1)
+            .is_some_and(|between| between.kind() == "type_arguments"),
+        _ => false,
+    };
+    if !known_shape {
         return None;
     }
-    let (receiver, member) = (reference.named_child(0)?, reference.named_child(1)?);
+    let (receiver, member) = (reference.named_child(0)?, reference.named_child(last)?);
     if receiver.kind() != "identifier" || member.kind() != "identifier" {
         return None;
     }

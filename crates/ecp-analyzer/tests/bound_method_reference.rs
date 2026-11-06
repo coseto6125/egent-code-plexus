@@ -403,12 +403,12 @@ fn test_bound_method_reference_dart_call_keeps_calls_edge_only() {
     assert_call_only(&g, "run", "cls.dart", "m");
 }
 
-// Stands for: a parenthesized callee `(c.m)(1)` is a call, never a method
-// value. Its Calls edge is not asserted: only the absent References is.
+/// Stands for: a parenthesized callee `(c.m)(1)` is a call, never a method
+/// value, and records the `Calls` edge `c.m(1)` records.
 #[test]
 fn test_bound_method_reference_dart_parenthesized_call_returns_no_edge() {
     let g = dart_graph("(c.m)(1);");
-    assert_eq!(function_refs(&g, "run"), none());
+    assert_call_only(&g, "run", "cls.dart", "m");
 }
 
 #[test]
@@ -557,12 +557,12 @@ fn test_bound_method_reference_python_call_keeps_calls_edge_only() {
     assert_call_only(&g, "run", "cls.py", "m");
 }
 
-// Stands for: a parenthesized callee `(obj.m)(1)` is a call, never a method
-// value. Its Calls edge is not asserted: only the absent References is.
+/// Stands for: a parenthesized callee `(obj.m)(1)` is a call, never a method
+/// value, and records the `Calls` edge `obj.m(1)` records.
 #[test]
 fn test_bound_method_reference_python_parenthesized_call_returns_no_edge() {
     let g = python_graph("(obj.m)(1)");
-    assert_eq!(function_refs(&g, "run"), none());
+    assert_call_only(&g, "run", "cls.py", "m");
 }
 
 #[test]
@@ -644,20 +644,19 @@ fn test_bound_method_reference_typescript_call_keeps_calls_edge_only() {
     assert_call_only(&g, "run", "cls.ts", "m");
 }
 
-// Stands for: a parenthesized callee `(obj.m)(1)` / `(this.m)()` is a call,
-// never a method value. Its Calls edge is not asserted: only the absent
-// References is.
+/// Stands for: a parenthesized callee `(obj.m)(1)` / `(this.m)()` is a call,
+/// never a method value, and records the `Calls` edge `obj.m(1)` records.
 #[test]
 fn test_bound_method_reference_typescript_parenthesized_call_returns_no_edge() {
     let g = ts_graph("(obj.m)(1);");
-    assert_eq!(function_refs(&g, "run"), none());
+    assert_call_only(&g, "run", "cls.ts", "m");
 }
 
 #[test]
 fn test_bound_method_reference_typescript_parenthesized_this_call_returns_no_edge() {
     let src = "class C {\n  m(): void {}\n  run(): void {\n    (this.m)();\n  }\n}\n";
-    let found = refs(&TypeScriptProvider::new().unwrap(), &[("c.ts", src)], "run");
-    assert_eq!(found, none());
+    let g = graph(&TypeScriptProvider::new().unwrap(), &[("c.ts", src)]);
+    assert_call_only(&g, "run", "c.ts", "m");
 }
 
 #[test]
@@ -721,8 +720,8 @@ fn test_bound_method_reference_javascript_call_keeps_calls_edge_only() {
 #[test]
 fn test_bound_method_reference_javascript_parenthesized_this_call_returns_no_edge() {
     let src = "export class C {\n  m() {}\n  run() {\n    (this.m)();\n  }\n}\n";
-    let found = refs(&JavaScriptProvider::new().unwrap(), &[("c.js", src)], "run");
-    assert_eq!(found, none());
+    let g = graph(&JavaScriptProvider::new().unwrap(), &[("c.js", src)]);
+    assert_call_only(&g, "run", "c.js", "m");
 }
 
 #[test]
@@ -783,4 +782,203 @@ fn test_bound_method_reference_rust_tuple_index_read_returns_no_value_read() {
     let g = graph(&RustProvider::new().unwrap(), &[("lib.rs", src)]);
     let found = name_ref_support::refs(&g, "first", RelType::ReadsField, "field_read");
     assert_eq!(found, none());
+}
+
+// ---- Receiver typing respects scope, `this` and labels ----
+
+/// The owner class of each method `source` reaches by `rel` with `reason`,
+/// sorted: it tells `Outer.cb` from `Inner.cb`, which share a name.
+fn target_owners(g: &ZeroCopyGraph, source: &str, rel: RelType, reason: &str) -> Vec<String> {
+    let pool = g.string_pool.as_slice();
+    let mut owners: Vec<String> = g
+        .edges
+        .iter()
+        .filter(|e| e.rel_type == rel && e.reason.resolve(pool) == reason)
+        .filter(|e| g.nodes[e.source as usize].name.resolve(pool) == source)
+        .map(|e| {
+            g.nodes[e.target as usize]
+                .owner_class
+                .resolve(pool)
+                .to_string()
+        })
+        .collect();
+    owners.sort();
+    owners
+}
+
+fn reference_owners(g: &ZeroCopyGraph, source: &str) -> Vec<String> {
+    target_owners(g, source, RelType::References, "function_reference")
+}
+
+// Stands for: a name that a nearer function declares is not the outer
+// annotated one. Each case below reads `obj.m` in an inner function of
+// `run(xs, obj: Cls, loose)`. main binds `Cls.m` in the untyped ones.
+#[test]
+fn test_bound_method_reference_python_untyped_inner_parameter_returns_no_edge() {
+    let g = python_graph("def inner(obj):\n        return list(map(obj.m, xs))\n    return inner");
+    assert_eq!(function_refs(&g, "inner"), none());
+}
+
+#[test]
+fn test_bound_method_reference_python_inner_assignment_shadows_outer_type_returns_no_edge() {
+    let g = python_graph(
+        "def inner():\n        obj = loose\n        return list(map(obj.m, xs))\n    return inner",
+    );
+    assert_eq!(function_refs(&g, "inner"), none());
+}
+
+#[test]
+fn test_bound_method_reference_python_inner_function_without_own_binding_keeps_outer_type() {
+    let g = python_graph("def inner():\n        return list(map(obj.m, xs))\n    return inner");
+    assert_one_cross_file(&function_refs(&g, "inner"), "cls.py", "m");
+}
+
+#[test]
+fn test_bound_method_reference_python_inner_annotation_wins_over_outer_type() {
+    let g = python_graph(
+        "def inner(obj: Other):\n        return list(map(obj.m, xs))\n    return inner",
+    );
+    assert_one_cross_file(&function_refs(&g, "inner"), "other.py", "m");
+}
+
+#[test]
+fn test_bound_method_reference_typescript_untyped_inner_parameter_returns_no_edge() {
+    let g = ts_graph(
+        "const f = (obj: any) => xs.forEach(obj.m);\n  const g = (obj) => xs.forEach(obj.m);",
+    );
+    assert_eq!(function_refs(&g, "f"), none());
+    assert_eq!(function_refs(&g, "g"), none());
+}
+
+#[test]
+fn test_bound_method_reference_typescript_destructured_inner_parameter_returns_no_edge() {
+    let g = ts_graph("const d = ({ obj }: any) => xs.forEach(obj.m);");
+    assert_eq!(function_refs(&g, "d"), none());
+}
+
+#[test]
+fn test_bound_method_reference_typescript_inner_local_declaration_returns_no_edge() {
+    let g = ts_graph("const h = () => {\n    const obj = loose;\n    xs.forEach(obj.m);\n  };");
+    assert_eq!(function_refs(&g, "h"), none());
+}
+
+#[test]
+fn test_bound_method_reference_typescript_inner_function_without_own_binding_keeps_outer_type() {
+    let g = ts_graph("const k = () => xs.forEach(obj.m);");
+    assert_one_cross_file(&function_refs(&g, "k"), "cls.ts", "m");
+}
+
+// Stands for: `this` is the class only in a method of its body (or a field
+// initializer, or an arrow chain up to one); a plain `function` and an
+// object-literal method bind their own `this`. main binds `C.m` in both.
+const THIS_NESTED_TS: &str = "class C {\n  m(): void {}\n  go(): void {\n    function pick() { return this.m; }\n    const o = { run() { return this.m; } };\n    const ok = () => this.m;\n  }\n}\n";
+
+#[test]
+fn test_bound_method_reference_typescript_this_in_nested_function_returns_no_edge() {
+    let g = graph(
+        &TypeScriptProvider::new().unwrap(),
+        &[("c.ts", THIS_NESTED_TS)],
+    );
+    assert_eq!(function_refs(&g, "pick"), none());
+}
+
+#[test]
+fn test_bound_method_reference_typescript_this_in_object_literal_method_returns_no_edge() {
+    let g = graph(
+        &TypeScriptProvider::new().unwrap(),
+        &[("c.ts", THIS_NESTED_TS)],
+    );
+    assert_eq!(function_refs(&g, "run"), none());
+}
+
+#[test]
+fn test_bound_method_reference_typescript_this_in_arrow_inside_method_binds_enclosing_class() {
+    let g = graph(
+        &TypeScriptProvider::new().unwrap(),
+        &[("c.ts", THIS_NESTED_TS)],
+    );
+    assert_one_cross_file(&function_refs(&g, "ok"), "c.ts", "m");
+}
+
+#[test]
+fn test_bound_method_reference_javascript_this_in_nested_function_returns_no_edge() {
+    let src = "export class C {\n  m() {}\n  go() {\n    function pick() { return this.m; }\n    const o = { run() { return this.m; } };\n    const ok = () => this.m;\n  }\n}\n";
+    let g = graph(&JavaScriptProvider::new().unwrap(), &[("c.js", src)]);
+    assert_eq!(function_refs(&g, "pick"), none());
+    assert_eq!(function_refs(&g, "run"), none());
+    assert_one_cross_file(&function_refs(&g, "ok"), "c.js", "m");
+}
+
+/// A file with no `this` read builds nothing and binds nothing (the lazy
+/// member tables).
+#[test]
+fn test_bound_method_reference_typescript_file_without_this_reads_returns_no_edge() {
+    let g = graph(
+        &TypeScriptProvider::new().unwrap(),
+        &[(
+            "f.ts",
+            "export function plain(xs: number[]): void { xs.forEach(String); }\n",
+        )],
+    );
+    assert_eq!(function_refs(&g, "plain"), none());
+}
+
+// Stands for: an explicit type argument on a method reference or method group
+// does not change which method it names. main binds nothing for either.
+#[test]
+fn test_bound_method_reference_java_explicit_type_argument_binds_its_type() {
+    let g = graph(
+        &JavaProvider::new().unwrap(),
+        &[
+            ("Cls.java", JAVA_CLS),
+            ("Use.java", java_use("xs.forEach(c::<Integer>m);").as_str()),
+        ],
+    );
+    assert_one_cross_file(&function_refs(&g, "run"), "Cls.java", "m");
+}
+
+#[test]
+fn test_bound_method_reference_csharp_generic_method_group_binds_its_type() {
+    let g = csharp_graph("xs.ForEach(c.M<int>);");
+    assert_one_cross_file(&function_refs(&g, "Run"), "Cls.cs", "M");
+}
+
+// Stands for: `this@Outer` names the enclosing class labelled `Outer`, not the
+// innermost class; a label no enclosing class carries names nothing. The call
+// `this@Outer.cb()` shares the helper and has the same defect on main.
+const KT_LABELLED: &str = "class Outer {\n    fun cb() {}\n    inner class Inner {\n        fun cb() {}\n        fun refOuter() { val a = this@Outer::cb }\n        fun refSelf() { val b = this::cb }\n        fun refNope() { val c = this@Nope::cb }\n        fun callOuter() { this@Outer.cb() }\n        fun callSelf() { this.cb() }\n    }\n}\n";
+
+fn kotlin_labelled() -> ZeroCopyGraph {
+    graph(&KotlinProvider::new().unwrap(), &[("o.kt", KT_LABELLED)])
+}
+
+#[test]
+fn test_bound_method_reference_kotlin_labelled_this_binds_the_labelled_class() {
+    assert_eq!(reference_owners(&kotlin_labelled(), "refOuter"), ["Outer"]);
+}
+
+#[test]
+fn test_bound_method_reference_kotlin_plain_this_binds_the_innermost_class() {
+    assert_eq!(reference_owners(&kotlin_labelled(), "refSelf"), ["Inner"]);
+}
+
+#[test]
+fn test_bound_method_reference_kotlin_unknown_label_returns_no_edge() {
+    assert_eq!(
+        reference_owners(&kotlin_labelled(), "refNope"),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn test_bound_method_reference_kotlin_labelled_this_call_binds_the_labelled_class() {
+    let g = kotlin_labelled();
+    assert_eq!(
+        target_owners(&g, "callOuter", RelType::Calls, "call"),
+        ["Outer"]
+    );
+    assert_eq!(
+        target_owners(&g, "callSelf", RelType::Calls, "call"),
+        ["Inner"]
+    );
 }

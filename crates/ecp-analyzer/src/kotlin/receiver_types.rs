@@ -302,7 +302,7 @@ fn kotlin_callee(
 
             let pos = start_pos(call);
             let ty: Option<String> = match receiver.kind() {
-                "this_expression" => enclosing_class_name(nodes, pos),
+                "this_expression" => this_class(receiver, source, nodes, pos),
                 "super_expression" => enclosing_superclass(nodes, pos),
                 "simple_identifier" => {
                     let var =
@@ -457,7 +457,7 @@ fn bound_callable_reference(
             let name = member
                 .named_children(&mut member.walk())
                 .find(|n| n.kind() == "simple_identifier")?;
-            (enclosing_class_name(nodes, pos)?, name)
+            (this_class(receiver, source, nodes, pos)?, name)
         }
         _ => return None,
     };
@@ -519,6 +519,20 @@ fn constructed_class(call: Node<'_>, source: &[u8], nodes: &[RawNode]) -> Option
         .iter()
         .any(|n| n.kind == NodeKind::Class && n.name == name)
         .then(|| name.to_string())
+}
+
+/// The class a `this` stands for at `pos`: the innermost one, or for
+/// `this@Outer` the enclosing class labelled `Outer`, and none when no
+/// enclosing class carries the label (`this@forEach` names a lambda).
+fn this_class(this: Node<'_>, source: &[u8], nodes: &[RawNode], pos: Pos) -> Option<String> {
+    let Some(label) = this.named_child(0) else {
+        return enclosing_class_name(nodes, pos);
+    };
+    let label = label.utf8_text(source).ok()?;
+    nodes
+        .iter()
+        .any(|n| n.kind == NodeKind::Class && n.name == label && span_holds(n.span, pos))
+        .then(|| label.to_string())
 }
 
 fn enclosing_class_name(nodes: &[RawNode], pos: Pos) -> Option<String> {

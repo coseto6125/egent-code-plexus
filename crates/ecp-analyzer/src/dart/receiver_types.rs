@@ -30,7 +30,7 @@ use super::path_literals::{
 };
 use crate::calls::{
     attach_to_enclosing, is_call_callee, is_same_kind_field, node_range, range_width,
-    reference_function, span_holds, start_pos, Pos, PosRange,
+    reference_function, span_holds, start_pos, unparenthesized, Pos, PosRange,
 };
 use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
 use ecp_core::graph::NodeKind;
@@ -336,7 +336,7 @@ fn dart_callee_name(
     bindings: &DartBindings,
     nodes: &[RawNode],
 ) -> Option<String> {
-    let function = call.child_by_field_name("function")?;
+    let function = unparenthesized(call.child_by_field_name("function")?);
     let pos = start_pos(call);
 
     match function.kind() {

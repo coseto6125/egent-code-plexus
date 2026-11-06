@@ -283,8 +283,10 @@ fn local_function_name(name: &str, namespace: Option<&str>) -> String {
 }
 
 /// The class a parameter named `var` is declared with, in the innermost
-/// function around `node` that declares it. `None` for an undeclared,
-/// primitive, union or `self` / `static` / `parent` type.
+/// function around `node` that declares it, as long as no function body on
+/// the way assigns `var` and every closure on the way captures it. `None` for
+/// an undeclared, reassigned, uncaptured, primitive, union or `self` /
+/// `static` / `parent` type.
 fn parameter_class(node: Node<'_>, var: &str, source: &[u8]) -> Option<String> {
     let mut current = node.parent();
     while let Some(n) = current {
@@ -295,9 +297,7 @@ fn parameter_class(node: Node<'_>, var: &str, source: &[u8]) -> Option<String> {
         ) {
             continue;
         }
-        let Some(params) = n.child_by_field_name("parameters") else {
-            continue;
-        };
+        let params = n.child_by_field_name("parameters")?;
         let mut cursor = params.walk();
         let declared = params.named_children(&mut cursor).find(|p| {
             matches!(
@@ -308,7 +308,23 @@ fn parameter_class(node: Node<'_>, var: &str, source: &[u8]) -> Option<String> {
                 .and_then(|v| v.utf8_text(source).ok())
                 == Some(var)
         });
-        let Some(declared) = declared else { continue };
+        if assigns_variable(n, var, source) {
+            return None;
+        }
+        let Some(declared) = declared else {
+            // `fn` captures by value and a `use` list names what a `function`
+            // closure captures; a named function or method sees no outer
+            // variable.
+            let crosses = match n.kind() {
+                "arrow_function" => true,
+                "anonymous_function" => captures_variable(n, var, source),
+                _ => false,
+            };
+            if crosses {
+                continue;
+            }
+            return None;
+        };
         let ty = declared.child_by_field_name("type")?;
         let ty = if ty.kind() == "optional_type" {
             ty.named_child(0)?
@@ -322,6 +338,119 @@ fn parameter_class(node: Node<'_>, var: &str, source: &[u8]) -> Option<String> {
         return (!matches!(class, "self" | "static" | "parent")).then(|| class.to_string());
     }
     None
+}
+
+/// Whether the `use (..)` list of a closure names `var`, by value or by
+/// reference.
+fn captures_variable(closure: Node<'_>, var: &str, source: &[u8]) -> bool {
+    let mut cursor = closure.walk();
+    let captured = closure
+        .named_children(&mut cursor)
+        .find(|c| c.kind() == "anonymous_function_use_clause");
+    captured.is_some_and(|clause| {
+        let mut cursor = clause.walk();
+        let found = clause
+            .named_children(&mut cursor)
+            .any(|c| writes_variable(c, var, source));
+        found
+    })
+}
+
+/// Whether `target` is, or destructures into, the variable `var`:
+/// `$o`, `[$o, $p]`, `&$o`, `$k => $o`.
+fn writes_variable(target: Node<'_>, var: &str, source: &[u8]) -> bool {
+    match target.kind() {
+        "variable_name" => target.utf8_text(source).ok() == Some(var),
+        "list_literal"
+        | "array_creation_expression"
+        | "array_element_initializer"
+        | "by_ref"
+        | "pair" => {
+            let mut cursor = target.walk();
+            let found = target
+                .named_children(&mut cursor)
+                .any(|c| writes_variable(c, var, source));
+            found
+        }
+        _ => false,
+    }
+}
+
+/// Whether the body of `function` gives `var` a new value: an assignment, an
+/// update, a `foreach` target, a `catch` name, `global`, `static`, `unset`,
+/// or a closure that captures it by reference. The body of a nested function,
+/// closure or class is its own scope.
+fn assigns_variable(function: Node<'_>, var: &str, source: &[u8]) -> bool {
+    let Some(body) = function.child_by_field_name("body") else {
+        return false;
+    };
+    let mut stack = vec![body];
+    while let Some(n) = stack.pop() {
+        let assigned = match n.kind() {
+            "function_definition"
+            | "method_declaration"
+            | "class_declaration"
+            | "arrow_function" => {
+                continue;
+            }
+            "anonymous_function" => {
+                let mut cursor = n.walk();
+                let by_ref = n
+                    .named_children(&mut cursor)
+                    .find(|c| c.kind() == "anonymous_function_use_clause")
+                    .is_some_and(|clause| {
+                        let mut cursor = clause.walk();
+                        let found = clause
+                            .named_children(&mut cursor)
+                            .any(|c| c.kind() == "by_ref" && writes_variable(c, var, source));
+                        found
+                    });
+                if by_ref {
+                    return true;
+                }
+                continue;
+            }
+            "assignment_expression"
+            | "augmented_assignment_expression"
+            | "reference_assignment_expression" => n
+                .child_by_field_name("left")
+                .is_some_and(|left| writes_variable(left, var, source)),
+            "update_expression" => n
+                .child_by_field_name("argument")
+                .is_some_and(|argument| writes_variable(argument, var, source)),
+            "catch_clause" => n
+                .child_by_field_name("name")
+                .is_some_and(|name| writes_variable(name, var, source)),
+            "static_variable_declaration" => n
+                .child_by_field_name("name")
+                .is_some_and(|name| writes_variable(name, var, source)),
+            "global_declaration" | "unset_statement" => {
+                let mut cursor = n.walk();
+                let found = n
+                    .named_children(&mut cursor)
+                    .any(|c| writes_variable(c, var, source));
+                found
+            }
+            // The iterated expression is the first child, the body the field.
+            "foreach_statement" => {
+                let body = n.child_by_field_name("body");
+                let mut cursor = n.walk();
+                let found = n
+                    .named_children(&mut cursor)
+                    .skip(1)
+                    .filter(|c| Some(*c) != body)
+                    .any(|c| writes_variable(c, var, source));
+                found
+            }
+            _ => false,
+        };
+        if assigned {
+            return true;
+        }
+        let mut cursor = n.walk();
+        stack.extend(n.named_children(&mut cursor));
+    }
+    false
 }
 
 /// A callable that `call_user_func` / `call_user_func_array` names with a
@@ -496,12 +625,18 @@ pub(crate) fn passed_callable(call: Node<'_>, source: &[u8]) -> Option<String> {
         .named_children(&mut cursor)
         .filter(|arg| arg.kind() == "argument")
         .collect();
-    // Every builtin above names its callable parameter `callback`.
+    // Every builtin above names its callable parameter `callback`, but
+    // `is_callable`, whose `$value` is any value.
+    let parameter = if builtin == "is_callable" {
+        "value"
+    } else {
+        "callback"
+    };
     let arg = arguments
         .iter()
         .find(|arg| {
             arg.child_by_field_name("name")
-                .is_some_and(|name| name.utf8_text(source).ok() == Some("callback"))
+                .is_some_and(|name| name.utf8_text(source).ok() == Some(parameter))
         })
         .or_else(|| {
             arguments

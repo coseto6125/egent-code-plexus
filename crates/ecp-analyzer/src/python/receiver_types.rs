@@ -21,7 +21,7 @@
 use super::path_literals::build_raw_path_literal;
 use crate::calls::{
     attach_to_enclosing, is_call_callee, is_same_kind_field, node_range, range_width,
-    reference_function, start_pos, CallSiteIndex, Pos, PosRange,
+    reference_function, start_pos, unparenthesized, CallSiteIndex, Pos, PosRange,
 };
 use crate::dynamic_imports::{
     binding_mentions, is_field, may_load, rebound, synthetic_imports, DynamicBinding,
@@ -46,7 +46,9 @@ pub struct LocalTypes {
     /// A `from` binding may be an object; only a module import proves that
     /// its receiver names a namespace for import-scoped resolution.
     imported: HashMap<String, ImportedBinding>,
-    shadows: Vec<((usize, usize), HashMap<String, usize>)>,
+    /// Per function: its byte span, its start position and the names it binds
+    /// (a parameter at 0, an assignment at its byte offset).
+    shadows: Vec<((usize, usize), Pos, HashMap<String, usize>)>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -73,6 +75,34 @@ impl LocalTypes {
         best
     }
 
+    /// [`LocalTypes::lookup`] for a receiver in a value position: the type
+    /// stands only when no function nearer than the one that typed `var`
+    /// rebinds the name (`def inner(x): return x.m` inside `def outer(x: A)`).
+    fn lookup_visible(&self, receiver: Node<'_>, var: &str) -> Option<&str> {
+        let pos = start_pos(receiver);
+        let mut typed: Option<(Pos, &str)> = None;
+        let mut best_width = (u32::MAX, i64::MAX);
+        for ((start, end), map) in &self.scopes {
+            if *start <= pos && pos <= *end {
+                if let Some(t) = map.get(var) {
+                    let w = range_width((*start, *end));
+                    if w < best_width {
+                        best_width = w;
+                        typed = Some((*start, t.as_str()));
+                    }
+                }
+            }
+        }
+        let (typed_start, ty) = typed?;
+        let rebound_nearer = self.shadows.iter().any(|((start, end), fn_start, names)| {
+            *start <= receiver.start_byte()
+                && receiver.end_byte() <= *end
+                && *fn_start > typed_start
+                && names.contains_key(var)
+        });
+        (!rebound_nearer).then_some(ty)
+    }
+
     fn imported_receiver(&self, receiver: Node<'_>, source: &[u8]) -> Option<ImportedBinding> {
         let mut root = receiver;
         while root.kind() == "attribute" {
@@ -91,7 +121,7 @@ impl LocalTypes {
     /// Whether a function scope enclosing `receiver` binds `name` (a
     /// parameter, or an assignment before `receiver`).
     fn shadowed(&self, receiver: Node<'_>, name: &str) -> bool {
-        self.shadows.iter().any(|((start, end), names)| {
+        self.shadows.iter().any(|((start, end), _, names)| {
             *start <= receiver.start_byte()
                 && receiver.end_byte() <= *end
                 && names
@@ -169,7 +199,7 @@ pub fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
                 scopes.push((fn_span, map));
             }
             if !names.is_empty() {
-                shadows.push(((n.start_byte(), n.end_byte()), names));
+                shadows.push(((n.start_byte(), n.end_byte()), fn_span.0, names));
             }
         }
         let mut c = n.walk();
@@ -742,7 +772,7 @@ fn bound_method_value(
     {
         return None;
     }
-    let ty = locals.lookup(start_pos(attribute), object.utf8_text(source).ok()?)?;
+    let ty = locals.lookup_visible(attribute, object.utf8_text(source).ok()?)?;
     Some(format!("{ty}.{}", member.utf8_text(source).ok()?))
 }
 
@@ -790,7 +820,7 @@ fn python_callee_name(
     dynamic: &DynamicImports,
     classes: &HashSet<String>,
 ) -> Option<String> {
-    let function = call.child_by_field_name("function")?;
+    let function = unparenthesized(call.child_by_field_name("function")?);
     match function.kind() {
         "identifier" => std::str::from_utf8(&source[function.start_byte()..function.end_byte()])
             .ok()

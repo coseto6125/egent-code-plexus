@@ -479,6 +479,19 @@ pub(crate) fn is_call_callee(access: Node<'_>, parent: Option<Node<'_>>) -> bool
     ) && parent.child_by_field_name("function").map(|f| f.id()) == Some(outer.id())
 }
 
+/// `node` with the parentheses around it removed: the callee `(a.m)` of
+/// `(a.m)(1)` is `a.m`, which a call records as it records `a.m(1)`. A
+/// parenthesized node with no single inner node stays as it is.
+pub(crate) fn unparenthesized(mut node: Node<'_>) -> Node<'_> {
+    while node.kind() == "parenthesized_expression" && node.named_child_count() == 1 {
+        let Some(inner) = node.named_child(0) else {
+            break;
+        };
+        node = inner;
+    }
+    node
+}
+
 /// Reads the name a qualified value node records: see
 /// [`NameRefSpec::qualified_name`].
 pub type QualifiedName = fn(Node<'_>, &[u8], &NameRefSpec) -> Option<String>;

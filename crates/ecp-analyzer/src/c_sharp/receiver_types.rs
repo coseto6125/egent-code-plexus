@@ -722,11 +722,15 @@ fn method_group(
     locals: &LocalTypes,
     nodes: &[RawNode],
 ) -> Option<String> {
-    let member = access
-        .child_by_field_name("name")
-        .filter(|name| name.kind() == "identifier")?
-        .utf8_text(source)
-        .ok()?;
+    let name = access.child_by_field_name("name")?;
+    // `c.M<T>` names its method in the first child of a `generic_name`.
+    let member = match name.kind() {
+        "identifier" => name,
+        "generic_name" => name.named_child(0).filter(|id| id.kind() == "identifier")?,
+        _ => return None,
+    }
+    .utf8_text(source)
+    .ok()?;
     let receiver = access.child_by_field_name("expression")?;
     let pos = start_pos(access);
     // Classify only a receiver whose type a lookup holds: the member scan
