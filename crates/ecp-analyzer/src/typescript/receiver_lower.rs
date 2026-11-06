@@ -61,6 +61,7 @@ impl Lowering for TsLowering {
             depth: 0,
             unsupported: None,
             ahead: Vec::new(),
+            dynamic: Vec::new(),
         };
         lower.callable(b, function);
         match lower.unsupported {
@@ -147,6 +148,29 @@ fn simple_annotation<'s>(annotation: Node<'_>, source: &'s [u8]) -> Option<&'s s
     (!text.is_empty() && text.chars().all(|c| c.is_alphanumeric() || c == '_')).then_some(text)
 }
 
+/// What each element of a destructured or iterated `source` holds: dynamic
+/// when the source is, else a value the lowering cannot type.
+fn element_of(source: Value) -> Value {
+    match source {
+        Value::Dynamic => Value::Dynamic,
+        _ => Value::Unknown,
+    }
+}
+
+/// Whether a type annotation (`: any`) names `any` or `unknown`.
+fn annotates_dynamic(annotation: Option<Node<'_>>, source: &[u8]) -> bool {
+    annotation.is_some_and(|annotation| {
+        let inner = match annotation.kind() {
+            "type_annotation" => annotation.named_child(0),
+            _ => Some(annotation),
+        };
+        inner.is_some_and(|inner| {
+            inner.kind() == "predefined_type"
+                && matches!(inner.utf8_text(source).unwrap_or(""), "any" | "unknown")
+        })
+    })
+}
+
 /// Whether `node` (an `as` / `<T>` assertion) casts to `any` or `unknown`.
 fn casts_to_dynamic(node: Node<'_>, source: &[u8]) -> bool {
     named_children(node).into_iter().any(|child| {
@@ -167,6 +191,9 @@ struct Lower<'s> {
     /// declarations lowered, so a hoisted closure captures the same binding
     /// the declaration later assigns: `(name, scope)`.
     ahead: Vec<(&'s str, ScopeId)>,
+    /// Bindings annotated `any` / `unknown`: a read of one is a dynamic
+    /// value, which drops the pin of the binding it is written to.
+    dynamic: Vec<BindingId>,
 }
 
 impl<'s> Lower<'s> {
@@ -179,8 +206,24 @@ impl<'s> Lower<'s> {
     }
 
     fn assign_unknown(&mut self, b: &mut IrBuilder, name: &str) {
+        self.assign_element(b, name, &Value::Unknown);
+    }
+
+    /// Writes `value`, `Unknown` or `Dynamic`, an element of a pattern's
+    /// source, to `name`.
+    fn assign_element(&mut self, b: &mut IrBuilder, name: &str, value: &Value) {
         if let Some(id) = self.resolve(b, name) {
-            b.assign(id, Value::Unknown);
+            b.assign(id, value.clone());
+        }
+    }
+
+    /// Records `name`, just declared with `annotation`, as dynamic when the
+    /// annotation is `any` / `unknown`.
+    fn note_dynamic(&mut self, b: &IrBuilder, name: Node<'_>, annotation: Option<Node<'_>>) {
+        if name.kind() == "identifier" && annotates_dynamic(annotation, self.source) {
+            if let Some(id) = b.lookup(self.text(name)) {
+                self.dynamic.push(id);
+            }
         }
     }
 
@@ -218,8 +261,10 @@ impl<'s> Lower<'s> {
         let Some(pattern) = param.child_by_field_name("pattern") else {
             return;
         };
-        let declared = self.declared_type(b, param.child_by_field_name("type"));
+        let annotation = param.child_by_field_name("type");
+        let declared = self.declared_type(b, annotation);
         self.declare_pattern(b, pattern, BindingOrigin::Param, false, declared);
+        self.note_dynamic(b, pattern, annotation);
     }
 
     /// Declares every name `pattern` binds. A default value or a computed key
@@ -281,26 +326,37 @@ impl<'s> Lower<'s> {
 
     /// Writes an unknown value to every existing name `pattern` binds.
     fn assign_pattern(&mut self, b: &mut IrBuilder, pattern: Node<'_>) {
+        self.assign_pattern_from(b, pattern, &Value::Unknown);
+    }
+
+    /// Writes `element`, what each part of a pattern's source holds
+    /// (`Dynamic` when the source is), to every existing name `pattern` binds.
+    fn assign_pattern_from(&mut self, b: &mut IrBuilder, pattern: Node<'_>, element: &Value) {
         match pattern.kind() {
             "identifier" | "shorthand_property_identifier_pattern" => {
-                self.assign_unknown(b, self.text(pattern));
+                self.assign_element(b, self.text(pattern), element);
             }
             "assignment_pattern" | "object_assignment_pattern" => {
                 if let Some(right) = pattern.child_by_field_name("right") {
                     self.walk(b, right);
                 }
                 if let Some(left) = pattern.child_by_field_name("left") {
-                    self.assign_pattern(b, left);
+                    self.assign_pattern_from(b, left, element);
+                }
+            }
+            "parenthesized_expression" => {
+                if let Some(inner) = pattern.named_child(0) {
+                    self.assign_pattern_from(b, inner, element);
                 }
             }
             "pair_pattern" => {
                 if let Some(value) = pattern.child_by_field_name("value") {
-                    self.assign_pattern(b, value);
+                    self.assign_pattern_from(b, value, element);
                 }
             }
             "object_pattern" | "array_pattern" | "rest_pattern" => {
                 for child in named_children(pattern) {
-                    self.assign_pattern(b, child);
+                    self.assign_pattern_from(b, child, element);
                 }
             }
             _ => {
@@ -414,6 +470,7 @@ impl<'s> Lower<'s> {
     fn walk_node(&mut self, b: &mut IrBuilder, node: Node<'_>) -> Value {
         match node.kind() {
             "identifier" => match self.resolve(b, self.text(node)) {
+                Some(id) if self.dynamic.contains(&id) => Value::Dynamic,
                 Some(id) => Value::Copy(id),
                 None => Value::Unknown,
             },
@@ -533,19 +590,21 @@ impl<'s> Lower<'s> {
         let Some(name) = declarator.child_by_field_name("name") else {
             return;
         };
+        let annotation = declarator.child_by_field_name("type");
         let declared = if name.kind() == "identifier" {
-            self.declared_type(b, declarator.child_by_field_name("type"))
+            self.declared_type(b, annotation)
         } else {
             None
         };
         self.declare_pattern(b, name, BindingOrigin::Local, function_scoped, declared);
+        self.note_dynamic(b, name, annotation);
         match (name.kind(), evaluated) {
             ("identifier", Some(value)) => {
                 if let Some(id) = b.lookup(self.text(name)) {
                     b.assign(id, value);
                 }
             }
-            (_, Some(_)) => self.assign_pattern(b, name),
+            (_, Some(value)) => self.assign_pattern_from(b, name, &element_of(value)),
             // `let x;` starts undefined on every pass of an enclosing loop;
             // `var x;` keeps its value. A pinned `let x: T;` is `T` throughout.
             ("identifier", None) if !function_scoped => self.assign_unknown(b, self.text(name)),
@@ -572,8 +631,8 @@ impl<'s> Lower<'s> {
                 }
             }
             "object_pattern" | "array_pattern" => {
-                self.walk(b, right);
-                self.assign_pattern(b, left);
+                let source = self.walk(b, right);
+                self.assign_pattern_from(b, left, &element_of(source));
                 Value::Unknown
             }
             _ => {
@@ -790,9 +849,9 @@ impl<'s> Lower<'s> {
     }
 
     fn for_in_statement(&mut self, b: &mut IrBuilder, node: Node<'_>) -> Value {
-        if let Some(right) = node.child_by_field_name("right") {
-            self.walk(b, right);
-        }
+        let element = node
+            .child_by_field_name("right")
+            .map_or(Value::Unknown, |right| element_of(self.walk(b, right)));
         let declares = node.child_by_field_name("kind").is_some();
         b.push_scope(ScopeKind::Loop);
         let head = b.new_block();
@@ -810,7 +869,7 @@ impl<'s> Lower<'s> {
                     .any(|kind| kind.kind() == "var");
                 self.declare_pattern(b, left, BindingOrigin::ForEach, function_scoped, None);
             }
-            self.assign_pattern(b, left);
+            self.assign_pattern_from(b, left, &element);
         }
         if let Some(body) = node.child_by_field_name("body") {
             self.walk(b, body);
@@ -938,6 +997,19 @@ mod tests {
         found.remove(0).1
     }
 
+    /// The state of the receiver of `member`, the one member the test asks
+    /// about; other receivers in the fixture (`xs` of `xs.forEach`) may
+    /// record uses of their own.
+    fn of(source: &str, member: &str) -> String {
+        let found = receivers(source);
+        let mut rows = found.iter().filter(|(name, _)| name == member);
+        let row = rows
+            .next()
+            .unwrap_or_else(|| panic!("no {member}: {found:?}"));
+        assert!(rows.next().is_none(), "{found:?}");
+        row.1.clone()
+    }
+
     #[test]
     fn test_lower_annotated_local_is_known() {
         assert_eq!(
@@ -1007,6 +1079,41 @@ mod tests {
         );
     }
 
+    /// Stands for: `loose: any` is dynamic, so an element of it assigned to
+    /// `obj: Cls` drops the pin inside and after the loop, while the
+    /// iterable, evaluated first, keeps the outer type. A nested function
+    /// that writes `obj` is a writer (CONTRACTS 1.5), whether or not it runs.
+    #[test]
+    fn test_lower_for_of_over_dynamic_iterable_drops_the_pin() {
+        let head = "function run(xs: number[], obj: Cls, loose: any) {";
+        for (body, want) in [
+            (
+                "for (obj of loose) { xs.forEach(obj.m); }",
+                "unknown NoEvidence",
+            ),
+            (
+                "for ([obj] of loose) { xs.forEach(obj.m); }",
+                "unknown NoEvidence",
+            ),
+            // A loop that may run zero times joins `Cls` with the element.
+            (
+                "for (obj of loose) {} xs.forEach(obj.m);",
+                "unknown Conflict",
+            ),
+            ("for (obj of xs.map(obj.m)) {}", "known Cls"),
+            (
+                "function* g() { for (obj of loose) {} } xs.forEach(obj.m);",
+                "unknown Escape",
+            ),
+            (
+                "const g = () => { for (obj of loose) {} }; xs.forEach(obj.m);",
+                "unknown Escape",
+            ),
+        ] {
+            assert_eq!(of(&format!("{head} {body} }}"), "m"), want, "{body}");
+        }
+    }
+
     #[test]
     fn test_lower_dynamic_cast_assignment_drops_the_pin() {
         assert_eq!(
@@ -1042,7 +1149,7 @@ mod tests {
     #[test]
     fn test_lower_method_value_is_a_receiver() {
         assert_eq!(
-            only("function f(xs: number[], o: A) { xs.forEach(o.m); }"),
+            of("function f(xs: number[], o: A) { xs.forEach(o.m); }", "m"),
             "known A"
         );
     }

@@ -609,10 +609,7 @@ fn cpp_callee_name(call: Node<'_>, source: &[u8], bindings: &CppBindings) -> Opt
             let arg = function.child_by_field_name("argument")?;
             // `(*p).method()` / `(&x).method()` / `(*this).method()` type as
             // the operand.
-            let receiver = match arg.kind() {
-                "pointer_expression" => arg.named_child(0)?,
-                _ => arg,
-            };
+            let receiver = super::receiver_lower::member_operand(arg)?;
             if receiver.kind() == "this" {
                 // `this->method()`; bare when no class encloses the call.
                 return Some(match bindings.enclosing_class(pos) {

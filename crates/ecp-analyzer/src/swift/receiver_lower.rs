@@ -868,6 +868,19 @@ mod tests {
         found.remove(0).1
     }
 
+    /// The state of the receiver of `member`, the one member the test asks
+    /// about; other receivers in the fixture (`xs` of `xs.forEach`) may
+    /// record uses of their own.
+    fn of(source: &str, member: &str) -> String {
+        let found = receivers(source);
+        let mut rows = found.iter().filter(|(name, _)| name == member);
+        let row = rows
+            .next()
+            .unwrap_or_else(|| panic!("no {member}: {found:?}"));
+        assert!(rows.next().is_none(), "{found:?}");
+        row.1.clone()
+    }
+
     #[test]
     fn test_lower_annotated_parameter_is_known() {
         assert_eq!(only("func f(_ o: A) { o.m() }"), "known A");
@@ -982,12 +995,12 @@ mod tests {
 
     #[test]
     fn test_lower_closure_captures_outer_annotation() {
-        assert_eq!(only("func f(o: A) { xs.forEach { o.m() } }"), "known A");
+        assert_eq!(of("func f(o: A) { xs.forEach { o.m() } }", "m"), "known A");
     }
 
     #[test]
     fn test_lower_implicit_closure_parameter_is_not_a_binding() {
-        assert_eq!(only("func f() { xs.forEach { $0.m() } }"), "none");
+        assert_eq!(of("func f() { xs.forEach { $0.m() } }", "m"), "none");
     }
 
     #[test]

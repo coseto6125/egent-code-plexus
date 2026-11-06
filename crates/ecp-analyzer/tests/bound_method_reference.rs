@@ -121,12 +121,12 @@ fn test_bound_method_reference_java_same_reference_twice_returns_one_edge() {
     assert_one_cross_file(&found, "Cls.java", "m");
 }
 
+/// Stands for: `var d = new Cls()` declares `d` as `Cls`, so `d::m` binds
+/// `Cls.m`. Was: no edge, the extractor read only spelled-out types.
 #[test]
-fn test_bound_method_reference_java_var_receiver_returns_no_edge() {
-    assert_eq!(
-        java_refs("var d = new Cls();\n        xs.forEach(d::m);"),
-        none()
-    );
+fn test_bound_method_reference_java_var_with_constructor_binds_created_type() {
+    let found = java_refs("var d = new Cls();\n        xs.forEach(d::m);");
+    assert_one_cross_file(&found, "Cls.java", "m");
 }
 
 /// A generic type (`List<Cls>`) is no plain class name: `cs` stays untyped.
@@ -1162,17 +1162,25 @@ fn test_bound_method_reference_typescript_for_of_pattern_target_returns_no_edge(
 }
 
 /// Stands for: the iterable of `for (obj of ...)` runs before the first
-/// assignment to `obj`, so it still reads `obj: Cls`. A loop inside a nested
-/// function, a generator included, ends its reach at that function.
+/// assignment to `obj`, so it still reads `obj: Cls`.
 #[test]
 fn test_bound_method_reference_typescript_for_of_iterable_reads_outer_type() {
+    let g = ts_graph("for (obj of xs.map(obj.m)) {}");
+    assert_one_cross_file(&function_refs(&g, "run"), "cls.ts", "m");
+}
+
+/// Stands for: a nested function, a generator included, that writes the
+/// captured `obj` is a writer (receiver core, CONTRACTS 1.5): from its
+/// creation on, the outer `obj` is unknown whether or not the function runs,
+/// so `obj.m` binds nothing. Was: the loop's reach ended at the function.
+#[test]
+fn test_bound_method_reference_typescript_nested_function_writing_capture_returns_no_edge() {
     for body in [
-        "for (obj of xs.map(obj.m)) {}",
         "function* unused() {\n    for (obj of loose) {}\n  }\n  xs.forEach(obj.m);",
         "const unused = () => {\n    for (obj of loose) {}\n  };\n  xs.forEach(obj.m);",
     ] {
         let g = ts_graph(body);
-        assert_one_cross_file(&function_refs(&g, "run"), "cls.ts", "m");
+        assert_eq!(function_refs(&g, "run"), none(), "{body}");
     }
 }
 
@@ -1642,8 +1650,11 @@ fn test_calls_block_scoped_same_name_locals_bind_second_block_type_in_sibling_la
             b: ("B.kt", "class B { fun m() {} }\n"),
             use_file: "Use.kt",
             header: "fun run() {\n",
-            two_blocks: "    run { val obj: A = A() }\n    run { val obj: B = B(); obj.m() }\n",
-            one_block: "    run { val obj: B = B(); obj.m() }\n",
+            // Kotlin has no bare block, and a `run { }` lambda is a caller of
+            // its own: an `if` body is the block of `run`.
+            two_blocks:
+                "    if (true) { val obj: A = A() }\n    if (true) { val obj: B = B(); obj.m() }\n",
+            one_block: "    if (true) { val obj: B = B(); obj.m() }\n",
             footer: "}\n",
         },
         Lang {

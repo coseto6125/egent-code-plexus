@@ -8,12 +8,15 @@
 //! type this lowering cannot spell (a generic, an array, a primitive, an
 //! implicit lambda parameter, a field of a local class) is declared `opaque`:
 //! it shadows outer names but records no use, so the extractor keeps its
-//! bare-name path for it.
+//! bare-name path for it. Every receiver that names a binding, opaque or
+//! not, lands in the lowering's context ([`JavaLowering`]'s `Cx`), so the
+//! extractor can tell a local from a field of the enclosing class.
 
 use super::receiver_types::expression_type;
 use crate::receiver::ir::{BindingId, BindingOrigin, ScopeKind, TypeOrigin};
 use crate::receiver::{DeclaredTypePolicy, IrBuilder, LangPolicy, Lowered, Lowering, ScopeRule};
 use rustc_hash::FxHashSet;
+use std::cell::RefCell;
 use tree_sitter::Node;
 
 /// Nested blocks, lambdas and local classes beyond this leave the method to
@@ -23,7 +26,9 @@ const MAX_DEPTH: u32 = 256;
 pub(super) struct JavaLowering;
 
 impl Lowering for JavaLowering {
-    type Cx<'a> = ();
+    /// The `Node::id()` of every receiver that names a local, a parameter
+    /// or a pattern variable.
+    type Cx<'a> = RefCell<FxHashSet<usize>>;
 
     fn policy(&self) -> LangPolicy {
         LangPolicy {
@@ -39,12 +44,19 @@ impl Lowering for JavaLowering {
         )
     }
 
-    fn lower(&self, _cx: &(), function: Node<'_>, source: &[u8], b: &mut IrBuilder) -> Lowered {
+    fn lower(
+        &self,
+        cx: &RefCell<FxHashSet<usize>>,
+        function: Node<'_>,
+        source: &[u8],
+        b: &mut IrBuilder,
+    ) -> Lowered {
         let mut lower = Lower {
             source,
             depth: 0,
             unsupported: None,
             opaque: FxHashSet::default(),
+            locals: cx,
         };
         lower.callable(b, function, false);
         match lower.unsupported {
@@ -91,6 +103,7 @@ struct Lower<'s> {
     depth: u32,
     unsupported: Option<&'static str>,
     opaque: FxHashSet<BindingId>,
+    locals: &'s RefCell<FxHashSet<usize>>,
 }
 
 impl<'s> Lower<'s> {
@@ -242,6 +255,7 @@ impl<'s> Lower<'s> {
             return;
         };
         if let Some(binding) = b.lookup(self.text(receiver)) {
+            self.locals.borrow_mut().insert(receiver.id());
             if !self.opaque.contains(&binding) {
                 b.use_binding(binding, receiver.id());
             }
@@ -430,7 +444,7 @@ mod tests {
         let bytes = source.as_bytes();
         let found = analyze_file(
             &JavaLowering,
-            &(),
+            &Default::default(),
             tree.root_node(),
             bytes,
             Path::new("T.java"),

@@ -63,12 +63,20 @@ fn call_receiver<'t>(call: Node<'t>) -> Option<Node<'t>> {
     if function.kind() != "field_expression" {
         return None;
     }
-    let argument = function.child_by_field_name("argument")?;
-    let receiver = match argument.kind() {
-        "pointer_expression" => argument.named_child(0)?,
-        _ => argument,
-    };
+    let receiver = member_operand(function.child_by_field_name("argument")?)?;
     (receiver.kind() == "identifier").then_some(receiver)
+}
+
+/// The object a member access reads: `(*p).m()`, `(&x).m()` and `p->m()`
+/// all read `p` / `x`, whatever parentheses wrap the dereference.
+pub(super) fn member_operand(mut argument: Node<'_>) -> Option<Node<'_>> {
+    while argument.kind() == "parenthesized_expression" {
+        argument = argument.named_child(0)?;
+    }
+    match argument.kind() {
+        "pointer_expression" => argument.child_by_field_name("argument"),
+        _ => Some(argument),
+    }
 }
 
 fn has_receiver_call(function: Node<'_>) -> bool {

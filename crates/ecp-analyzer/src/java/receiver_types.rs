@@ -24,6 +24,8 @@ use crate::calls::{
 use crate::receiver::{analyze_file, FileReceivers, Receiver};
 use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
 use ecp_core::graph::NodeKind;
+use rustc_hash::FxHashSet;
+use std::cell::RefCell;
 use std::path::Path;
 use tree_sitter::Node;
 
@@ -33,6 +35,7 @@ fn java_callee(
     mi: Node<'_>,
     source: &[u8],
     receivers: &FileReceivers,
+    locals: &FxHashSet<usize>,
     nodes: &[RawNode],
 ) -> Option<String> {
     // Java `method_invocation` field layout:
@@ -56,7 +59,10 @@ fn java_callee(
                     return Some(receiver.call_entry(method_name));
                 }
                 let var = std::str::from_utf8(&source[obj.start_byte()..obj.end_byte()]).ok()?;
-                Some(var.to_string())
+                match field_type(nodes, pos, var).filter(|_| !locals.contains(&obj.id())) {
+                    Some(ty) => Some(ty.to_string()),
+                    None => Some(var.to_string()),
+                }
             }
             // A computed receiver (`a.b().m()`, `this.f.m()`): the member is
             // never a static import's name. Its type is known by syntax when
@@ -69,7 +75,7 @@ fn java_callee(
                     return Some(match obj.kind() {
                         "method_invocation" => {
                             match CallSite::nested_chain(|| {
-                                java_callee(obj, source, receivers, nodes)
+                                java_callee(obj, source, receivers, locals, nodes)
                             }) {
                                 Some(inner) => CallSite::chained_member(&inner, &untyped),
                                 None => untyped,
@@ -122,7 +128,9 @@ pub fn extract_java_calls_and_path_literals(
     source: &[u8],
     nodes: &mut [RawNode],
 ) -> (Vec<RawPathLiteral>, Vec<RawSqlRef>) {
-    let receivers = analyze_file(&JavaLowering, &(), root, source, Path::new(""));
+    let locals = RefCell::default();
+    let receivers = analyze_file(&JavaLowering, &locals, root, source, Path::new(""));
+    let locals = locals.into_inner();
 
     let mut path_literals: Vec<RawPathLiteral> = Vec::new();
     let mut sql_refs: Vec<RawSqlRef> = Vec::new();
@@ -130,7 +138,7 @@ pub fn extract_java_calls_and_path_literals(
     while let Some(n) = stack.pop() {
         match n.kind() {
             "method_invocation" => {
-                if let Some(callee) = java_callee(n, source, &receivers, nodes) {
+                if let Some(callee) = java_callee(n, source, &receivers, &locals, nodes) {
                     attach_to_enclosing(start_pos(n), callee, nodes);
                 }
             }
@@ -210,7 +218,12 @@ fn bound_method_reference(
 
 /// Name of the innermost enclosing Class/Interface node at `pos`.
 fn enclosing_class_name(nodes: &[RawNode], pos: Pos) -> Option<String> {
-    let mut best: Option<((u32, i64), &str)> = None;
+    enclosing_type(nodes, pos).map(|n| n.name.clone())
+}
+
+/// The innermost Class/Interface node whose span holds `pos`.
+fn enclosing_type(nodes: &[RawNode], pos: Pos) -> Option<&RawNode> {
+    let mut best: Option<((u32, i64), &RawNode)> = None;
     for n in nodes {
         if !matches!(n.kind, NodeKind::Class | NodeKind::Interface) {
             continue;
@@ -218,11 +231,25 @@ fn enclosing_class_name(nodes: &[RawNode], pos: Pos) -> Option<String> {
         if span_holds(n.span, pos) {
             let w = span_width(n.span);
             if best.is_none_or(|(bw, _)| w < bw) {
-                best = Some((w, &n.name));
+                best = Some((w, n));
             }
         }
     }
-    best.map(|(_, name)| name.to_string())
+    best.map(|(_, n)| n)
+}
+
+/// The declared type of field `var` of the class enclosing `pos`, when it is
+/// one plain class name. A field of a nested class is no field here.
+fn field_type<'n>(nodes: &'n [RawNode], pos: Pos, var: &str) -> Option<&'n str> {
+    let class = enclosing_type(nodes, pos)?;
+    nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Property && n.name == var)
+        .find(|n| {
+            enclosing_type(nodes, (n.span.0, n.span.1)).is_some_and(|c| std::ptr::eq(c, class))
+        })
+        .and_then(|n| n.type_annotation.as_deref())
+        .filter(|ty| !ty.is_empty() && ty.chars().all(|c| c.is_alphanumeric() || c == '_'))
 }
 
 /// First superclass in the enclosing class's heritage list.

@@ -402,10 +402,10 @@ fn test_resolve_call_typed_receiver_of_imported_class_returns_type_heritage() {
 }
 
 /// Stands for: a star-imported package named like a constructor property:
-/// the call on the property resolves by its member name, as the tagged
-/// guess while Kotlin types no constructor property.
+/// the `val` property types the receiver, so the call binds its declared
+/// type's member. Was: the bare member name, as the 0.55 tagged guess.
 #[test]
-fn test_resolve_call_wildcard_package_named_receiver_binds_tagged_guess() {
+fn test_resolve_call_wildcard_package_named_val_property_binds_its_type() {
     let graph = kotlin_graph(&[
         (
             "src/main/kotlin/com/app/repository/UserRepository.kt",
@@ -423,7 +423,7 @@ fn test_resolve_call_wildcard_package_named_receiver_binds_tagged_guess() {
             "src/main/kotlin/com/app/repository/UserRepository.kt",
             "UserRepository",
             "fetchUsers",
-            0.55,
+            0.85,
         )],
     );
 }

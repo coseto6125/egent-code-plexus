@@ -461,6 +461,16 @@ mod tests {
     }
 
     #[test]
+    fn test_lower_semicolon_separated_lambda_statements_bind_own_types() {
+        assert_eq!(
+            receivers(
+                "fun run() {\n    run { val obj: A = A() }\n    run { val obj: B = B(); obj.m() }\n}\n"
+            ),
+            vec![pair("m", "known B")]
+        );
+    }
+
+    #[test]
     fn test_lower_same_name_lambda_blocks_bind_own_types() {
         assert_eq!(
             receivers(
