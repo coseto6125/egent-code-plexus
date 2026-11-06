@@ -240,7 +240,7 @@ fn git(dir: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
 
 /// Every line of `files` under `top` with a whole-word occurrence of `name`.
 /// In-process rather than `git grep`: on a 15k-file tree `git grep` took
-/// 300-450 ms per query against about 50 ms for one parallel pass.
+/// 300-460 ms per query against 32-34 ms for one parallel pass (vscode).
 fn search(top: &Path, files: &[String], name: &[u8]) -> Vec<Hit> {
     let finder = Finder::new(name);
     files
