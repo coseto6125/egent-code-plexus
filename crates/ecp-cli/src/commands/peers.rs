@@ -28,7 +28,8 @@ pub enum PeersCmd {
         #[arg(long, value_enum, default_value_t = StatusFormat::Text)]
         format: StatusFormat,
         /// Lead overview: pairwise HARD overlap (shared dirty files) across ALL
-        /// alive sessions (own session included), instead of the per-session list
+        /// alive sessions (own session included), instead of the per-session list.
+        /// A file two worktrees hold with the same content is no overlap
         #[arg(long, default_value_t = false)]
         pairs: bool,
     },
@@ -221,7 +222,7 @@ fn cmd_status(repo_root: &std::path::Path, format: StatusFormat) -> std::io::Res
 
 /// Pairwise HARD-overlap matrix across all alive sessions — the lead's
 /// global view. Reuses `concern::classify`'s HARD definition: a shared dirty
-/// FILE. The manifest lists every declaration of a re-parsed file and never
+/// FILE, minus the files `same_text_elsewhere` clears. The manifest lists every declaration of a re-parsed file and never
 /// which ones changed, so intersecting declarations would claim a shared edit
 /// nobody recorded.
 ///
@@ -230,17 +231,23 @@ fn cmd_status(repo_root: &std::path::Path, format: StatusFormat) -> std::io::Res
 /// the proactive impact-level question).
 fn cmd_status_pairs(repo_root: &std::path::Path, format: StatusFormat) -> std::io::Result<()> {
     use ecp_core::session::{layout, DirtyEvents};
-    use std::collections::HashSet;
+    use std::collections::HashMap;
 
     // Empty exclude id matches no session dir → own session included.
     let sessions = alive_peers(repo_root, "");
-    let dirty: Vec<HashSet<String>> = sessions
+    use crate::peer::dispatch::{entry_state, same_text_elsewhere, EntryState};
+    let dirty: Vec<HashMap<String, EntryState>> = sessions
         .iter()
         .map(|s| {
             DirtyEvents::read(&layout::dirty_events_path(
                 &repo_root.join("sessions").join(&s.session_id),
             ))
-            .map(|d| d.entries.into_keys().collect())
+            .map(|d| {
+                d.entries
+                    .into_iter()
+                    .map(|(path, e)| (path, entry_state(&e)))
+                    .collect()
+            })
             .unwrap_or_default()
         })
         .collect();
@@ -255,7 +262,19 @@ fn cmd_status_pairs(repo_root: &std::path::Path, format: StatusFormat) -> std::i
     let mut rows: Vec<(usize, usize, Vec<String>)> = Vec::new();
     for i in 0..sessions.len() {
         for j in (i + 1)..sessions.len() {
-            let mut shared: Vec<String> = dirty[i].intersection(&dirty[j]).cloned().collect();
+            let other_worktree = crate::session::resolver::in_other_worktrees(
+                &sessions[i].session_id,
+                &sessions[j].session_id,
+            );
+            let mut shared: Vec<String> = dirty[i]
+                .iter()
+                .filter(|(path, state)| {
+                    dirty[j].get(*path).is_some_and(|other| {
+                        !same_text_elsewhere(other_worktree, Some(other), state)
+                    })
+                })
+                .map(|(path, _)| path.clone())
+                .collect();
             if shared.is_empty() {
                 continue;
             }

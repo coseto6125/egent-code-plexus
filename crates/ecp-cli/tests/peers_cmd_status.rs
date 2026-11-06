@@ -20,9 +20,14 @@ fn peers_status_empty_repo_prints_no_peers() {
     );
 }
 
-/// A peer's session dir name: `<sid>~<h8>`, the only shape a peer listing accepts.
+/// A peer's session dir name: `<sid>~<h8>`, the only shape a peer listing
+/// accepts. An `id` that already carries its worktree key is kept as is.
 fn peer_dir(id: &str) -> String {
-    format!("{id}~aaaaaaaa")
+    if id.contains('~') {
+        id.to_string()
+    } else {
+        format!("{id}~aaaaaaaa")
+    }
 }
 
 fn write_session(root: &std::path::Path, id: &str, agent_name: Option<&str>) {
@@ -51,6 +56,10 @@ fn write_dirty(root: &std::path::Path, id: &str, symbols: &[&str]) {
 }
 
 fn write_dirty_in(root: &std::path::Path, id: &str, file: &str, symbols: &[&str]) {
+    write_dirty_hashed(root, id, file, symbols, "h");
+}
+
+fn write_dirty_hashed(root: &std::path::Path, id: &str, file: &str, symbols: &[&str], hash: &str) {
     use ecp_core::contracts::dirty_event::{PathChange, PathClass};
     use ecp_core::contracts::routing::SizeCap;
     use ecp_core::session::overlay::{DirtyEventEntry, DirtyEvents, SymbolKind, SymbolRef};
@@ -62,7 +71,7 @@ fn write_dirty_in(root: &std::path::Path, id: &str, file: &str, symbols: &[&str]
             class: PathClass::SOURCE,
             mtime_ns: 0,
             fragment_id: Some("f".into()),
-            content_hash: Some("h".into()),
+            content_hash: Some(hash.into()),
             parse_failed: false,
             dirty_symbols: symbols
                 .iter()
@@ -124,6 +133,60 @@ fn peers_status_pairs_reports_hard_overlap_matrix() {
     assert!(
         !stdout.contains("src/z.ts"),
         "disjoint session must not appear as overlap: {stdout}"
+    );
+}
+
+/// Fails before the fix: two worktrees that pulled one commit hold the same
+/// text for its files, and every such file was listed as an overlap.
+#[test]
+fn peers_status_pairs_other_worktrees_same_text_says_none() {
+    let dir = tempdir().unwrap();
+    write_session(dir.path(), "s-one~aaaaaaaa", None);
+    write_session(dir.path(), "s-two~bbbbbbbb", None);
+    write_dirty_in(dir.path(), "s-one~aaaaaaaa", "src/a.ts", &["fn_a"]);
+    write_dirty_in(dir.path(), "s-two~bbbbbbbb", "src/a.ts", &["fn_a"]);
+
+    let out = Command::new(bin())
+        .args([
+            "peers",
+            "status",
+            "--pairs",
+            "--repo",
+            dir.path().to_str().unwrap(),
+        ])
+        .env("ECP_SESSION_ID", "me-pairs3")
+        .output()
+        .expect("spawn");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("no overlapping pairs"),
+        "equal text in two worktrees is no overlap: {stdout}"
+    );
+}
+
+#[test]
+fn peers_status_pairs_other_worktrees_different_text_lists_the_file() {
+    let dir = tempdir().unwrap();
+    write_session(dir.path(), "s-one~aaaaaaaa", None);
+    write_session(dir.path(), "s-two~bbbbbbbb", None);
+    write_dirty_hashed(dir.path(), "s-one~aaaaaaaa", "src/a.ts", &["fn_a"], "h1");
+    write_dirty_hashed(dir.path(), "s-two~bbbbbbbb", "src/a.ts", &["fn_a"], "h2");
+
+    let out = Command::new(bin())
+        .args([
+            "peers",
+            "status",
+            "--pairs",
+            "--repo",
+            dir.path().to_str().unwrap(),
+        ])
+        .env("ECP_SESSION_ID", "me-pairs4")
+        .output()
+        .expect("spawn");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("src/a.ts") && !stdout.contains("no overlapping pairs"),
+        "different text in two worktrees is an overlap: {stdout}"
     );
 }
 

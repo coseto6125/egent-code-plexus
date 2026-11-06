@@ -1124,9 +1124,8 @@ mod session_written_by_0_17_3 {
     use ecp_core::session::{layout, DirtyEvents, SessionMeta};
     use std::collections::BTreeMap;
     use std::fs;
-    use std::io::Write;
     use std::path::{Path, PathBuf};
-    use std::process::{Command, Stdio};
+    use std::process::Command;
 
     const OLD_SID: &str = "v0173sess";
 
@@ -1189,33 +1188,6 @@ mod session_written_by_0_17_3 {
         )
     }
 
-    /// The hook names the session through its input, as Claude Code does.
-    fn hook(home: &Path, worktree: &Path, pattern: &str) -> String {
-        let envelope = serde_json::json!({
-            "session_id": OLD_SID,
-            "cwd": worktree,
-            "tool_name": "Grep",
-            "tool_input": {"pattern": pattern},
-        })
-        .to_string();
-        let mut child = ecp(home, false)
-            .args(["hook", "pre-tool-use", "--claude-code"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(envelope.as_bytes())
-            .unwrap();
-        let out = child.wait_with_output().unwrap();
-        assert!(out.status.success());
-        String::from_utf8_lossy(&out.stdout).into_owned()
-    }
-
     fn snapshot(dir: &Path) -> BTreeMap<String, Vec<u8>> {
         fn walk(root: &Path, dir: &Path, out: &mut BTreeMap<String, Vec<u8>>) {
             for entry in fs::read_dir(dir).unwrap().flatten() {
@@ -1239,7 +1211,7 @@ mod session_written_by_0_17_3 {
     }
 
     #[test]
-    fn test_session_dir_written_by_0_17_3_is_not_read_by_hook_and_is_swept_when_idle() {
+    fn test_session_dir_written_by_0_17_3_is_not_read_and_is_swept_when_idle() {
         let fixture = fixture_dir();
         let old_meta = SessionMeta::read(
             &fixture
@@ -1338,16 +1310,6 @@ mod session_written_by_0_17_3 {
             old_bytes,
             "no query of the new layout touches the old dir"
         );
-
-        let ctx_a = hook(&home, &repo, "keep_me");
-        assert!(ctx_a.contains("keep_me (app.py:4)"), "{ctx_a}");
-        let ctx_a_deleted = hook(&home, &repo, "doomed_fn");
-        assert!(
-            !ctx_a_deleted.contains("doomed_fn (app.py:5)"),
-            "{ctx_a_deleted}"
-        );
-        let ctx_b = hook(&home, &wt_b, "helper_b");
-        assert!(ctx_b.contains("helper_b (lib.py:5)"), "{ctx_b}");
 
         let mut idle = SessionMeta::read(&old_dir.join("session_meta.json")).unwrap();
         idle.last_touched = (chrono::Utc::now() - chrono::Duration::hours(72)).to_rfc3339();

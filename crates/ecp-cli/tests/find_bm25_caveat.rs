@@ -47,6 +47,9 @@ fn find_bm25(cwd: &Path, home: &Path, pattern: &str, extra: &[&str]) -> serde_js
         .env("HOME", home)
         .env_remove("ECP_HOME")
         .env("ECP_SKIP_BG_REBUILD", "1")
+        // An overlay limit of 0 keeps the warm attach uncovered (F2), so the
+        // stale case still reads the caveat this file is about.
+        .env("ECP_WARM_ATTACH_MAX_FILES", "0")
         .output()
         .expect("find failed to spawn");
     assert!(

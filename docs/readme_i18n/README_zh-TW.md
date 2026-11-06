@@ -312,7 +312,7 @@ ecp admin claude install skills all     # ecp + simplify skill 包（或：ecp |
 ecp admin claude install mcp-server     # 選用 — hooks + skills + CLI 已足夠
 ```
 
-Hooks 會在每次 Grep/Glob/Bash 時餵給圖譜上下文，無需明確的工具呼叫。`ecp` skill 教會 symbol / impact / route / contract / rename 工作流。`simplify` 驅動圖譜優先的程式碼審查。
+每次搜尋（Grep 工具呼叫，或 Bash 裡的 `rg` / `grep`）之後，hook 會指出輸出中漏掉的定義和呼叫端檔案，不需要明確的工具呼叫。`ecp` skill 教會 symbol / impact / route / contract 工作流。`simplify` 驅動圖譜優先的程式碼審查。
 
 ### Gemini CLI
 

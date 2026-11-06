@@ -312,7 +312,7 @@ ecp admin claude install skills all     # ecp + simplify スキルパック（�
 ecp admin claude install mcp-server     # オプション — フック + スキル + CLI で既に十分
 ```
 
-フックは明示的なツールコールなしに、Grep/Glob/Bash のたびにグラフコンテキストを供給します。`ecp` スキルはシンボル / 影響 / ルート / コントラクト / リネームのワークフローを教えます。`simplify` はグラフファーストのコードレビューを推進します。
+検索（Grep ツールコール、または Bash の `rg` / `grep`）の後、フックは出力に含まれなかった定義と呼び出し元ファイルを、明示的なツールコールなしに示します。`ecp` スキルはシンボル / 影響 / ルート / コントラクトのワークフローを教えます。`simplify` はグラフファーストのコードレビューを推進します。
 
 ### Gemini CLI
 

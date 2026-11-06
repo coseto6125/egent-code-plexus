@@ -353,8 +353,10 @@ pub fn sweep_sessions(repo_root: &Path, dry_run: bool) -> io::Result<SweepStats>
     Ok(stats)
 }
 
-/// What `pre_tool_use::RefreshMarkers` names `<session dir>` plus, in
-/// `.hook-refresh/`. `.lock.d` is the `mkdir` lock where `flock` is missing.
+/// What the PreToolUse overlay refresh of ecp 0.17 and earlier named
+/// `<session dir>` plus, in `.hook-refresh/`. No build writes them now; the
+/// sweep removes the ones an older build left. `.lock.d` is the `mkdir` lock
+/// where `flock` is missing.
 const HOOK_REFRESH_SUFFIXES: [&str; 7] = [
     ".lock.d",
     ".lock",

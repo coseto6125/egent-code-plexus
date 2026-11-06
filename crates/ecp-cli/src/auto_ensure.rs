@@ -491,16 +491,7 @@ fn git_fingerprint_shortcut(
     // non-empty forever and downgrade every query from the Ready shortcut to
     // the Stale/reanalyze path. A rename keeps its removed half's tombstone,
     // so only a lone worktree half can be an artifact.
-    let home_ecp_canonical = fs::canonicalize(&home_ecp).ok();
-    let graph_canonical = fs::canonicalize(graph_path).ok();
-    dirty.retain(|event| match event {
-        DirtyEvent::Added(half) | DirtyEvent::Modified(half) => !is_ecp_artifact(
-            &worktree_root.join(half.path.as_str()),
-            graph_canonical.as_deref(),
-            home_ecp_canonical.as_deref(),
-        ),
-        DirtyEvent::Deleted(_) | DirtyEvent::Renamed { .. } | DirtyEvent::Unmerged(_) => true,
-    });
+    drop_ecp_artifacts(&mut dirty, worktree_root, graph_path, &home_ecp);
     if dirty.events().is_empty() {
         return Some((EnsureResult::Ready, Some(dirty)));
     }
@@ -516,6 +507,26 @@ fn git_fingerprint_shortcut(
         },
         None,
     ))
+}
+
+/// Drop the lone worktree halves that are ecp's own files
+/// ([`is_ecp_artifact`]). A rename keeps its removed half's tombstone.
+fn drop_ecp_artifacts(
+    dirty: &mut DirtySet<ClassifiedPath>,
+    worktree_root: &Path,
+    graph_path: &Path,
+    home_ecp: &Path,
+) {
+    let home_ecp_canonical = fs::canonicalize(home_ecp).ok();
+    let graph_canonical = fs::canonicalize(graph_path).ok();
+    dirty.retain(|event| match event {
+        DirtyEvent::Added(half) | DirtyEvent::Modified(half) => !is_ecp_artifact(
+            &worktree_root.join(half.path.as_str()),
+            graph_canonical.as_deref(),
+            home_ecp_canonical.as_deref(),
+        ),
+        DirtyEvent::Deleted(_) | DirtyEvent::Renamed { .. } | DirtyEvent::Unmerged(_) => true,
+    });
 }
 
 /// C5 routing, the same table `reanalyze_files` dispatches on. No syscall.
@@ -611,6 +622,16 @@ pub(crate) struct Ensured {
     /// The cap an L1 refresh gated and stamped under, so this query's reader
     /// accepts what this query wrote. `None` when no refresh ran.
     pub(crate) size_cap: Option<SizeCap>,
+    /// On a warm attach, the session overlay this gate read before its
+    /// probe, for [`cover_warm_attach`]; `None` for every other outcome.
+    pub(crate) warm_session: Option<SessionSnapshot>,
+}
+
+/// A session overlay dir and its manifest as one read saw them.
+#[derive(Default)]
+pub(crate) struct SessionSnapshot {
+    pub(crate) dir: Option<PathBuf>,
+    pub(crate) manifest: Option<ecp_core::session::DirtyEvents>,
 }
 
 impl Ensured {
@@ -620,6 +641,7 @@ impl Ensured {
             rebuilt: Some(rebuilt),
             dirty: None,
             size_cap: None,
+            warm_session: None,
         }
     }
 
@@ -629,6 +651,7 @@ impl Ensured {
             rebuilt: None,
             dirty,
             size_cap: None,
+            warm_session: None,
         }
     }
 
@@ -694,6 +717,10 @@ pub(crate) fn ensure_fresh_with_rebuild(
                         rebuilt: None,
                         dirty: None,
                         size_cap: None,
+                        warm_session: Some(SessionSnapshot {
+                            dir: session_dir,
+                            manifest,
+                        }),
                     });
                 }
             }
@@ -756,178 +783,206 @@ pub(crate) fn ensure_fresh_with_rebuild(
                         classify_dirty(DirtySet::from_modified(paths, skipped)).without_other()
                     }
                 };
-                // Every source half reaches the gate and the parse, removed
-                // halves too, as today's ` D` entries did: `reanalyze_files`
-                // stats each path once and skips a missing one. Config-only
-                // halves stay in the set for areas 4 and 5.
-                let rel_paths = dirty_source_paths(&dirty);
-                let configs = dirty_config_paths(&dirty);
-                // Freshness gate (FU-2026-06-10-f92cecba3daa): each fragment
-                // records its source file's mtime_ns in `l1/dirty_events.json`, so
-                // a dirty file whose mtime still matches was already parsed
-                // into a current fragment by an earlier query of this session —
-                // re-parsing it rewrites identical state. Filtering those out
-                // turns the typical agent burst (30+ queries, no edits in
-                // between) from N full L1 refreshes into stat checks.
                 // One cap for the whole refresh: the gate, the parse and the
                 // manifest stamp must agree, or the manifest claims a cap its
                 // fragments were not parsed under.
                 let size_cap = ecp_core::config::resolve_size_cap(worktree_root);
-                let gate = retain_stale_fragments(
+                let refresh = refresh_overlay(
                     worktree_root,
+                    graph_path,
                     session_dir.as_deref(),
                     manifest.as_ref(),
+                    &dirty,
                     size_cap,
-                    &rel_paths,
-                );
-                if gate.rel_paths.is_empty() {
-                    // A walk that found only "other" files, or sources whose
-                    // fragments are current, leaves the sidecar behind HEAD;
-                    // every later query would repeat the walk until a
-                    // rebuild. A porcelain verdict already matched HEAD.
-                    if walked {
-                        write_head_sha_sidecar(graph_path, worktree_root);
-                    }
-                    // A set of neither sources nor configs (a walk that
-                    // found only other kinds) is a clean tree to the
-                    // overlay, as in the Ready arm.
-                    let clean = rel_paths.is_empty() && configs.is_empty();
-                    // The snapshot is the manifest the closure keys over
-                    // while the retire pass left it as it was; else the
-                    // refresh reads the manifest again.
-                    let unchanged = match (&session_dir, &manifest) {
-                        (Some(dir), Some(snapshot)) if clean => {
-                            retire_all_best_effort(dir, snapshot);
-                            None
-                        }
-                        (Some(dir), Some(snapshot)) => {
-                            retire_unclaimed_best_effort(dir, snapshot, &rel_paths)
-                                .then_some(snapshot)
-                        }
-                        _ => None,
-                    };
-                    if !clean {
-                        refresh_closure_best_effort(
-                            worktree_root,
-                            session_dir.as_deref(),
-                            unchanged,
-                            graph_path,
-                            size_cap,
-                            &configs,
-                        );
-                    }
-                    return Ok(Ensured::refreshed(dirty, size_cap));
+                )?;
+                // A walk that found only "other" files, or sources whose
+                // fragments are current, leaves the sidecar behind HEAD;
+                // every later query would repeat the walk until a rebuild.
+                // A porcelain verdict already matched HEAD. A parse leaves the
+                // working tree consistent with the indexed state of HEAD, so
+                // the fingerprint is refreshed as the very last step. A parse
+                // whose fragments were not written leaves it behind, so the
+                // next query parses again.
+                let wrote = !matches!(refresh, Refresh::WriteFailed(_));
+                if wrote && (walked || matches!(refresh, Refresh::Parsed)) {
+                    write_head_sha_sidecar(graph_path, worktree_root);
                 }
-                // Stat BEFORE parsing: the manifest mtime must belong to the
-                // content that was parsed. Statting after the parse would let
-                // an edit landing mid-parse record (new mtime, old content) —
-                // and the freshness gate would then skip the re-parse that
-                // edit needs. A pre-parse mtime in the same race instead
-                // records (old mtime, mixed content), which the next query
-                // sees as stale — the gate only errs toward re-parsing.
-                // The gate already statted every file it compared against the
-                // manifest; only files it never statted (no manifest entry,
-                // v1 bin, parse_failed, absent) are statted here. A file
-                // absent at this stat gets a tombstone, not a fragment.
-                let mut pre_parse_mtimes = gate.pre_mtimes;
-                let mut absent = Vec::new();
-                for rel in &gate.rel_paths {
-                    if !pre_parse_mtimes.contains_key(rel) {
-                        match mtime_ns_of(&worktree_root.join(rel)) {
-                            Some(ns) => {
-                                pre_parse_mtimes.insert(rel.clone(), ns);
-                            }
-                            None => absent.push(rel.clone()),
-                        }
-                    }
-                }
-                // The shadow cascade re-parses tracked files outside the
-                // dirty set; each needs its own pre-parse mtime or the
-                // manifest records 0 and the reader drops its fragment. A
-                // shadow absent from disk is skipped by the parse and gets
-                // no tombstone: it was never dirty.
-                let parse_paths =
-                    crate::reanalyze::expand_shadow_paths(worktree_root, &gate.rel_paths);
-                for rel in &parse_paths {
-                    if !pre_parse_mtimes.contains_key(rel) {
-                        if let Some(ns) = mtime_ns_of(&worktree_root.join(rel)) {
-                            pre_parse_mtimes.insert(rel.clone(), ns);
-                        }
-                    }
-                }
-                // The C3 change and class of each source half, for the
-                // manifest rows. Built only on this miss path: the gate-skip
-                // path above never needs it.
-                let events: HashMap<String, DirtyPathEvent> = dirty
-                    .events()
-                    .iter()
-                    .flat_map(|event| event.halves())
-                    .filter(|(_, half)| half.class.is_source())
-                    .map(|(change, half)| {
-                        (
-                            half.path.as_str().to_owned(),
-                            DirtyPathEvent {
-                                change,
-                                class: half.class,
-                            },
-                        )
-                    })
-                    .collect();
-                let tombstones: Vec<(String, PathClass)> = absent
-                    .into_iter()
-                    .map(|rel| {
-                        let class = events.get(&rel).map_or(PathClass::SOURCE, |e| e.class);
-                        (rel, class)
-                    })
-                    .collect();
-                // Parse the dirty set ONCE here; the resulting `LocalGraph`s are
-                // handed straight to the overlay writer, which no longer
-                // re-parses them. This removes the second full tree-sitter pass
-                // (the dominant incremental cost on a large repo: ~0.6s for the
-                // 20-provider pipeline init alone).
-                let fresh_graphs = crate::reanalyze::reanalyze_expanded_under(
-                    worktree_root,
-                    &crate::git::DiffScope::Unstaged,
-                    &parse_paths,
-                    size_cap,
-                );
-                test_counters::REANALYZE_CALL_COUNT
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                test_counters::REANALYZE_PATH_COUNT
-                    .fetch_add(gate.rel_paths.len(), std::sync::atomic::Ordering::Relaxed);
-
-                apply_l1_overlay_updates(
-                    worktree_root,
-                    &fresh_graphs,
-                    &pre_parse_mtimes,
-                    &events,
-                    &tombstones,
-                    gate.session_meta,
-                    size_cap,
-                )
-                .map_err(|e| format!("L1 overlay refresh: {e}"))?;
-                if let (Some(dir), Some(manifest)) = (&session_dir, &manifest) {
-                    retire_unclaimed_best_effort(dir, manifest, &rel_paths);
-                }
-                // The refresh above rewrote the manifest: the snapshot is
-                // not the one the reader sees.
-                refresh_closure_best_effort(
-                    worktree_root,
-                    session_dir.as_deref(),
-                    None,
-                    graph_path,
-                    size_cap,
-                    &configs,
-                );
-                // L1 overlay only touches dirty fragments under
-                // `<repo>/sessions/<sid>/` and does not rewrite graph.bin, but the
-                // working tree is now consistent with the indexed state of the
-                // current HEAD — refresh the fingerprint as the very last step.
-                write_head_sha_sidecar(graph_path, worktree_root);
                 Ok(Ensured::refreshed(dirty, size_cap))
             }
         }
     }
+}
+
+/// What [`refresh_overlay`] did.
+enum Refresh {
+    /// Every dirty source's fragment was current: nothing was parsed.
+    Current,
+    /// The dirty sources whose fragments were stale were parsed.
+    Parsed,
+    /// The parse ran, but its fragments and tombstones were not written
+    /// (lock timeout, failed archive, full disk), for this reason. The
+    /// overlay holds what it held before.
+    WriteFailed(String),
+}
+
+/// The L1 refresh of `dirty` over the graph at `graph_path`: parse the dirty
+/// sources whose fragments are stale, write their fragments and tombstones,
+/// retire the entries no dirty path claims, and store the invalidation
+/// closure. `manifest` is the snapshot read before the probe. It writes no
+/// HEAD sidecar: the caller decides, because a warm attach's `graph_path`
+/// is a sibling commit's graph.
+fn refresh_overlay(
+    worktree_root: &Path,
+    graph_path: &Path,
+    session_dir: Option<&Path>,
+    manifest: Option<&ecp_core::session::DirtyEvents>,
+    dirty: &DirtySet<ClassifiedPath>,
+    size_cap: SizeCap,
+) -> Result<Refresh, String> {
+    // Every source half reaches the gate and the parse, removed
+    // halves too, as today's ` D` entries did: `reanalyze_files`
+    // stats each path once and skips a missing one. Config-only
+    // halves stay in the set for areas 4 and 5.
+    let rel_paths = dirty_source_paths(dirty);
+    let configs = dirty_config_paths(dirty);
+    // Freshness gate (FU-2026-06-10-f92cecba3daa): each fragment
+    // records its source file's mtime_ns in `l1/dirty_events.json`, so
+    // a dirty file whose mtime still matches was already parsed
+    // into a current fragment by an earlier query of this session —
+    // re-parsing it rewrites identical state. Filtering those out
+    // turns the typical agent burst (30+ queries, no edits in
+    // between) from N full L1 refreshes into stat checks.
+    let gate = retain_stale_fragments(worktree_root, session_dir, manifest, size_cap, &rel_paths);
+    if gate.rel_paths.is_empty() {
+        // A set of neither sources nor configs (a walk that
+        // found only other kinds) is a clean tree to the
+        // overlay, as in the Ready arm.
+        let clean = rel_paths.is_empty() && configs.is_empty();
+        // The snapshot is the manifest the closure keys over
+        // while the retire pass left it as it was; else the
+        // refresh reads the manifest again.
+        let unchanged = match (session_dir, manifest) {
+            (Some(dir), Some(snapshot)) if clean => {
+                retire_all_best_effort(dir, snapshot);
+                None
+            }
+            (Some(dir), Some(snapshot)) => {
+                retire_unclaimed_best_effort(dir, snapshot, &rel_paths).then_some(snapshot)
+            }
+            _ => None,
+        };
+        if !clean {
+            refresh_closure_best_effort(
+                worktree_root,
+                session_dir,
+                unchanged,
+                graph_path,
+                size_cap,
+                &configs,
+            );
+        }
+        return Ok(Refresh::Current);
+    }
+    // Stat BEFORE parsing: the manifest mtime must belong to the
+    // content that was parsed. Statting after the parse would let
+    // an edit landing mid-parse record (new mtime, old content) —
+    // and the freshness gate would then skip the re-parse that
+    // edit needs. A pre-parse mtime in the same race instead
+    // records (old mtime, mixed content), which the next query
+    // sees as stale — the gate only errs toward re-parsing.
+    // The gate already statted every file it compared against the
+    // manifest; only files it never statted (no manifest entry,
+    // v1 bin, parse_failed, absent) are statted here. A file
+    // absent at this stat gets a tombstone, not a fragment.
+    let mut pre_parse_mtimes = gate.pre_mtimes;
+    let mut absent = Vec::new();
+    for rel in &gate.rel_paths {
+        if !pre_parse_mtimes.contains_key(rel) {
+            match mtime_ns_of(&worktree_root.join(rel)) {
+                Some(ns) => {
+                    pre_parse_mtimes.insert(rel.clone(), ns);
+                }
+                None => absent.push(rel.clone()),
+            }
+        }
+    }
+    // The shadow cascade re-parses tracked files outside the
+    // dirty set; each needs its own pre-parse mtime or the
+    // manifest records 0 and the reader drops its fragment. A
+    // shadow absent from disk is skipped by the parse and gets
+    // no tombstone: it was never dirty.
+    let parse_paths = crate::reanalyze::expand_shadow_paths(worktree_root, &gate.rel_paths);
+    for rel in &parse_paths {
+        if !pre_parse_mtimes.contains_key(rel) {
+            if let Some(ns) = mtime_ns_of(&worktree_root.join(rel)) {
+                pre_parse_mtimes.insert(rel.clone(), ns);
+            }
+        }
+    }
+    // The C3 change and class of each source half, for the
+    // manifest rows. Built only on this miss path: the gate-skip
+    // path above never needs it.
+    let events: HashMap<String, DirtyPathEvent> = dirty
+        .events()
+        .iter()
+        .flat_map(|event| event.halves())
+        .filter(|(_, half)| half.class.is_source())
+        .map(|(change, half)| {
+            (
+                half.path.as_str().to_owned(),
+                DirtyPathEvent {
+                    change,
+                    class: half.class,
+                },
+            )
+        })
+        .collect();
+    let tombstones: Vec<(String, PathClass)> = absent
+        .into_iter()
+        .map(|rel| {
+            let class = events.get(&rel).map_or(PathClass::SOURCE, |e| e.class);
+            (rel, class)
+        })
+        .collect();
+    // Parse the dirty set ONCE here; the resulting `LocalGraph`s are
+    // handed straight to the overlay writer, which no longer
+    // re-parses them. This removes the second full tree-sitter pass
+    // (the dominant incremental cost on a large repo: ~0.6s for the
+    // 20-provider pipeline init alone).
+    let fresh_graphs = crate::reanalyze::reanalyze_expanded_under(
+        worktree_root,
+        &crate::git::DiffScope::Unstaged,
+        &parse_paths,
+        size_cap,
+    );
+    test_counters::REANALYZE_CALL_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    test_counters::REANALYZE_PATH_COUNT
+        .fetch_add(gate.rel_paths.len(), std::sync::atomic::Ordering::Relaxed);
+
+    let refresh = apply_l1_overlay_updates(
+        worktree_root,
+        &fresh_graphs,
+        &pre_parse_mtimes,
+        &events,
+        &tombstones,
+        gate.session_meta,
+        size_cap,
+    )
+    .map_err(|e| format!("L1 overlay refresh: {e}"))?;
+    if let (Some(dir), Some(manifest)) = (session_dir, manifest) {
+        retire_unclaimed_best_effort(dir, manifest, &rel_paths);
+    }
+    // The refresh above rewrote the manifest: the snapshot is
+    // not the one the reader sees.
+    refresh_closure_best_effort(
+        worktree_root,
+        session_dir,
+        None,
+        graph_path,
+        size_cap,
+        &configs,
+    );
+    Ok(refresh)
 }
 
 /// Version-checked graph load for every path that loads a graph by repo
@@ -968,8 +1023,8 @@ pub(crate) fn flag_behind_head(
     worktree_root: &Path,
 ) {
     engine.behind_head = graph_behind_head(graph_path, worktree_root);
-    // Self-heal: every L1 overlay refresh rewrites the `.head_sha`
-    // sidecar to the current HEAD, so `ensure_index` keeps answering
+    // Self-heal: an L1 overlay refresh that wrote its fragments rewrites
+    // the `.head_sha` sidecar to the current HEAD, so `ensure_index` keeps answering
     // Ready and a behind-HEAD L2 never rebuilds on its own (observed:
     // 15 days stale before a manual --force). Reuse the warm-attach
     // spawn — flock-deduped, skipped under ECP_SKIP_BG_REBUILD. The
@@ -981,6 +1036,172 @@ pub(crate) fn flag_behind_head(
         let rebuild = spawn_background_rebuild(worktree_root);
         eprintln!("l2.behind-head {rebuild}");
     }
+}
+
+/// Most changed files a warm attach re-parses into the overlay so the
+/// sibling graph answers as HEAD. A sibling passes the distance gate when
+/// HEAD is at most one commit past it (`rev-list --count sibling..HEAD`):
+/// HEAD's parent, a descendant of HEAD, or a branch forked at HEAD's parent,
+/// whose own commits are unbounded. Past this many files the parse costs
+/// about what the background rebuild does, and the answer stays unverified
+/// instead.
+/// `ECP_WARM_ATTACH_MAX_FILES` overrides it; `0` refuses every non-empty
+/// diff.
+const WARM_ATTACH_MAX_FILES: usize = 256;
+
+fn warm_attach_max_files() -> usize {
+    std::env::var("ECP_WARM_ATTACH_MAX_FILES")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(WARM_ATTACH_MAX_FILES)
+}
+
+/// What [`cover_warm_attach`] did: the coverage verdict, and the dirty set
+/// and cap of the refresh it ran, for the read context.
+pub(crate) struct WarmCover {
+    pub(crate) coverage: crate::engine::HeadCoverage,
+    pub(crate) dirty: Option<DirtySet<ClassifiedPath>>,
+    pub(crate) size_cap: Option<SizeCap>,
+}
+
+impl WarmCover {
+    pub(crate) fn uncovered(reason: impl Into<String>) -> Self {
+        Self {
+            coverage: crate::engine::HeadCoverage::Uncovered(reason.into()),
+            dirty: None,
+            size_cap: None,
+        }
+    }
+}
+
+/// Bring a warm-attached sibling graph to HEAD through the overlay: every
+/// file that differs between the sibling commit and HEAD, plus every
+/// uncommitted change, goes through the L1 refresh like an uncommitted edit.
+/// The overlay pairs fragments with base nodes by repo path and identity, so
+/// a sibling graph of the same repo is a base it can pair against.
+///
+/// Every path enters as `Modified`: the refresh stats each one, parses a
+/// present file and tombstones a gone one, so a deletion and both halves of
+/// a rename need no event of their own. No HEAD sidecar is written: the
+/// graph is the sibling's.
+///
+/// `session` is what the gate read before its probe, so it is older than
+/// the `git status` here, as the retire pass requires. `Covered` names the
+/// source paths the refresh covered: the engine checks them against the view
+/// it answers from.
+pub(crate) fn cover_warm_attach(
+    worktree_root: &Path,
+    sibling_graph: &Path,
+    session: SessionSnapshot,
+) -> WarmCover {
+    let Some(sibling_sha) = sibling_graph.parent().and_then(commit_dir_sha) else {
+        return WarmCover::uncovered("the sibling graph names no commit");
+    };
+    let committed = match sibling_diff(worktree_root, &sibling_sha) {
+        Ok(paths) => paths,
+        Err(reason) => return WarmCover::uncovered(reason),
+    };
+    let home_ecp = ecp_core::registry::resolve_home_ecp();
+    let uncommitted = match crate::git::status::porcelain_all(worktree_root, &home_ecp) {
+        Ok(out) if out.status.success() => DirtySet::from_porcelain_z(&out.stdout)
+            .map_err(|e| format!("`git status` printed no porcelain v1: {e:?}")),
+        Ok(out) => Err(format!(
+            "`git status` failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )),
+        Err(e) => Err(format!("`git status` did not run: {e}")),
+    };
+    let uncommitted = match uncommitted {
+        Ok(set) => set,
+        Err(reason) => return WarmCover::uncovered(reason),
+    };
+    let paths: Vec<RepoPath> = uncommitted
+        .events()
+        .iter()
+        .flat_map(|event| event.halves().map(|(_, path)| path.clone()))
+        .chain(committed)
+        .collect();
+    let mut dirty = classify_dirty(DirtySet::from_modified(
+        paths,
+        uncommitted.skipped().to_vec(),
+    ))
+    .without_other();
+    drop_ecp_artifacts(&mut dirty, worktree_root, sibling_graph, &home_ecp);
+    let changed = dirty.events().len();
+    let limit = warm_attach_max_files();
+    if changed > limit {
+        return WarmCover {
+            dirty: Some(dirty),
+            ..WarmCover::uncovered(format!(
+                "{changed} changed file(s) since the sibling commit exceed the overlay limit of {limit}"
+            ))
+        };
+    }
+    let size_cap = ecp_core::config::resolve_size_cap(worktree_root);
+    let refreshed = refresh_overlay(
+        worktree_root,
+        sibling_graph,
+        session.dir.as_deref(),
+        session.manifest.as_ref(),
+        &dirty,
+        size_cap,
+    );
+    let reason = match refreshed {
+        Ok(Refresh::Current | Refresh::Parsed) => {
+            return WarmCover {
+                coverage: crate::engine::HeadCoverage::Covered {
+                    sources: dirty_source_paths(&dirty),
+                },
+                dirty: Some(dirty),
+                size_cap: Some(size_cap),
+            }
+        }
+        Ok(Refresh::WriteFailed(e)) => format!("the overlay write failed: {e}"),
+        Err(e) => format!("the overlay refresh failed: {e}"),
+    };
+    WarmCover {
+        dirty: Some(dirty),
+        ..WarmCover::uncovered(reason)
+    }
+}
+
+/// The repo paths whose content differs between `sibling_sha` and HEAD.
+/// `--no-renames` names both halves of a rename.
+fn sibling_diff(worktree_root: &Path, sibling_sha: &str) -> Result<Vec<RepoPath>, String> {
+    let out = crate::git::safe_exec::git()
+        .args(["diff", "--name-only", "-z", "--no-renames"])
+        .args(crate::git::safe_exec::DIFF_HARDENING)
+        .args([sibling_sha, "HEAD", "--"])
+        .current_dir(worktree_root)
+        .output()
+        .map_err(|e| format!("`git diff` did not run: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "`git diff {sibling_sha} HEAD` failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    name_only_paths(&out.stdout)
+}
+
+/// The paths of `git diff --name-only -z` stdout. A path that is not UTF-8
+/// or not repo-relative fails the whole list: the overlay cannot cover it.
+fn name_only_paths(stdout: &[u8]) -> Result<Vec<RepoPath>, String> {
+    stdout
+        .split(|&b| b == 0)
+        .filter(|raw| !raw.is_empty())
+        .map(|raw| {
+            let text = std::str::from_utf8(raw).map_err(|_| {
+                format!(
+                    "`git diff` named a path that is not UTF-8: {}",
+                    String::from_utf8_lossy(raw)
+                )
+            })?;
+            RepoPath::new(text).map_err(|NotRepoRelative(path)| {
+                format!("`git diff` named a path that is not repo-relative: {path}")
+            })
+        })
+        .collect()
 }
 
 /// The SHA a published commit dir was built for, parsed out of the dir NAME
@@ -1057,8 +1278,9 @@ fn attach_latest_sibling_sha(worktree_root: &Path) -> Option<PathBuf> {
 }
 
 /// Cap on sibling dirs probed per warm-attach. A within-distance sibling
-/// (distance ≤ `WARM_ATTACH_MAX_DISTANCE`) is, by definition, HEAD or its direct
-/// parent — overwhelmingly among the few most-recently-built graphs. Bounding
+/// (HEAD at most `WARM_ATTACH_MAX_DISTANCE` commits past it) is HEAD, its
+/// parent, a descendant of HEAD or a branch forked at its parent —
+/// overwhelmingly among the few most-recently-built graphs. Bounding
 /// the scan keeps the worst case (a repo with many parallel-branch builds) to a
 /// handful of `git rev-list` execs instead of one per published commit, while
 /// the common case (newest sibling is the parent) still returns on the first.
@@ -1100,11 +1322,13 @@ fn attach_latest_sibling_sha_uncached(worktree_root: &Path) -> Option<PathBuf> {
 /// See the staleness-gate comment in `attach_latest_sibling_sha_uncached`.
 const WARM_ATTACH_MAX_DISTANCE: usize = 1;
 
-/// True when `sibling_dir` names a commit that is an ancestor of the current
-/// HEAD at most `WARM_ATTACH_MAX_DISTANCE` commits back. A non-ancestor
-/// sibling (parallel branch — its diff vs HEAD is unbounded and uncontrolled)
-/// or one whose SHA can't be resolved is treated as "too far": the conservative
-/// choice is a sync build, never a stale warm graph.
+/// True when HEAD is at most `WARM_ATTACH_MAX_DISTANCE` commits past the
+/// commit `sibling_dir` names (`rev-list --count sibling..HEAD`). That admits
+/// HEAD's parent, a descendant of HEAD, and a branch forked at HEAD's parent
+/// with any number of its own commits; `cover_warm_attach` bounds the diff
+/// those leave by file count. A sibling whose SHA can't be resolved is
+/// treated as "too far": the conservative choice is a sync build, never a
+/// stale warm graph.
 ///
 /// `None`-defaulting on any git failure (not a repo, detached state, sibling
 /// SHA absent from the object DB after history rewrite) deliberately refuses
@@ -1738,7 +1962,7 @@ fn apply_l1_overlay_updates(
     tombstones: &[(String, PathClass)],
     gate_meta: Option<SessionMeta>,
     size_cap: SizeCap,
-) -> io::Result<()> {
+) -> io::Result<Refresh> {
     use crate::session::{overlay_writer, promotion};
 
     // Same path the reader (`resolve_session_overlay_dir`) consults — kept in one
@@ -1791,7 +2015,9 @@ fn apply_l1_overlay_updates(
         })
         .collect();
 
-    let (n_written, n_failed) = match overlay_writer::write_dirty_events(
+    // A failed write keeps the query answering, but the caller learns of it:
+    // a warm attach must not count the files as covered.
+    let outs = match overlay_writer::write_dirty_events(
         &session_dir,
         size_cap,
         fresh_graphs,
@@ -1799,19 +2025,18 @@ fn apply_l1_overlay_updates(
         events,
         tombstones,
     ) {
-        Ok(outs) => {
-            let n_failed = outs.iter().filter(|o| o.parse_failed).count();
-            (outs.len() - n_failed, n_failed)
-        }
+        Ok(outs) => outs,
         Err(e) => {
             eprintln!("warning: overlay batch write: {e}");
-            (0, 0)
+            return Ok(Refresh::WriteFailed(e.to_string()));
         }
     };
+    let n_failed = outs.iter().filter(|o| o.parse_failed).count();
+    let n_written = outs.len() - n_failed;
     if n_written > 0 || n_failed > 0 {
         eprintln!("l1.refreshed written={n_written} failed={n_failed}");
     }
-    Ok(())
+    Ok(Refresh::Parsed)
 }
 
 /// Smallest gap between two `last_touched` rewrites. Two orders of magnitude
@@ -2812,6 +3037,95 @@ mod fingerprint_drift_tests {
         );
     }
 
+    /// A walk whose overlay write fails leaves the sidecar where it was. Red
+    /// before the fix: the sidecar moved to HEAD, so the next query took the
+    /// porcelain shortcut and answered from a graph that lacks the commit.
+    #[cfg(unix)]
+    #[test]
+    fn test_ensure_fresh_walk_overlay_write_fails_keeps_sidecar_behind() {
+        if rerun_in_child(
+            "ECP_AUTO_ENSURE_WRITE_FAIL_CHILD",
+            "auto_ensure::fingerprint_drift_tests::test_ensure_fresh_walk_overlay_write_fails_keeps_sidecar_behind",
+        ) {
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempdir().unwrap();
+        let (worktree, graph_path) = repo_and_graph_at_head(tmp.path());
+        let home = tmp.path().join("ecp-home");
+        std::env::set_var("ECP_HOME", &home);
+        std::env::set_var("ECP_SESSION_ID", "write-fail-test");
+        let commit = |body: &str| {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            fs::write(worktree.join("app.py"), body).unwrap();
+            assert!(std::process::Command::new("git")
+                .args(["commit", "-qam", "next"])
+                .current_dir(&worktree)
+                .status()
+                .unwrap()
+                .success());
+            git_head_sha(&worktree).unwrap()
+        };
+        let first = commit("def app(): pass\ndef one(): pass\n");
+        ensure_fresh(IndexNeed::NearCurrent, &graph_path, &worktree).unwrap();
+        let sidecar = || {
+            fs::read_to_string(head_sha_sidecar_path(&graph_path))
+                .unwrap()
+                .trim()
+                .to_string()
+        };
+        assert_eq!(
+            sidecar(),
+            first,
+            "setup: the first refresh writes the overlay"
+        );
+
+        // The dirs below `l1/`: `l1/` itself stays writable for the manifest
+        // and its lock, so the fragment write is the step that fails.
+        fn l1_dirs(dir: &Path, out: &mut Vec<PathBuf>) {
+            for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    l1_dirs(&path, out);
+                    if path
+                        .ancestors()
+                        .skip(1)
+                        .any(|a| a.file_name().is_some_and(|n| n == "l1"))
+                    {
+                        out.push(path);
+                    }
+                }
+            }
+        }
+        let mut dirs = Vec::new();
+        l1_dirs(&home, &mut dirs);
+        assert!(!dirs.is_empty(), "setup: no overlay dir");
+        let mode = |m| fs::Permissions::from_mode(m);
+        for dir in &dirs {
+            fs::set_permissions(dir, mode(0o555)).unwrap();
+        }
+        if fs::write(dirs[0].join("probe"), b"").is_ok() {
+            eprintln!("skipped: a read-only directory is writable here (root)");
+            return;
+        }
+        commit("def app(): pass\ndef one(): pass\ndef two(): pass\n");
+        test_counters::reset();
+        let outcome = ensure_fresh(IndexNeed::NearCurrent, &graph_path, &worktree);
+        for dir in &dirs {
+            fs::set_permissions(dir, mode(0o755)).unwrap();
+        }
+        outcome.unwrap();
+        assert!(
+            test_counters::reanalyze_calls() > 0,
+            "the refresh must parse the commit and reach the write"
+        );
+        assert_eq!(
+            sidecar(),
+            first,
+            "a failed write must leave the sidecar behind HEAD"
+        );
+    }
+
     /// `diff`, doctor, summary and the post-tool hook pass the cwd. Rooted at
     /// `pkg/`, the walk would key the fragment `a.py`, a path no reader asks
     /// for.
@@ -3515,5 +3829,41 @@ mod session_dir_key_tests {
         for bad in ["", "../x", "a/b", "."] {
             assert_eq!(resolve_session_overlay_dir_for(&repo, bad), None, "{bad:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod warm_cover_tests {
+    use super::*;
+
+    /// Stands for: `git diff --name-only -z` paths reach the refresh as
+    /// repo paths, empty segments skipped; a path the overlay cannot name
+    /// fails the cover instead of dropping out of it.
+    #[test]
+    fn test_name_only_paths_unreadable_path_fails_cover() {
+        let paths = name_only_paths(b"src/a.rs\0b.rs\0").unwrap();
+        let paths: Vec<&str> = paths.iter().map(RepoPath::as_str).collect();
+        assert_eq!(paths, ["src/a.rs", "b.rs"]);
+        assert!(name_only_paths(b"").unwrap().is_empty());
+        assert!(name_only_paths(b"caf\xe9.rs\0")
+            .unwrap_err()
+            .contains("not UTF-8"));
+    }
+
+    /// Stands for: a sibling graph outside a commit dir names no commit to
+    /// diff against, so the cover reports why instead of guessing.
+    #[test]
+    fn test_cover_warm_attach_graph_outside_commit_dir_is_uncovered() {
+        let dir = tempfile::tempdir().unwrap();
+        let cover = cover_warm_attach(
+            dir.path(),
+            &dir.path().join("graph.bin"),
+            SessionSnapshot::default(),
+        );
+        assert!(matches!(
+            cover.coverage,
+            crate::engine::HeadCoverage::Uncovered(reason) if reason.contains("names no commit")
+        ));
+        assert!(cover.dirty.is_none());
     }
 }

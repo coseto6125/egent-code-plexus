@@ -1,6 +1,7 @@
 //! Concern classification — decide whether a peer dirty event matters.
 //!
 //! HARD  iff the peer has an overlay entry for a file I also have an entry for
+//!       (the callers first drop a file two worktrees hold with equal text)
 //! SOFT  iff a declaration in the peer's dirty file is in IMPACT(my dirty
 //!       symbols), AND not HARD
 //! IGNORE otherwise

@@ -2,11 +2,12 @@ use crate::session::sources::RecordedSources;
 use crate::session::view_cache;
 use ecp_core::contracts::routing::SizeCap;
 use ecp_core::graph::{ArchivedZeroCopyGraph, GRAPH_FORMAT_VERSION, GRAPH_MAGIC};
+use ecp_core::session::closure::StaleClosure;
 use ecp_core::session::view::{CallGap, HiddenDecl};
 use ecp_core::session::OverlayView;
 use memmap2::Mmap;
 use rkyv::rancor::Error;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io;
@@ -78,12 +79,18 @@ pub struct Engine {
     /// Each accepted fragment's path → the content hash it parsed, set by
     /// `overlay_view` before it can return, whatever it returns.
     overlay_hashes: OnceLock<FxHashMap<String, u64>>,
+    /// Each accepted tombstone's path, set beside `overlay_hashes`.
+    overlay_tombstones: OnceLock<FxHashSet<String>>,
     view: GraphView,
     /// True when this engine was loaded from a sibling SHA's graph because the
     /// current HEAD had no published graph yet (OOB branch-switch warm-attach
     /// path). LLM consumers should treat results as slightly stale; a background
     /// rebuild for the new SHA is already in flight.
     pub is_stale_for_sha: bool,
+    /// Whether the overlay brought a warm-attached graph to HEAD. `None`
+    /// until the read context checks it; a warm engine with `None` is
+    /// unverified.
+    head_coverage: Option<HeadCoverage>,
     /// True when the loaded graph's commit dir names a SHA behind the repo's
     /// current HEAD. By-repo loaders (`auto_ensure::load_ensured`) resolve the
     /// latest *published* graph, which lags committed-but-unindexed work; the
@@ -94,6 +101,66 @@ pub struct Engine {
     /// (not UTF-8, or not repo-relative): their uncommitted edits are in no
     /// overlay. Set by `ReadContext` from the gate's dirty set.
     unreadable_changes: usize,
+}
+
+/// The command an unverified answer names as its next step.
+pub const REINDEX_COMMAND: &str = "ecp admin index --force --repo .";
+
+/// Whether the overlay re-parsed every file that differs between a
+/// warm-attached sibling graph and the worktree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HeadCoverage {
+    /// The refresh wrote a fragment or a tombstone for every changed source
+    /// path in `sources`. Answers are HEAD's only while the view this query
+    /// reads still holds each of them: a concurrent query may retire the
+    /// entries between the refresh and the view build.
+    Covered { sources: Vec<String> },
+    /// The overlay could not cover the changes, for this reason.
+    Uncovered(String),
+}
+
+/// Why a covered warm attach is unverified after all.
+const COVER_NOT_IN_VIEW: &str =
+    "the overlay view lacks a changed file the refresh covered (another \
+     query retired its entry, or the file changed since the refresh)";
+
+/// Which overlay lines a caveat keeps. The clean-file-edges line stays in
+/// every scope: it speaks for clean files, and any row may be one.
+#[derive(Clone, Copy)]
+enum LineScope<'s> {
+    /// Every line: the commands that do not scope their caveat.
+    All,
+    /// A line that lists dirty files stays when it names a file of the
+    /// payload.
+    Files(&'s FxHashSet<&'s str>),
+    /// An impact answer on `target`: as `Files`, and the unpaired-declarations
+    /// line always, because a hidden declaration also hides the edges the
+    /// traversal would have followed, so its file is in no row. A C# call
+    /// line stays when a call names `target`: the caller it may lack an edge
+    /// from is in no row either.
+    Impact {
+        files: &'s FxHashSet<&'s str>,
+        target: &'s str,
+    },
+}
+
+impl LineScope<'_> {
+    fn keeps_hidden(self, hidden: &[HiddenDecl]) -> bool {
+        match self {
+            Self::All | Self::Impact { .. } => true,
+            Self::Files(files) => hidden.iter().any(|d| files.contains(d.path.as_str())),
+        }
+    }
+
+    fn keeps_gaps(self, gaps: &[CallGap]) -> bool {
+        match self {
+            Self::All => true,
+            Self::Files(files) => gaps.iter().any(|g| files.contains(g.path.as_str())),
+            Self::Impact { files, target } => gaps
+                .iter()
+                .any(|g| g.member == target || files.contains(g.path.as_str())),
+        }
+    }
 }
 
 /// Discriminated view over the L2 graph plus an optional L1 overlay.
@@ -135,8 +202,10 @@ impl Engine {
             overlay_size_cap: None,
             overlay_view: OnceLock::new(),
             overlay_hashes: OnceLock::new(),
+            overlay_tombstones: OnceLock::new(),
             view: GraphView::L2Only,
             is_stale_for_sha: false,
+            head_coverage: None,
             behind_head: false,
             unreadable_changes: 0,
         })
@@ -164,8 +233,55 @@ impl Engine {
     /// A command that takes the caveat before it reads the view calls
     /// [`Engine::caveat_reading_view`].
     pub fn caveat(&self) -> Option<String> {
+        // The staleness check of a covered warm attach builds the view, so it
+        // runs first and the lines read the same view.
+        let graph = self.graph_caveat();
         let view = self.overlay_view.get().and_then(Option::as_ref);
-        crate::output::merge_caveats(self.graph_caveat(), self.dirty_lines(None, view))
+        crate::output::merge_caveats(graph, self.dirty_lines(None, view, LineScope::All))
+    }
+
+    /// [`Engine::caveat`] scoped to an answer whose payload names
+    /// `result_files`: a line that lists dirty files (unpaired declarations,
+    /// unresolved C# calls) stays only when it names one of them. The
+    /// staleness lines, the unreadable-paths line and the clean-file-edges
+    /// line stay whatever the files. It builds the overlay view when it is
+    /// not built yet.
+    pub fn caveat_for<'a>(
+        &self,
+        result_files: impl IntoIterator<Item = &'a str>,
+    ) -> Option<String> {
+        crate::output::merge_caveats(
+            self.graph_caveat(),
+            self.dirty_set_caveat_for(None, result_files),
+        )
+    }
+
+    /// [`Engine::caveat_for`] for an impact answer on the declaration named
+    /// `target`: the unpaired-declarations line stays whatever the files,
+    /// and a C# call line stays when a call names `target`.
+    pub fn impact_caveat_for<'a>(
+        &self,
+        target: &str,
+        result_files: impl IntoIterator<Item = &'a str>,
+    ) -> Option<String> {
+        let files: FxHashSet<&str> = result_files.into_iter().collect();
+        let graph = self.graph_caveat();
+        let scope = LineScope::Impact {
+            files: &files,
+            target,
+        };
+        crate::output::merge_caveats(graph, self.dirty_lines(None, self.overlay_view(), scope))
+    }
+
+    /// [`Engine::dirty_set_caveat`] scoped to `result_files` as
+    /// [`Engine::caveat_for`] scopes it.
+    pub fn dirty_set_caveat_for<'a>(
+        &self,
+        repo: Option<&str>,
+        result_files: impl IntoIterator<Item = &'a str>,
+    ) -> Option<String> {
+        let files: FxHashSet<&str> = result_files.into_iter().collect();
+        self.dirty_lines(repo, self.overlay_view(), LineScope::Files(&files))
     }
 
     /// [`Engine::caveat`] for a command that takes the caveat before it runs
@@ -175,8 +291,42 @@ impl Engine {
         crate::output::merge_caveats(self.graph_caveat(), self.dirty_set_caveat(None))
     }
 
+    pub(crate) fn set_head_coverage(&mut self, coverage: HeadCoverage) {
+        self.head_coverage = Some(coverage);
+    }
+
+    /// Why this engine's answers may lack what HEAD holds: a warm attach the
+    /// overlay did not bring to HEAD, or whose view lost a path the refresh
+    /// covered. `None` for every other engine. A covered warm attach builds
+    /// the overlay view here, so the verdict speaks for the view the answer
+    /// reads.
+    pub fn unverified_reason(&self) -> Option<&str> {
+        if !self.is_stale_for_sha {
+            return None;
+        }
+        match &self.head_coverage {
+            Some(HeadCoverage::Covered { sources }) => sources
+                .iter()
+                .any(|rel| !self.overlay_holds(rel))
+                .then_some(COVER_NOT_IN_VIEW),
+            Some(HeadCoverage::Uncovered(reason)) => Some(reason.as_str()),
+            None => Some("no check compared the sibling commit with HEAD"),
+        }
+    }
+
+    /// The sentence a miss on this engine appends: why the answer may lack
+    /// what HEAD holds, and the command that settles it.
+    pub fn unverified_note(&self) -> Option<String> {
+        self.unverified_reason().map(|reason| {
+            format!(
+                "This miss is unverified: the graph is a warm-attach from a sibling commit \
+                 and {reason}. Run `{REINDEX_COMMAND}` for a definitive answer"
+            )
+        })
+    }
+
     fn graph_caveat(&self) -> Option<String> {
-        if self.is_stale_for_sha {
+        if let Some(reason) = self.unverified_reason() {
             let rebuild = if crate::background::background_rebuild_skipped() {
                 "No background rebuild runs (ECP_SKIP_BG_REBUILD is set) — run"
             } else {
@@ -184,8 +334,8 @@ impl Engine {
             };
             Some(format!(
                 "results may be incomplete: graph is a warm-attach from a sibling commit \
-                 (current HEAD not yet indexed); symbols added since are invisible. {rebuild} \
-                 `ecp admin index --force --repo .` for a definitive answer."
+                 (current HEAD not yet indexed) and {reason}; symbols added since are \
+                 invisible. {rebuild} `{REINDEX_COMMAND}` for a definitive answer."
             ))
         } else if self.behind_head {
             Some(
@@ -207,20 +357,29 @@ impl Engine {
     /// because `find` takes the caveat before it runs the query; with no
     /// overlay input that is a single `OnceLock` read.
     pub fn dirty_set_caveat(&self, repo: Option<&str>) -> Option<String> {
-        self.dirty_lines(repo, self.overlay_view())
+        self.dirty_lines(repo, self.overlay_view(), LineScope::All)
     }
 
-    fn dirty_lines(&self, repo: Option<&str>, view: Option<&OverlayView>) -> Option<String> {
+    fn dirty_lines(
+        &self,
+        repo: Option<&str>,
+        view: Option<&OverlayView>,
+        scope: LineScope<'_>,
+    ) -> Option<String> {
         let label = |line: String| match repo {
             Some(name) => format!("{name}: {line}"),
             None => line,
         };
         let unreadable = self.unreadable_changes_line();
-        let ambiguous =
-            view.and_then(|view| unpaired_declarations_line(view.hidden_declarations()));
-        let gaps = view.and_then(|view| call_gaps_line(view.call_gaps()));
-        let stale = view.and_then(|view| stale_closure_line(view.stale_closure()));
-        [ambiguous, gaps, stale]
+        let overlay = view.map_or([None, None, None], |view| {
+            overlay_lines(
+                view.hidden_declarations(),
+                view.call_gaps(),
+                view.stale_closure(),
+                scope,
+            )
+        });
+        overlay
             .into_iter()
             .fold(unreadable.map(label), |acc, line| {
                 crate::output::merge_caveats(acc, line.map(label))
@@ -275,6 +434,12 @@ impl Engine {
         }
     }
 
+    /// The worktree top an attached overlay belongs to. `None` without an
+    /// overlay.
+    pub fn worktree_root(&self) -> Option<&Path> {
+        self.worktree_root.as_deref()
+    }
+
     /// Attach an L1 session overlay dir (`~/.ecp/<repo>/sessions/<sid>/`) so
     /// query paths can surface dirty graph fragments over the L2 base. Wired
     /// from `read_context` after the engine loads (when a session overlay
@@ -324,6 +489,9 @@ impl Engine {
                         .filter_map(|f| Some((f.rel_path.clone(), f.content_hash?)))
                         .collect(),
                 );
+                let _ = self
+                    .overlay_tombstones
+                    .set(inputs.tombstones.iter().cloned().collect());
                 if inputs.is_empty() {
                     return None;
                 }
@@ -380,6 +548,16 @@ impl Engine {
         self.overlay_hashes
             .get()
             .is_some_and(|hashes| hashes.contains_key(rel))
+    }
+
+    /// Whether the overlay view holds `rel` as an accepted fragment or an
+    /// accepted tombstone.
+    fn overlay_holds(&self, rel: &str) -> bool {
+        self.overlay_supplies(rel)
+            || self
+                .overlay_tombstones
+                .get()
+                .is_some_and(|tombstones| tombstones.contains(rel))
     }
 
     /// As [`Self::file_text_is_recorded`], against the base graph's hash
@@ -514,6 +692,27 @@ fn validate_header(bytes: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
+/// The overlay's caveat lines that `scope` keeps: unpaired declarations,
+/// unresolved C# calls, clean-file edges.
+fn overlay_lines(
+    hidden: &[HiddenDecl],
+    gaps: &[CallGap],
+    stale: &StaleClosure,
+    scope: LineScope<'_>,
+) -> [Option<String>; 3] {
+    [
+        scope
+            .keeps_hidden(hidden)
+            .then(|| unpaired_declarations_line(hidden))
+            .flatten(),
+        scope
+            .keeps_gaps(gaps)
+            .then(|| call_gaps_line(gaps))
+            .flatten(),
+        stale_closure_line(stale),
+    ]
+}
+
 /// Most groups the unpaired-declarations line names; the rest fold into a count.
 const UNPAIRED_GROUPS_SHOWN: usize = 5;
 
@@ -563,7 +762,7 @@ fn unpaired_declarations_line(hidden: &[HiddenDecl]) -> Option<String> {
 
 /// The caveat line for the clean-file edges and nodes the invalidation
 /// closure left as indexed, or `None` when it left none.
-fn stale_closure_line(stale: &ecp_core::session::closure::StaleClosure) -> Option<String> {
+fn stale_closure_line(stale: &StaleClosure) -> Option<String> {
     if stale.is_empty() {
         return None;
     }
@@ -711,6 +910,223 @@ mod tests {
             line.contains("f4 -> Spin (src/App.cs:4, cs-extension-dirty-declaration), and 2 more.")
         );
         assert!(!line.contains("f5"), "the sixth call folds into the count");
+    }
+
+    fn closure_with(configs: &[&str]) -> StaleClosure {
+        StaleClosure {
+            unbounded: Some(300),
+            kinds: vec!["Calls".to_string()],
+            configs: configs.iter().map(|c| c.to_string()).collect(),
+            ..StaleClosure::default()
+        }
+    }
+
+    /// Stands for: a line that lists dirty files outside the payload is
+    /// dropped; the same line naming a payload file is kept.
+    #[test]
+    fn test_overlay_lines_files_scope_outside_files_drops_inside_keeps() {
+        let decls = [hidden("K", "save", "src/K.java", 2)];
+        let gaps = [gap("Use", 5, "cs-extension-stale-edge")];
+
+        let outside: FxHashSet<&str> = ["src/Other.java"].into_iter().collect();
+        let [ambiguous, call_gaps, _] = overlay_lines(
+            &decls,
+            &gaps,
+            &StaleClosure::default(),
+            LineScope::Files(&outside),
+        );
+        assert_eq!((ambiguous, call_gaps), (None, None));
+
+        let inside: FxHashSet<&str> = ["src/K.java", "src/App.cs"].into_iter().collect();
+        let [ambiguous, call_gaps, _] = overlay_lines(
+            &decls,
+            &gaps,
+            &StaleClosure::default(),
+            LineScope::Files(&inside),
+        );
+        assert!(ambiguous.is_some_and(|l| l.contains("Method K.save x2")));
+        assert!(call_gaps.is_some_and(|l| l.contains("Use -> Spin")));
+    }
+
+    /// Stands for: a clean row's caller count can come from the edges the
+    /// closure left as indexed, so the clean-file-edges line stays though no
+    /// payload file is the overlay's or a kept config. Failed before: the
+    /// line needed a supplied file or a kept config.
+    #[test]
+    fn test_overlay_lines_files_scope_clean_rows_keep_closure_line() {
+        let clean: FxHashSet<&str> = ["src/c.ts"].into_iter().collect();
+        let [_, _, closure] = overlay_lines(&[], &[], &closure_with(&[]), LineScope::Files(&clean));
+        assert!(closure.is_some_and(|l| l.contains("indexed Calls edges")));
+
+        let [_, _, by_config] = overlay_lines(
+            &[],
+            &[],
+            &closure_with(&["tsconfig.json"]),
+            LineScope::Files(&clean),
+        );
+        assert!(by_config.is_some_and(|l| l.contains("kept configs: tsconfig.json")));
+    }
+
+    /// Stands for: impact downstream through an edge to a declaration the
+    /// overlay hid: the hidden file is in no row, and the unpaired line
+    /// stays. Failed before: the line needed the hidden file among the rows.
+    #[test]
+    fn test_overlay_lines_impact_scope_hidden_file_outside_rows_keeps_unpaired_line() {
+        let decls = [hidden("K", "save", "src/K.java", 2)];
+        let rows: FxHashSet<&str> = ["src/Caller.java"].into_iter().collect();
+        let [ambiguous, _, _] = overlay_lines(
+            &decls,
+            &[],
+            &StaleClosure::default(),
+            LineScope::Impact {
+                files: &rows,
+                target: "run",
+            },
+        );
+        assert!(ambiguous.is_some_and(|l| l.contains("Method K.save x2")));
+    }
+
+    /// Stands for: a C# call to the impact target in a file outside the rows
+    /// names a caller the answer may lack, so its line stays; a call to
+    /// another member outside the rows is dropped. Failed before: the line
+    /// needed the call's file among the rows.
+    #[test]
+    fn test_overlay_lines_impact_scope_gap_member_is_target_keeps_call_line() {
+        let gaps = [gap("Use", 5, "cs-partial-bare-call")];
+        let rows: FxHashSet<&str> = ["src/Spin.cs"].into_iter().collect();
+        let scope = |target| LineScope::Impact {
+            files: &rows,
+            target,
+        };
+
+        let [_, kept, _] = overlay_lines(&[], &gaps, &StaleClosure::default(), scope("Spin"));
+        assert!(kept.is_some_and(|l| l.contains("Use -> Spin (src/App.cs:5")));
+
+        let [_, dropped, _] = overlay_lines(&[], &gaps, &StaleClosure::default(), scope("Other"));
+        assert_eq!(dropped, None);
+    }
+
+    /// Stands for: `caveat()`'s unscoped lines are the lines the line
+    /// builders give.
+    #[test]
+    fn test_overlay_lines_all_scope_matches_unscoped_lines() {
+        let decls = [hidden("K", "save", "src/K.java", 2)];
+        let gaps = [gap("Use", 5, "cs-extension-stale-edge")];
+        let stale = closure_with(&["go.mod"]);
+        assert_eq!(
+            overlay_lines(&decls, &gaps, &stale, LineScope::All),
+            [
+                unpaired_declarations_line(&decls),
+                call_gaps_line(&gaps),
+                stale_closure_line(&stale),
+            ]
+        );
+        assert_eq!(
+            overlay_lines(&[], &[], &StaleClosure::default(), LineScope::All),
+            [None, None, None]
+        );
+    }
+
+    fn warm_engine(dir: &Path) -> Engine {
+        let mut fx = ecp_core::graph_fixture::GraphFixture::new();
+        fx.func("lib.rs", "alpha");
+        let path = dir.join("graph.bin");
+        fs::write(&path, fx.into_bytes()).unwrap();
+        Engine::load_warm(&path).unwrap()
+    }
+
+    /// Stands for: an uncovered warm attach gives a miss the unverified note
+    /// with its reason and the reindex command; a covered one gives none.
+    #[test]
+    fn test_unverified_note_uncovered_warm_attach_names_reason_and_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut engine = warm_engine(dir.path());
+
+        let unchecked = engine.unverified_note().unwrap();
+        assert!(unchecked.contains("unverified"), "{unchecked}");
+
+        engine.set_head_coverage(HeadCoverage::Uncovered("`git diff` failed".into()));
+        let note = engine.unverified_note().unwrap();
+        assert!(note.contains("unverified") && note.contains("`git diff` failed"));
+        assert!(note.contains(REINDEX_COMMAND), "{note}");
+
+        engine.set_head_coverage(HeadCoverage::Covered { sources: vec![] });
+        assert_eq!(engine.unverified_reason(), None);
+        assert_eq!(engine.unverified_note(), None);
+        assert!(
+            engine.caveat().is_none(),
+            "a covered warm attach drops its line"
+        );
+    }
+
+    /// Stands for: the refresh covered `gone.rs` with a tombstone, then a
+    /// concurrent query that saw HEAD's graph Ready retired the entry before
+    /// this query built its view. The warm attach is then unverified, which
+    /// `find` answers as `found: null` on a miss. The control builds its view
+    /// before the retire and stays covered. Failed before: `Covered` was
+    /// trusted whatever the view held.
+    #[test]
+    fn test_unverified_reason_cover_retired_before_view_build_is_unverified() {
+        use crate::session::overlay_writer::{retire_entries, write_dirty_events};
+        use ecp_core::contracts::dirty_event::PathClass;
+        use ecp_core::session::{layout, DirtyEvents};
+
+        let dir = tempfile::tempdir().unwrap();
+        let (worktree, session) = (dir.path().join("wt"), dir.path().join("session"));
+        let (kept_dir, raced_dir) = (dir.path().join("kept"), dir.path().join("raced"));
+        for d in [&worktree, &session, &kept_dir, &raced_dir] {
+            fs::create_dir_all(d).unwrap();
+        }
+        let cap = SizeCap::BUILT_IN;
+        let meta = ecp_core::session::SessionMeta {
+            version: 1,
+            session_id: "sid".into(),
+            pid: None,
+            started_at: "2026-11-07T00:00:00Z".into(),
+            last_touched: "2026-11-07T00:00:00Z".into(),
+            base_sha: "0".repeat(40),
+            source_worktree: worktree.to_string_lossy().into_owned(),
+            overlay_version: 0,
+            watcher_pid: None,
+            last_drained_offset: 0,
+            agent_name: None,
+        };
+        ecp_core::session::SessionMeta::write_atomic(&session.join("session_meta.json"), &meta)
+            .unwrap();
+        DirtyEvents::write_atomic(
+            &layout::dirty_events_path(&session),
+            &DirtyEvents::empty(cap),
+        )
+        .unwrap();
+        let tombstone = [("gone.rs".to_string(), PathClass::SOURCE)];
+        write_dirty_events(&session, cap, &[], &[], &Default::default(), &tombstone).unwrap();
+        let covered = || HeadCoverage::Covered {
+            sources: vec!["gone.rs".to_string()],
+        };
+        let attach = |graph_dir: &Path| {
+            let mut engine =
+                warm_engine(graph_dir).with_overlay(session.clone(), worktree.clone(), Some(cap));
+            engine.set_head_coverage(covered());
+            engine
+        };
+
+        let kept = attach(&kept_dir);
+        assert_eq!(
+            kept.unverified_reason(),
+            None,
+            "the view holds the tombstone"
+        );
+
+        let raced = attach(&raced_dir);
+        let manifest = DirtyEvents::read(&layout::dirty_events_path(&session)).unwrap();
+        retire_entries(&session, &manifest.entries.into_iter().collect()).unwrap();
+        assert_eq!(raced.unverified_reason(), Some(COVER_NOT_IN_VIEW));
+        assert!(raced.unverified_note().is_some());
+        assert_eq!(
+            kept.unverified_reason(),
+            None,
+            "a built view keeps its verdict"
+        );
     }
 
     /// Stands for: the line names the kinds clean files keep as indexed and

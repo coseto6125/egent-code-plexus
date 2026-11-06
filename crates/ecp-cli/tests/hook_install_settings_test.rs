@@ -100,7 +100,110 @@ fn reinstalling_same_event_is_idempotent() {
     assert_eq!(count, 1, "duplicate entries should not accumulate");
     assert!(pre
         .iter()
-        .any(|entry| entry["matcher"] == "Grep|Glob|Bash|Edit|Write"));
+        .any(|entry| entry["matcher"] == "Bash|Edit|Write"));
+}
+
+/// Contract: the PostToolUse entry matches the Grep tool too, so a Grep
+/// call reaches the search delta; Bash, Edit and Write stay matched.
+#[test]
+fn test_install_post_tool_use_matcher_adds_grep_keeps_bash_edit_write() {
+    let tmp = TempDir::new().unwrap();
+    let settings_path = tmp.path().join("settings.json");
+    std::fs::write(&settings_path, "{}").unwrap();
+    let out = Command::new(ecp_bin())
+        .args([
+            "admin",
+            "install-hook",
+            "--claude-code",
+            "--events",
+            "post-tool-use",
+            "--settings-path",
+        ])
+        .arg(&settings_path)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let merged: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
+    let post = merged["hooks"]["PostToolUse"].as_array().unwrap();
+    assert_eq!(post.len(), 1);
+    assert_eq!(post[0]["matcher"], "Grep|Bash|Edit|Write");
+}
+
+/// Status reads an `ev` entry whose matcher is `stale` as missing, and
+/// `install-hook` rewrites it to the one entry with matcher `current`.
+fn assert_stale_matcher_reinstalls(ev: &str, camel: &str, stale: &str, current: &str) {
+    let tmp = TempDir::new().unwrap();
+    let settings_path = tmp.path().join("settings.json");
+    let stale = serde_json::json!({"hooks": {camel: [{
+        "matcher": stale,
+        "hooks": [{"type": "command",
+                   "command": format!("\"/old/ecp\" hook {ev} --claude-code"),
+                   "timeout": 5}],
+    }]}});
+    std::fs::write(&settings_path, stale.to_string()).unwrap();
+    let status = || {
+        let out = Command::new(ecp_bin())
+            .args(["admin", "status", "--claude-code", "--settings-path"])
+            .arg(&settings_path)
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        String::from_utf8(out.stdout).unwrap()
+    };
+    let line = |text: &str| {
+        text.lines()
+            .find(|l| l.trim_start().starts_with(ev))
+            .unwrap_or_else(|| panic!("no {ev} line: {text}"))
+            .to_owned()
+    };
+    assert!(line(&status()).contains("missing"), "{}", status());
+
+    let out = Command::new(ecp_bin())
+        .args([
+            "admin",
+            "install-hook",
+            "--claude-code",
+            "--events",
+            ev,
+            "--settings-path",
+        ])
+        .arg(&settings_path)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(line(&status()).contains("INSTALLED"), "{}", status());
+    let merged: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
+    let entries = merged["hooks"][camel].as_array().unwrap();
+    assert_eq!(entries.len(), 1, "{merged}");
+    assert_eq!(entries[0]["matcher"], current);
+}
+
+/// Contract: settings written by the previous release keep the PostToolUse
+/// matcher `Bash|Edit|Write`, which never reaches a Grep call.
+#[test]
+fn test_status_stale_post_tool_use_matcher_reads_missing_until_reinstall() {
+    assert_stale_matcher_reinstalls(
+        "post-tool-use",
+        "PostToolUse",
+        "Bash|Edit|Write",
+        "Grep|Bash|Edit|Write",
+    );
+}
+
+/// Contract: the PreToolUse entry no longer matches Grep or Glob. Its graph
+/// hits moved to the PostToolUse search delta, so a search would spawn a
+/// second hook process with nothing to say; a peer message drains at the
+/// next Bash, Edit, Write or prompt instead.
+#[test]
+fn test_status_stale_pre_tool_use_matcher_reads_missing_until_reinstall() {
+    assert_stale_matcher_reinstalls(
+        "pre-tool-use",
+        "PreToolUse",
+        "Grep|Glob|Bash|Edit|Write",
+        "Bash|Edit|Write",
+    );
 }
 
 #[test]
