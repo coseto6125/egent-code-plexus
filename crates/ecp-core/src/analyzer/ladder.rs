@@ -1463,6 +1463,27 @@ pub fn qualifier_file<F: QualifierFacts>(
         (Some(file), None) => file,
         _ => return None,
     };
+    // `a::f()` where the caller's file declares `mod a;`: a stray `a.rs`
+    // the name alone suggests is no file of `a` when the module tree
+    // places `a` elsewhere (a `#[path]` attribute, a manifest-less tree).
+    // The module tree tier then binds it.
+    let own_module = language == Language::Rust
+        && callee
+            .strip_prefix("self::")
+            .unwrap_or(callee)
+            .strip_prefix(qualifier)
+            .and_then(|rest| rest.strip_prefix("::"))
+            == Some(member)
+        && decls
+            .call_decls(source, qualifier)
+            .any(|(_, kind)| kind == NodeKind::Module);
+    if own_module
+        && facts
+            .rust_module_file(source, &format!("self::{qualifier}"))
+            .is_some_and(|placed| placed.as_ref() != file)
+    {
+        return None;
+    }
     match stem {
         StemFile::DeclaringMember if !declares_member(file) => None,
         _ => facts.stored_file(file),
@@ -2088,18 +2109,30 @@ fn anchored_mod_path(mod_path: &[String], segs: &[&str]) -> Option<Vec<String>> 
 /// `module_path` (`super::util`) names from `caller`, read from the tree of
 /// each target that declares the caller: `crate` in a module of
 /// `src/main.rs` is `main.rs`, and `super` in a `#[path]` file is the module
-/// that declares it. `None` when no target declares the caller, when one of
-/// them does not place the module, or when they place it at different files
-/// (a module both the lib and a bin declare). The caller then falls back to
-/// the file layout, as the index does.
+/// that declares it. A caller in no crate (a manifest-less tree) reads its
+/// own tree ([`module_tree_module`]), so a `#[path]` module is never
+/// guessed from the layout. `None` when no target declares a caller of a
+/// crate, when one of the targets does not place
+/// the module, or when they place it at different files (a module both the
+/// lib and a bin declare). The caller then falls back to the file layout,
+/// as the index does.
 pub fn anchored_module_file<F: ModuleTreeFacts>(
     facts: &F,
     caller: &str,
     module_path: &str,
 ) -> Option<F::File> {
+    let targets = facts.declaring_targets(caller);
+    // A caller in no crate roots a manifest-less tree; a file of a crate no
+    // target declares stays unplaced.
+    if targets.is_empty() {
+        return match facts.caller_crate(caller) {
+            Some(_) => None,
+            None => facts.module_file(module_tree_module(facts, caller, module_path)?),
+        };
+    }
     let segs: Vec<&str> = module_path.split("::").collect();
     let mut found: Option<F::File> = None;
-    for (target, mod_path) in facts.declaring_targets(caller) {
+    for (target, mod_path) in targets {
         let key = anchored_mod_path(&mod_path, &segs)?;
         let file = facts.target_module(target, &key)?;
         if found.as_ref().is_some_and(|f| f.as_ref() != file.as_ref()) {

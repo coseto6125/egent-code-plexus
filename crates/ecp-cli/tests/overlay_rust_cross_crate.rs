@@ -2746,11 +2746,11 @@ fn test_overlay_rust_path_attribute_and_inline_mod_without_manifest_match_reinde
         let files = crate_files(&layout, false);
         for edited in [lib.to_string(), one_line_edit(lib)] {
             let (reindex, overlay) = reindex_and_overlay(&files, "src/lib.rs", &edited, &["run"]);
+            assert_reindex_binds(&reindex, None, &expected, label);
             assert!(
                 !overlay.iter().any(|call| call.callee_file == "src/a.rs"),
                 "{label}: the overlay binds the stray layout file: {overlay:#?}"
             );
-            assert_reindex_binds(&reindex, None, &expected, label);
             assert_eq!(overlay, reindex, "{label}");
         }
     }

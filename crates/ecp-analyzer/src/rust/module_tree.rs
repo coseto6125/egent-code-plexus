@@ -250,20 +250,26 @@ impl RustWorkspaceModTree {
     /// `self` / `super`-anchored, e.g. `super::util`) names from
     /// `caller_file`, read from the tree of each target that declares the
     /// caller: `crate` in a module of `src/main.rs` is `main.rs`, and
-    /// `super` in a `#[path]` file is the module that declares it. `None`
-    /// when no target declares the caller, or one of them does not place
-    /// the module, or they place it at different files (a module both the
-    /// lib and a bin declare).
+    /// `super` in a `#[path]` file is the module that declares it, and with
+    /// no Cargo scope the caller's own loose tree. `None` when one of the
+    /// targets does not place the module, or they place it at different
+    /// files (a module both the lib and a bin declare).
     pub fn anchored_module_file(&self, caller_file: &str, module_path: &str) -> Option<&str> {
         let file = ladder::anchored_module_file(
             &self.facts(&self.workspace_canon),
             caller_file,
             module_path,
         )?;
-        // Every module file of a target is a key of `file_targets`.
+        // Every module file of a target is a key of `file_targets`, and
+        // every file of a loose tree one of `loose`.
         self.file_targets
             .get_key_value(file.as_str())
             .map(|(key, _)| key.as_str())
+            .or_else(|| {
+                self.loose
+                    .get_key_value(file.as_str())
+                    .map(|(key, _)| key.as_str())
+            })
     }
 
     /// The tree and module path of `caller_file` when exactly one target
