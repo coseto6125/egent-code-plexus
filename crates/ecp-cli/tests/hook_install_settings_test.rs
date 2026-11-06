@@ -103,6 +103,33 @@ fn reinstalling_same_event_is_idempotent() {
         .any(|entry| entry["matcher"] == "Grep|Glob|Bash|Edit|Write"));
 }
 
+/// Contract: the PostToolUse entry matches the Grep tool too, so a Grep
+/// call reaches the search delta; Bash, Edit and Write stay matched.
+#[test]
+fn test_install_post_tool_use_matcher_adds_grep_keeps_bash_edit_write() {
+    let tmp = TempDir::new().unwrap();
+    let settings_path = tmp.path().join("settings.json");
+    std::fs::write(&settings_path, "{}").unwrap();
+    let out = Command::new(ecp_bin())
+        .args([
+            "admin",
+            "install-hook",
+            "--claude-code",
+            "--events",
+            "post-tool-use",
+            "--settings-path",
+        ])
+        .arg(&settings_path)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let merged: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
+    let post = merged["hooks"]["PostToolUse"].as_array().unwrap();
+    assert_eq!(post.len(), 1);
+    assert_eq!(post[0]["matcher"], "Grep|Bash|Edit|Write");
+}
+
 #[test]
 fn uninstall_removes_only_specified_event() {
     let tmp = TempDir::new().unwrap();

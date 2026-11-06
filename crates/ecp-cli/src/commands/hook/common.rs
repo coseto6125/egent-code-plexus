@@ -1,8 +1,7 @@
 //! Shared utilities for Claude Code hook event handlers:
 //! stdin JSON envelope parsing, hookSpecificOutput emission, registry-
 //! aware index dir resolution, hook-local `.ecp/` state dir creation,
-//! and shell-quote stripping shared between PreToolUse (pattern
-//! extraction) and PostToolUse (git mutation detection).
+//! and shell-quote stripping for PostToolUse git-mutation detection.
 
 use ecp_core::registry::{resolve_home_ecp, RegistryFile};
 use ecp_core::EcpError;

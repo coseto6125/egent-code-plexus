@@ -3,7 +3,7 @@
 //! `println!` payloads silently drop the second.
 //!
 //! Trigger: any handler where two signals can be produced in one invocation
-//! (graph hits + peer drain in pre-tool-use; rules template + peer drain in
+//! (edit flow + peer drain in pre-tool-use; rules template + peer drain in
 //! session-start; rebuild marker + peer drain in user-prompt-submit).
 
 use serde_json::Value;

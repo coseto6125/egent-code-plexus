@@ -39,6 +39,6 @@ High-signal, with five narrow failure modes. Spot the tell, cross-check, trust t
 
 - **`found:false` + a `result` field (or `l2.warm-attach`/`note:` on stderr)** → provisional, not a real miss: HEAD's graph isn't built yet, a sibling commit's is attached. Rerun or `ecp admin index --force --repo .`. No `result` field → trustworthy — and a trustworthy miss means *report "doesn't exist"*, never synthesize a caller list / blast radius for a symbol ecp couldn't find.
 - **`ecp impact` caller counts are a lower bound** → the resolver suppresses ambiguous bare calls to common names. Suspiciously low count → `grep` the call sites before trusting a refactor's blast radius.
-- **The hook's `ecp graph hits` block lists direct (d=1) callers only** → a preview, not the blast radius. Before a refactor, run the `ecp impact` command it prints.
+- **The search hook's `ecp graph delta` block names only the direct (d=1) caller files your search output missed** → no block means the output showed every direct caller file, not the blast radius. Before a refactor, run `ecp impact --target <name> --direction upstream`.
 - **Known gaps, by design** → function-body locals (dropped), Java `record`, PHP `trait use`, C# `operator`/`event`/`indexer`. `ecp summary` lists per-repo BlindSpots.
 - **Surprising output has a root cause** → read the definition / reindex / `grep` before calling it a bug. Doc-comment inference ≠ verification; a passing unit test ≠ the pipeline uses that path.
