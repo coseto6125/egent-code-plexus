@@ -28,13 +28,16 @@
 use super::path_literals::{
     build_raw_path_literal, enclosing_symbol_and_owner_pub, strip_swift_string_value,
 };
+use super::receiver_lower::SwiftLowering;
 use crate::calls::{
     attach_to_enclosing, heads_same_kind_parent, node_range, range_width, reference_function,
     start_pos, Pos, PosRange,
 };
-use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
+use crate::receiver::{analyze_file, FileReceivers, Receiver};
+use ecp_core::analyzer::types::{BlindSpot, CallSite, RawNode, RawPathLiteral, RawSqlRef};
 use ecp_core::graph::NodeKind;
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use tree_sitter::Node;
 
 /// Per-function-scope local var → type map, plus the enclosing class /
@@ -51,9 +54,18 @@ pub struct SwiftBindings {
     fn_scopes: Vec<FnScope>,
     /// Class/struct/extension scopes: (span_start, span_end, (type_name, superclass_opt)).
     class_scopes: Vec<ClassScope>,
+    /// The receiver states the receiver core solved; `fn_scopes` answers only
+    /// a receiver the core did not track (a function it left to this path).
+    receivers: FileReceivers,
 }
 
 impl SwiftBindings {
+    /// The receiver-budget blind spots of the file, left behind once.
+    #[allow(dead_code)] // the parser hook appends them once it passes `cx.path`
+    pub fn take_blind_spots(&mut self) -> Vec<BlindSpot> {
+        std::mem::take(&mut self.receivers.blind_spots)
+    }
+
     fn lookup_local(&self, pos: Pos, var: &str) -> Option<&str> {
         let mut best: Option<&str> = None;
         let mut best_width = (u32::MAX, i64::MAX);
@@ -106,6 +118,13 @@ impl SwiftBindings {
 
 /// Walk the AST collecting class scopes and per-function local-type maps.
 pub fn collect_bindings(root: Node<'_>, source: &[u8]) -> SwiftBindings {
+    collect_bindings_at(root, source, Path::new(""))
+}
+
+/// [`collect_bindings`] for the file at `path`, which the receiver-budget
+/// blind spots quote.
+#[allow(dead_code)] // the parser hook calls it once it passes `cx.path`
+pub fn collect_bindings_at(root: Node<'_>, source: &[u8], path: &Path) -> SwiftBindings {
     let mut fn_scopes: Vec<FnScope> = Vec::new();
     let mut class_scopes: Vec<ClassScope> = Vec::new();
 
@@ -142,6 +161,7 @@ pub fn collect_bindings(root: Node<'_>, source: &[u8]) -> SwiftBindings {
     SwiftBindings {
         fn_scopes,
         class_scopes,
+        receivers: analyze_file(&SwiftLowering, &(), root, source, path),
     }
 }
 
@@ -468,9 +488,13 @@ fn method_value(navigation: Node<'_>, source: &[u8], bindings: &SwiftBindings) -
     let pos = start_pos(navigation);
     let ty = match target.kind() {
         "self_expression" => bindings.enclosing_class(pos)?.0.as_str(),
-        "simple_identifier" => bindings
-            .lookup_local(pos, target.utf8_text(source).ok()?)
-            .filter(|ty| !ty.is_empty())?,
+        "simple_identifier" => match bindings.receivers.receiver_at(target) {
+            Some(Receiver::Known(ty)) => &*ty.text,
+            Some(Receiver::Unknown(_)) => return None,
+            None => bindings
+                .lookup_local(pos, target.utf8_text(source).ok()?)
+                .filter(|ty| !ty.is_empty())?,
+        },
         _ => return None,
     };
     Some(format!("{ty}.{member}"))
@@ -544,6 +568,9 @@ fn swift_callee_name(
                 },
                 "simple_identifier" => {
                     let var = recv.utf8_text(source).ok()?;
+                    if let Some(receiver) = bindings.receivers.receiver_at(recv) {
+                        return Some(receiver.call_entry(method));
+                    }
                     match (var, bindings.lookup_local(pos, var)) {
                         ("Self", None) => match enclosing() {
                             Some((cls, _)) => format!("{cls}.{method}"),
