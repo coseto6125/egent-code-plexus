@@ -4,8 +4,9 @@ on:
     types: [opened, synchronize, reopened]
   # `push` to main only warms the caches below; it never analyses or posts a
   # status. ecp/cross-pr-conflict is anchored to the PR HEAD commit and
-  # computed against merge-base, so a base-branch update doesn't invalidate
-  # it. Mergify re-runs its speculative trial natively on base movement.
+  # computed against merge-base. Nothing re-runs it when the base branch or a
+  # sibling PR moves: a `pending` status stays until the PR is pushed again
+  # or the job is re-run.
   #
   # Why the warm run exists: a cache saved by a pull_request run is scoped to
   # refs/pull/<n>/merge, which no other PR can restore. Without a save on
@@ -53,8 +54,9 @@ jobs:
           # ("Merge <PR head> into <base tip>"), so ^1 is the base tip and
           # ^2 the PR head. The next step names both by the event payload
           # instead of by parent order.
-          # fetch-depth: 0 pulls full history reachable from this merge
-          # ref, which is exactly { PR head ancestors ∪ base tip ancestors }.
+          # fetch-depth: 0 pulls the full history of every branch and tag
+          # plus this merge ref, so { PR head ancestors ∪ base tip ancestors }
+          # is local.
           # That gives us everything we need locally — no follow-up
           # `git fetch origin <base>` (which triggers the runner's
           # credential-helper flake: "could not read Username … ENXIO").
@@ -217,4 +219,4 @@ jobs:
       - name: Log analysis failure (non-blocking)
         if: github.event_name == 'pull_request' && steps.analyze.outcome != 'success'
         run: |
-          echo "::warning::ecp pr-analyze failed — PR falls to default Mergify queue"
+          echo "::warning::ecp pr-analyze failed — no ecp labels or cross-pr-conflict status for this run"
