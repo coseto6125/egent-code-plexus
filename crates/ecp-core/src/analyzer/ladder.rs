@@ -38,6 +38,7 @@
 //! B §3.2 table ([`Resolution::call_fallbacks_allowed`]). Each side answers
 //! through its [`CallFacts`].
 
+use crate::analyzer::admission::{language_reaches, Gate, Site, SiteForm};
 use crate::analyzer::import_binding::{
     extension_retry, fqn_language, import_binding, import_family, import_member_fallback,
     may_suppress, module_head, retry_name, MemberOwner,
@@ -173,7 +174,9 @@ pub struct CallPick<'c> {
 /// owner ([`prefer_owned`], with `heritage` unless the receiver is
 /// untyped), or to a free function when it reaches no member
 /// ([`prefer_free`]). `Unknown` when the file declares no such name, or
-/// holds several unrelated owners of it: the later tiers decide.
+/// holds several unrelated owners of it: the later tiers decide. A
+/// declaration the site cannot reach ([`crate::analyzer::admission`]) neither picks nor
+/// binds, so the later tiers decide in its place.
 pub fn same_file<F: ResolveFacts>(
     facts: &F,
     file: &str,
@@ -183,9 +186,27 @@ pub fn same_file<F: ResolveFacts>(
     heritage: &[String],
 ) -> Resolution {
     let free_only = call.is_some_and(|call| call.free_only);
+    let form = SiteForm::of(name, call);
+    // Only these two forms meet a rule a declaration of the caller's own
+    // file can fail, so the other sites skip the file-meta lookup.
+    let gate = matches!(form, SiteForm::Bare | SiteForm::UntypedMember).then(|| {
+        Gate::new(
+            facts,
+            Site {
+                caller: facts.file_meta(file),
+                caller_file: file,
+                caller_owner: call.and_then(|call| call.owner),
+                heritage,
+                form,
+                name,
+            },
+        )
+    });
+    let gate = gate.as_ref();
+    let admits = move |id: u32| gate.is_none_or(|gate| gate.admit_in_file(id).is_ok());
     let decls = facts
         .call_decls(file, name)
-        .filter(move |&(_, kind)| !free_only || kind != NodeKind::Method);
+        .filter(move |&(id, kind)| (!free_only || kind != NodeKind::Method) && admits(id));
     let Some(pick) = pick_call(decls, target) else {
         return Resolution::Unknown;
     };
@@ -211,7 +232,7 @@ pub fn same_file<F: ResolveFacts>(
     // A C# explicit interface implementation is no member a bare name
     // reaches: a later tier takes the call to an inherited one.
     match hit.filter(|&id| {
-        (!free_only || facts.kind(id) != NodeKind::Method) && !facts.hidden_member(id)
+        (!free_only || facts.kind(id) != NodeKind::Method) && !facts.hidden_member(id) && admits(id)
     }) {
         Some(id) => Resolution::bound(id, Tier::SameFile),
         None => Resolution::Unknown,
@@ -1057,6 +1078,11 @@ pub fn qualifier_file<F: QualifierFacts>(
     let impl_receiver =
         language == Language::Rust && callee.is_some_and(|callee| !callee.contains("::"));
     let declares_member = |file: &str| decls.first_decl_in_file(file, member, target).is_some();
+    // An import or a file name never reaches a file of a language the
+    // caller's code cannot name (`from cls import Cls` and `cls.ts`): such a
+    // candidate is skipped and the probe goes on, whatever the extension
+    // order put first.
+    let reaches = |file: &str| language_reaches(caller, decls.file_meta(file));
     let agrees = |file: &str| {
         callee.map_or(Some(true), |callee| {
             facts.rust_path_agrees(source, callee, qualifier, file, imports)
@@ -1088,7 +1114,7 @@ pub fn qualifier_file<F: QualifierFacts>(
         // module the qualifier stands for, so it keeps the candidate probe.
         if exported == "*" && import_member_fallback(language) && !fqn_language(language) {
             match facts.import_module(source, &import.source, language) {
-                Module::Unique(file) => return Some(file),
+                Module::Unique(file) if reaches(file.as_ref()) => return Some(file),
                 _ => continue,
             }
         }
@@ -1097,7 +1123,7 @@ pub fn qualifier_file<F: QualifierFacts>(
         if exported == "*" && is_ecmascript(language) {
             let mut hit = None;
             facts.for_each_candidate(source, &import.source, |candidate| {
-                let found = facts.exports(candidate, member, target);
+                let found = facts.exports(candidate, member, target) && reaches(candidate);
                 if found {
                     hit = facts.stored_file(candidate);
                 }
@@ -1134,7 +1160,8 @@ pub fn qualifier_file<F: QualifierFacts>(
         let mut hit = None;
         facts.for_each_candidate(source, &import.source, |candidate| {
             let found = facts.holds_import(candidate, exported, default_import)
-                && declares_member(candidate);
+                && declares_member(candidate)
+                && reaches(candidate);
             if found {
                 hit = facts.stored_file(candidate);
             }
@@ -1166,7 +1193,7 @@ pub fn qualifier_file<F: QualifierFacts>(
     let root = decls.crate_root(source);
     let mut named = facts
         .files_by_stem(qualifier)
-        .filter(|&file| decls.crate_root(file) == root);
+        .filter(|&file| decls.crate_root(file) == root && reaches(file));
     let file = match (named.next(), named.next()) {
         (Some(file), None) => file,
         _ => return None,

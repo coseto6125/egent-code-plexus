@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 use serde::Serialize;
 
+use crate::analyzer::c_family;
 use crate::analyzer::import_binding::{
     fqn_language, import_member_fallback, plain_binding, MemberOwner,
 };
@@ -186,14 +187,27 @@ pub trait NameTierFacts {
     ) -> TypeMember;
     /// Tier 3 for `name` ([`global_tier`] over the side's candidates). A
     /// call site admits the nearest copy; a bare `f()`
-    /// ([`CallPick::free_only`]) never reaches a member.
+    /// ([`CallPick::free_only`]) never reaches a member. The side passes
+    /// its candidates through the admission gate
+    /// ([`crate::analyzer::admission::Gate`]) of the site that `call`, the
+    /// caller's `heritage` and `name` describe, ahead of any count.
     fn global(
         &self,
         name: &str,
         imports: &[RawImport],
         target: ResolveTarget,
         call: Option<CallPick<'_>>,
+        heritage: &[String],
     ) -> Resolution;
+    /// The declaration a C / C++ caller reaches through the bodiless
+    /// declaration `id` that a tier bound: the one definition that settles
+    /// it ([`c_family::canonical_declaration`] over the side's same-named
+    /// candidates), else `id`. A call and a function value then reach one
+    /// declaration (`ns::cb_qual(v)` and `&ns::cb_qual`). [`name_tiers`]
+    /// asks only for a C / C++ caller.
+    fn canonical_c_declaration(&self, id: u32) -> u32 {
+        id
+    }
     /// The file the declaration `id` lives in.
     fn decl_file(&self, id: u32) -> Option<&str>;
     /// Whether the side keeps a decision dump: [`Self::record`] runs only
@@ -274,7 +288,27 @@ impl<M: Into<Arc<str>>> HitBarrel<M> {
 /// 4. The caller's bases ([`ladder::heritage`]), then the wildcard imports
 ///    an explicit import left open ([`ladder::wildcard_member`]).
 /// 5. Tier 3 ([`NameTierFacts::global`]).
+///
+/// For a C / C++ caller, a bodiless declaration any tier binds gives way to
+/// the definition that settles it ([`NameTierFacts::canonical_c_declaration`]).
 pub fn name_tiers<F: NameTierFacts>(
+    facts: &F,
+    name: &str,
+    imports: &[RawImport],
+    policy: TierPolicy<'_>,
+) -> Option<TierHit<Barrel<F>>> {
+    let hit = tiers(facts, name, imports, policy)?;
+    if !c_family::is_c_family(facts.language()) {
+        return Some(hit);
+    }
+    Some(TierHit {
+        id: facts.canonical_c_declaration(hit.id),
+        ..hit
+    })
+}
+
+/// [`name_tiers`] before the C / C++ canonical declaration.
+fn tiers<F: NameTierFacts>(
     facts: &F,
     name: &str,
     imports: &[RawImport],
@@ -512,7 +546,7 @@ pub fn name_tiers<F: NameTierFacts>(
     }
 
     facts
-        .global(name, imports, target, call)
+        .global(name, imports, target, call, heritage)
         .edge()
         .map(Into::into)
 }

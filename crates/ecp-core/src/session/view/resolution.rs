@@ -10,7 +10,12 @@ use super::{
     GAP_CS_ACCESS_DIRTY_TARGET, GAP_CS_EXTENSION_DIRTY_DECLARATION, GAP_CS_PARTIAL_BARE_CALL,
     TYPE_ANNOTATION_REASON,
 };
-use crate::analyzer::c_family::{c_family_field, is_c_family, CCallable};
+use crate::analyzer::admission::{
+    bare_call_reaches_members, language_reaches, Gate, Site, SiteForm,
+};
+use crate::analyzer::c_family::{
+    c_family_field, canonical_declaration, is_c_family, may_be_declaration, CCallable,
+};
 use crate::analyzer::csharp_access::{self, CallAccess};
 use crate::analyzer::csharp_extension::{self, ReceiverSite};
 use crate::analyzer::decorates::{decorates_edges, DECORATES_REASON};
@@ -156,10 +161,21 @@ type NamedImportCache =
     FxHashMap<(usize, ResolveTarget), FxHashMap<Box<str>, Option<reexport::NamedImport>>>;
 /// Every input of the overlay's Tier 3 ([`OverlayTiers`]) that varies
 /// within one view: (dirty file ordinal, its imports slice, callee, the
-/// kinds it weighs, whether a call site admits the nearest copy, and
-/// whether a bare call reaches no member).
-type GlobalCache =
-    FxHashMap<(usize, (usize, usize), Box<str>, ResolveTarget, bool, bool), Resolution>;
+/// kinds it weighs, whether a call site admits the nearest copy, whether a
+/// bare call reaches no member, and what the admission gate reads of the
+/// site: the caller's owner, its heritage slice and the site form).
+type GlobalKey = (
+    usize,
+    (usize, usize),
+    Box<str>,
+    ResolveTarget,
+    bool,
+    bool,
+    Option<Box<str>>,
+    (usize, usize),
+    SiteForm,
+);
+type GlobalCache = FxHashMap<GlobalKey, Resolution>;
 
 /// The facts the shared import rules ([`reexport`]) read over the overlay:
 /// the base graph, with each dirty file's fresh parse in place of its
@@ -1659,7 +1675,11 @@ impl<'a> OverlayFacts<'a> {
             let mut in_project = false;
             let mut hit = None;
             self.for_each_candidate(source, &import.source, &mut |candidate| {
-                if !self.has_file(candidate) {
+                // The index's rule: a file of a language the import cannot
+                // name is no candidate.
+                if !self.has_file(candidate)
+                    || !language_reaches(caller, self.scope.file_meta(candidate))
+                {
                     return true;
                 }
                 in_project = true;
@@ -3003,13 +3023,20 @@ impl<'v, 'a> NameTierFacts for OverlayTiers<'v, 'a, '_> {
         imports: &[RawImport],
         target: ResolveTarget,
         call: Option<CallPick<'_>>,
+        heritage: &[String],
     ) -> Resolution {
         let facts = self.members.facts;
         let (nearest, free_only) = (call.is_some(), call.is_some_and(|call| call.free_only));
-        // The key holds all this lookup reads of `call`: `global_tier` reads
-        // only `call.is_some()`, and this method only `free_only`. A
-        // `CallPick` field either one starts to read must join the key, or
-        // two call sites that differ in it share one memoized answer.
+        let form = SiteForm::of(name, call);
+        let owner = call.and_then(|call| call.owner);
+        // The key holds all this lookup reads of `call` and the site:
+        // `global_tier` reads only `call.is_some()`, this method `free_only`,
+        // and the admission gate the form, and the owner and the heritage
+        // where a rule of that form reads them. A `CallPick` field or a gate
+        // input any of them starts to read must join the key, or two call
+        // sites that differ in it share one memoized answer.
+        let owner_rule = form == SiteForm::Bare && bare_call_reaches_members(self.caller.language);
+        let reads_owner = owner_rule || form == SiteForm::UntypedMember;
         let key = (
             self.file_ord,
             (imports.as_ptr() as usize, imports.len()),
@@ -3017,6 +3044,13 @@ impl<'v, 'a> NameTierFacts for OverlayTiers<'v, 'a, '_> {
             target,
             nearest,
             free_only,
+            owner.filter(|_| reads_owner).map(Box::<str>::from),
+            if owner_rule {
+                (heritage.as_ptr() as usize, heritage.len())
+            } else {
+                (0, 0)
+            },
+            form,
         );
         if let Some(&hit) = facts.global.borrow().get(&key) {
             return hit;
@@ -3044,16 +3078,30 @@ impl<'v, 'a> NameTierFacts for OverlayTiers<'v, 'a, '_> {
             .map(Vec::as_slice)
             .unwrap_or(&[]);
         let clean_candidates = clean_base(graph, target, self.dirty_base, name);
+        let gate = Gate::new(
+            facts,
+            Site {
+                caller: self.caller,
+                caller_file: self.source(),
+                caller_owner: owner,
+                heritage,
+                form,
+                name,
+            },
+        );
         // Read up to three times by the ladder (the pick, the nearest copy, the
         // count), and only on a memo miss. The pick stops at the second
         // admitted candidate, so a common name meets few of its base metas.
-        let (clean, base_meta, admits) = (clean_candidates.as_slice(), &base_meta, &admits);
+        let (clean, base_meta, admits, gate) =
+            (clean_candidates.as_slice(), &base_meta, &admits, &gate);
         let candidates = move || {
-            clean
-                .iter()
-                .map(move |&idx| (idx, base_meta(idx)))
-                .chain(overlay_candidates.iter().copied())
-                .filter(admits)
+            gate.admitted(
+                clean
+                    .iter()
+                    .map(move |&idx| (idx, base_meta(idx)))
+                    .chain(overlay_candidates.iter().copied())
+                    .filter(admits),
+            )
         };
         let hit = match c_family_field(facts, self.caller, self.source(), candidates, |id| {
             facts.c_callable(id)
@@ -3075,6 +3123,34 @@ impl<'v, 'a> NameTierFacts for OverlayTiers<'v, 'a, '_> {
             Some(offset) => Some(&*self.nodes[offset as usize].rel_path),
             None => base_path(self.graph, id),
         }
+    }
+
+    /// The index's candidates are its global name table's callables named
+    /// like `id`: here the clean base ones and the overlay's
+    /// ([`OverlayFacts::global_named`]), with the metas the index reads.
+    fn canonical_c_declaration(&self, id: u32) -> u32 {
+        let facts = self.members.facts;
+        if !may_be_declaration(facts, id, facts.c_callable(id)) {
+            return id;
+        }
+        let Some(name) = TypeFacts::name_of(facts, id) else {
+            return id;
+        };
+        let named = facts.global_named(name);
+        canonical_declaration(
+            facts,
+            self.caller,
+            self.source(),
+            id,
+            || {
+                named
+                    .iter()
+                    .copied()
+                    .filter(|&candidate| facts.kind_of(candidate).is_callable())
+                    .map(|candidate| (candidate, facts.meta_of(candidate)))
+            },
+            |candidate| facts.c_callable(candidate),
+        )
     }
 }
 
@@ -6301,7 +6377,7 @@ pub(super) fn resolve_edges(
                         name_tiers(&tiers(), raw, &file.imports, policy).map(TierHit::edge)
                     }
                     FieldRead::Global => tiers()
-                        .global(raw, &file.imports, ResolveTarget::Field, None)
+                        .global(raw, &file.imports, ResolveTarget::Field, None, &[])
                         .edge(),
                 };
                 let Some((target, confidence)) = hit else {

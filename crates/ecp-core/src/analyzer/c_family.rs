@@ -467,9 +467,43 @@ where
     Some(field)
 }
 
-/// The definition that settles the prototype `id` for this caller when
+/// A member a class body in a header declares: the parse marks no in-class
+/// declaration bodiless (`FLAG_EXTERN` is a prototype's), so a header method
+/// stands for one. Only an out-of-line definition in a source file settles
+/// it (`void ns::Inst::cb_ns(int &x) {}`): a second body of one member is an
+/// ODR violation, so such a pair is a declaration and its definition.
+fn member_declaration<'f, F: PickFacts + ?Sized>(
+    facts: &'f F,
+    callable: &impl Fn(u32) -> Option<CCallable>,
+    id: u32,
+    language: Language,
+) -> Option<Decl<'f>> {
+    if facts.kind(id) != NodeKind::Method || !facts.file_of(id).is_some_and(is_header_file) {
+        return None;
+    }
+    declaration(facts, callable, id, language)
+}
+
+/// Whether `id` may be a declaration [`canonical_declaration`] replaces: a
+/// prototype, or a method a header declares. The cheap test a side runs
+/// before it gathers the candidates.
+pub fn may_be_declaration<F: PickFacts + ?Sized>(
+    facts: &F,
+    id: u32,
+    callable: Option<CCallable>,
+) -> bool {
+    callable.is_some_and(|callable| match facts.kind(id) {
+        NodeKind::Function => callable.body == CBody::Declaration,
+        NodeKind::Method => facts.file_of(id).is_some_and(is_header_file),
+        _ => false,
+    })
+}
+
+/// The definition that settles the declaration `id` for this caller when
 /// exactly one does; else `id`. A call and a function value then reach one
-/// declaration.
+/// declaration. `id` is a prototype, which the Tier 3 field rules settle, or
+/// a header's in-class member declaration ([`member_declaration`]), which
+/// only a definition of the same owner outside every header settles.
 pub fn canonical_declaration<F, I>(
     facts: &F,
     caller: FileMeta,
@@ -482,20 +516,50 @@ where
     F: PickFacts + ?Sized,
     I: Iterator<Item = (u32, FileMeta)>,
 {
-    let Some(declared) = candidates()
+    if !is_c_family(caller.language) {
+        return id;
+    }
+    let Some(language) = candidates()
         .find(|&(candidate, _)| candidate == id)
-        .and_then(|(_, meta)| prototype(facts, &callable, id, meta.language))
+        .map(|(_, meta)| meta.language)
     else {
         return id;
     };
-    let Some(field) = field_entries(facts, caller, caller_file, &candidates, &callable) else {
+    if let Some(declared) = prototype(facts, &callable, id, language) {
+        let Some(field) = field_entries(facts, caller, caller_file, &candidates, &callable) else {
+            return id;
+        };
+        return only_or(
+            id,
+            field.into_iter().filter_map(|(candidate, _, language)| {
+                definition(facts, &callable, candidate, language)
+                    .filter(|def| may_declare(&declared, def))
+                    .map(|_| candidate)
+            }),
+        );
+    }
+    let Some(declared) = member_declaration(facts, &callable, id, language) else {
         return id;
     };
-    let mut settling = field.iter().filter_map(|&(candidate, _, language)| {
-        definition(facts, &callable, candidate, language)
+    // The owner test first: it is a string compare, and most same-named
+    // candidates belong to other types.
+    only_or(
+        id,
+        candidates().filter_map(|(candidate, meta)| {
+            (candidate != id
+                && facts.owner(candidate) == declared.owner
+                && caller.admits(meta)
+                && !facts.file_of(candidate).is_some_and(is_header_file))
+            .then(|| definition(facts, &callable, candidate, meta.language))
+            .flatten()
             .filter(|def| may_declare(&declared, def))
             .map(|_| candidate)
-    });
+        }),
+    )
+}
+
+/// The one item of `settling`, else `id`.
+fn only_or(id: u32, mut settling: impl Iterator<Item = u32>) -> u32 {
     match (settling.next(), settling.next()) {
         (Some(definition), None) => definition,
         _ => id,
