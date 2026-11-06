@@ -287,6 +287,71 @@ fn test_find_warm_attach_git_diff_fails_returns_unverified_miss() {
     );
 }
 
+/// Every `l1/fragments` directory under the cache root.
+fn fragment_dirs(dir: &Path) -> Vec<std::path::PathBuf> {
+    let Ok(read) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    read.flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .flat_map(|p| {
+            let here = (p.file_name().is_some_and(|n| n == "fragments")
+                && p.parent()
+                    .and_then(Path::file_name)
+                    .is_some_and(|n| n == "l1"))
+            .then(|| p.clone());
+            here.into_iter().chain(fragment_dirs(&p))
+        })
+        .collect()
+}
+
+/// A refresh whose overlay write fails covers nothing: the miss is no
+/// answer, and the reason names the write. Red before the fix: the write
+/// error was logged and dropped, so the cover read as complete and `omega`,
+/// on disk but in no fragment, answered `found: false`.
+#[cfg(unix)]
+#[test]
+fn test_find_warm_attach_overlay_write_fails_returns_unverified_miss() {
+    use std::os::unix::fs::PermissionsExt;
+    let session = [("ECP_SESSION_ID", "warm-write-fails")];
+    let (repo, home) = indexed(&[("lib.rs", "pub fn alpha() {}\n")]);
+    add_beta_commit(repo.path());
+    assert_eq!(
+        find(repo.path(), home.path(), "beta", &session)["found"],
+        true,
+        "setup: the first refresh writes the overlay"
+    );
+    let dirs = fragment_dirs(&home.path().join(".ecp"));
+    assert!(!dirs.is_empty(), "setup: no overlay fragments dir");
+    let mode = |m| std::fs::Permissions::from_mode(m);
+    for dir in &dirs {
+        std::fs::set_permissions(dir, mode(0o555)).unwrap();
+    }
+    if std::fs::write(dirs[0].join("probe"), b"").is_ok() {
+        eprintln!("skipped: a read-only directory is writable here (root)");
+        return;
+    }
+    std::fs::write(
+        repo.path().join("lib.rs"),
+        "pub fn alpha() {}\npub fn beta() {}\npub fn omega() {}\n",
+    )
+    .unwrap();
+
+    let payload = find(repo.path(), home.path(), "omega", &session);
+    for dir in &dirs {
+        std::fs::set_permissions(dir, mode(0o755)).unwrap();
+    }
+    assert_unverified_miss(&payload);
+    assert!(
+        payload["reason"]
+            .as_str()
+            .unwrap()
+            .contains("overlay write failed"),
+        "{payload}"
+    );
+}
+
 /// The text form of an unverified miss says so on its first line, then the
 /// caveat.
 #[test]

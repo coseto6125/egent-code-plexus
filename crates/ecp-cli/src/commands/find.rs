@@ -4,8 +4,8 @@
 //!   ranked by category priority (Source > Document > Config > Test) then
 //!   caller count. Output: flat `{found, matches[], status}`. Designed
 //!   for "where is X defined?" queries where the LLM already knows the
-//!   exact symbol name. A miss on a pattern that is no symbol name falls
-//!   back to `bm25` (`fallback_from: "exact"`).
+//!   exact symbol name. A miss on a prose pattern (whitespace between two
+//!   word characters) falls back to `bm25` (`fallback_from: "exact"`).
 //! * `fuzzy` — substring match with the same ranking + output shape as
 //!   `exact`. `--fuzzy` is a shorthand that infers this mode.
 //! * `bm25` — BM25 lexical ranking via the persisted tantivy index
@@ -63,9 +63,11 @@ const MULTI_CAP: usize = TOP_K * 5;
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FindMode {
     /// Exact-name match. Single most-likely definition by default;
-    /// `--all` returns all exact matches. A miss on a pattern that is no
-    /// symbol name (whitespace or punctuation) runs `bm25` on the same
-    /// pattern; that payload carries `mode: bm25` and `fallback_from: exact`.
+    /// `--all` returns all exact matches. A miss on a prose pattern
+    /// (whitespace between two word characters, as in `parse config`) runs
+    /// `bm25` on the same pattern; that payload carries `mode: bm25` and
+    /// `fallback_from: exact`. A name such as `save!`, `#count` or
+    /// `kebab-name` misses as `found: false`.
     Exact,
     /// Substring match — same ranking + output shape as `exact`. Use
     /// when the precise name is unknown but a fragment is.
@@ -85,8 +87,8 @@ pub struct FindArgs {
     pub pattern: Option<String>,
 
     /// Lookup mode: `exact` (default), `fuzzy`, or `bm25`. An `exact` miss on
-    /// a pattern with whitespace or punctuation falls back to `bm25` and says
-    /// so with `mode: bm25` and `fallback_from: exact`.
+    /// a pattern with whitespace between two word characters falls back to
+    /// `bm25` and says so with `mode: bm25` and `fallback_from: exact`.
     #[arg(long, value_enum, default_value_t = FindMode::Exact)]
     pub mode: FindMode,
 
@@ -698,15 +700,22 @@ fn exact_candidates(
     (rows, ambiguity)
 }
 
-/// Whether an exact miss on `pattern` falls back to bm25 (F1): the pattern
-/// holds text other than whitespace, and a character outside a symbol name
-/// and the target grammar's `.`, `::` and `@line` separators.
+/// Whether an exact miss on `pattern` falls back to bm25: the pattern is
+/// prose, with whitespace between two word characters (alphanumeric or
+/// `_`). Punctuation alone never falls back: Ruby `save!` and `empty?`, JS
+/// `#count` and CSS or HCL `kebab-name` are declaration names, and a miss on
+/// one is the answer "no declaration has this name".
 fn falls_back_to_bm25(pattern: &str) -> bool {
-    let name_char = |c: char| c.is_alphanumeric() || matches!(c, '_' | '$' | '.' | ':' | '@');
-    !pattern.trim().is_empty() && !pattern.chars().all(name_char)
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    match (pattern.find(word), pattern.rfind(word)) {
+        (Some(first), Some(last)) => pattern[first..last].contains(char::is_whitespace),
+        _ => false,
+    }
 }
 
-/// F1: bm25 over the exact query's pattern, with its `--kind` and `--file`.
+/// bm25 over the exact query's pattern, with its `--kind` and `--file`. The
+/// exact lookup answered nothing, so on a warm attach the overlay did not
+/// bring to HEAD the payload is unverified, whatever bm25 finds.
 fn run_exact_fallback(
     args: &FindArgs,
     engine: &Engine,
@@ -715,7 +724,10 @@ fn run_exact_fallback(
 ) -> Result<(), EcpError> {
     let search = SingleSearch {
         file_filter: args.file.as_deref(),
-        fallback_from: Some("exact"),
+        fallback: Some(Fallback {
+            from: "exact",
+            unverified: engine.unverified_reason(),
+        }),
         ..SingleSearch::new(pattern, args.kind.as_deref())
     };
     run_single(search, format, engine, |buckets| {
@@ -744,7 +756,7 @@ fn run_exact_or_fuzzy(args: FindArgs, engine: &Engine, mode: FindMode) -> Result
     let mut tests_excluded = 0u32;
     let mut ambiguity = None;
     let mut candidates: Vec<Row> = Vec::new();
-    // The name a miss reports hidden declarations for.
+    // The name whose hidden declarations the caveat scope reports.
     let mut miss_name = pattern.to_string();
     if mode == FindMode::Exact {
         let request = match target_request(pattern, None, file_filter) {
@@ -832,23 +844,39 @@ fn run_exact_or_fuzzy(args: FindArgs, engine: &Engine, mode: FindMode) -> Result
     let unverified = (mode == FindMode::Exact && !found)
         .then(|| engine.unverified_reason())
         .flatten();
-    // The rows' files, and on a miss the files of the hidden declarations
-    // of that name: the unpaired-declarations line speaks for the miss.
-    let hidden_files = (!found)
-        .then(|| view.map(OverlayView::hidden_declarations))
-        .flatten()
+    // Every file the payload names: the rows and the ambiguity candidates,
+    // plus the files of the hidden declarations the pattern names (by name
+    // in exact mode, by substring in fuzzy). A hidden declaration is absent
+    // from the rows, so its line speaks for a hit as well as for a miss: the
+    // top row may lie in another file while the hidden overloads lose their
+    // callers.
+    let candidate_files = ambiguity
+        .iter()
+        .flat_map(|c| c.as_array().into_iter().flatten())
+        .filter_map(|c| c["filePath"].as_str());
+    let names_pattern = |name: &str| match mode {
+        FindMode::Exact => name == miss_name,
+        _ => name.contains(miss_name.as_str()),
+    };
+    let hidden_files = view
+        .map(OverlayView::hidden_declarations)
         .unwrap_or_default()
         .iter()
-        .filter(|d| d.name.contains(miss_name.as_str()))
+        .filter(|d| names_pattern(&d.name))
         .map(|d| d.path.as_str());
+    let payload_files = matches
+        .iter()
+        .map(|m| m.file.as_str())
+        .chain(candidate_files)
+        .chain(hidden_files);
     let caveat = merge_caveats(
-        engine.caveat_for(matches.iter().map(|m| m.file.as_str()).chain(hidden_files)),
+        engine.caveat_for(payload_files),
         (!found).then(|| omitted_files_caveat(engine)).flatten(),
     );
 
     match format {
         OutputFormat::Text => {
-            // The rows lead and the caveat follows (F3): `head -N` keeps the
+            // The rows lead and the caveat follows: `head -N` keeps the
             // rows, and an unverified miss says so on its own line first.
             let mut lines: Vec<String> = Vec::new();
             match (found, unverified) {
@@ -963,13 +991,6 @@ fn run_batch(args: FindArgs, engine: Option<&Engine>) -> Result<(), EcpError> {
         None
     };
 
-    // A multi-repo caveat is a property of the loaded engines, not of any
-    // one query: computed once. A single engine's caveat is scoped to each
-    // pattern's rows.
-    let multi_caveat: Option<String> = multi_repo_engines
-        .as_ref()
-        .and_then(|loaded| stale_repos_caveat(&targets, loaded));
-
     for pattern in &queries {
         println!("=== pattern: {pattern} ===");
 
@@ -997,7 +1018,9 @@ fn run_batch(args: FindArgs, engine: Option<&Engine>) -> Result<(), EcpError> {
         } else if let Some(engine) = cwd {
             engine.caveat_for(buckets.files())
         } else {
-            multi_caveat.clone()
+            multi_repo_engines
+                .as_ref()
+                .and_then(|loaded| stale_repos_caveat(&targets, loaded, &buckets))
         };
         emit_bucketed(&buckets, format, None, caveat)?;
     }
@@ -1155,6 +1178,11 @@ impl BucketedResults {
 
     /// The file of every row, bucket by bucket: the files a caveat may name.
     fn files(&self) -> impl Iterator<Item = &str> {
+        self.hits().map(|h| h.file.as_str())
+    }
+
+    /// Every row, bucket by bucket.
+    fn hits(&self) -> impl Iterator<Item = &Hit> {
         [
             &self.source,
             &self.examples,
@@ -1165,7 +1193,6 @@ impl BucketedResults {
         ]
         .into_iter()
         .flatten()
-        .map(|h| h.file.as_str())
     }
 
     fn partition(mut hits: Vec<Hit>) -> Self {
@@ -1221,9 +1248,17 @@ struct SingleSearch<'a> {
     /// The `--file` of an exact query that fell back: bm25 keeps the rows
     /// whose file holds it.
     file_filter: Option<&'a str>,
-    /// `Some("exact")` when an exact miss fell back to this search (F1).
-    fallback_from: Option<&'static str>,
+    /// The exact miss that fell back to this search, when one did.
+    fallback: Option<Fallback<'a>>,
     repo_label: Option<String>,
+}
+
+/// The lookup whose miss ran a bm25 search, and why that miss is
+/// unverified, when it is.
+#[derive(Clone, Copy)]
+struct Fallback<'a> {
+    from: &'static str,
+    unverified: Option<&'a str>,
 }
 
 impl<'a> SingleSearch<'a> {
@@ -1232,7 +1267,7 @@ impl<'a> SingleSearch<'a> {
             pattern,
             kind_filter,
             file_filter: None,
-            fallback_from: None,
+            fallback: None,
             repo_label: None,
         }
     }
@@ -1280,7 +1315,7 @@ fn run_single(
         summary,
         truncated_total,
         caveat,
-        search.fallback_from,
+        search.fallback,
     )
 }
 
@@ -1320,21 +1355,6 @@ fn compute_single(
     engine: &Engine,
     repo_label: Option<String>,
 ) -> Result<(Vec<Hit>, u64), EcpError> {
-    compute_single_limited(pattern, mode, kind_filter, engine, repo_label, usize::MAX)
-}
-
-/// [`compute_single`] that builds at most `limit` rows. The rows are the first
-/// `limit` of the unlimited result, in the same order: a `Hit` owns its callers
-/// and callees, so a consumer that shows five of a hundred should not build
-/// the other ninety-five.
-fn compute_single_limited(
-    pattern: &str,
-    mode: &FindMode,
-    kind_filter: Option<&str>,
-    engine: &Engine,
-    repo_label: Option<String>,
-    limit: usize,
-) -> Result<(Vec<Hit>, u64), EcpError> {
     let graph = engine.graph().map_err(|e| EcpError::Rkyv(e.to_string()))?;
 
     let kind_set: Option<Vec<String>> =
@@ -1347,7 +1367,6 @@ fn compute_single_limited(
         pattern,
         &kind_set,
         &repo_label,
-        limit,
     ))
 }
 
@@ -1361,7 +1380,6 @@ fn engine_bm25_hits(
     pattern: &str,
     kind_set: &Option<Vec<String>>,
     repo_label: &Option<String>,
-    limit: usize,
 ) -> (Vec<Hit>, u64) {
     let view = engine.overlay_dir().and_then(|_| engine.overlay_view());
     let (mut hits, total) = bm25_hits_from_graph(
@@ -1370,7 +1388,6 @@ fn engine_bm25_hits(
         kind_set,
         repo_label,
         engine.index_dir(),
-        limit,
         view,
     );
     let overlay = overlay_bm25_hits(view, pattern, kind_set, repo_label);
@@ -1381,7 +1398,6 @@ fn engine_bm25_hits(
     hits.extend(overlay);
     // Stable, so the base rows keep their order among equal scores.
     hits.sort_by(|a, b| exact_substring_first(a, b).then_with(|| b.score.total_cmp(&a.score)));
-    hits.truncate(limit);
     (hits, total)
 }
 
@@ -1389,7 +1405,7 @@ fn engine_bm25_hits(
 /// session overlay holds, or a hit from a repo with no tantivy index. Tantivy
 /// BM25 scores (often 3-15) and substring scores (1.0 / 0.7 / 0.4) share no
 /// scale, so by score alone such a row sorts under every BM25 row and the
-/// limit or the per-bucket cut drops it. Its displayed score stays 1.0.
+/// per-bucket cut drops it. Its displayed score stays 1.0.
 fn exact_substring(h: &Hit) -> bool {
     h.score_source == ScoreSource::Substring && h.score >= 1.0
 }
@@ -1474,15 +1490,14 @@ fn bm25_hits_from_graph(
     kind_set: &Option<Vec<String>>,
     repo_label: &Option<String>,
     index_dir: Option<&std::path::Path>,
-    limit: usize,
     view: Option<&OverlayView>,
 ) -> (Vec<Hit>, u64) {
     if let Some(dir) = index_dir {
         if dir.join("tantivy").exists() {
-            return tantivy_hits(graph, pattern, kind_set, repo_label, dir, limit, view);
+            return tantivy_hits(graph, pattern, kind_set, repo_label, dir, view);
         }
     }
-    substring_hits(graph, pattern, kind_set, repo_label, limit, view)
+    substring_hits(graph, pattern, kind_set, repo_label, view)
 }
 
 /// Build a `uid -> node_idx` map restricted to `wanted`, in a single pass over
@@ -1519,7 +1534,6 @@ fn tantivy_hits(
     kind_set: &Option<Vec<String>>,
     repo_label: &Option<String>,
     index_dir: &std::path::Path,
-    limit: usize,
     view: Option<&OverlayView>,
 ) -> (Vec<Hit>, u64) {
     let (scored, tantivy_total) = match crate::search::TantivyEngine::search(
@@ -1530,7 +1544,7 @@ fn tantivy_hits(
         Some(s) => s,
         // Index unavailable / corrupt / parse error — fall through so
         // hook context isn't silently empty.
-        None => return substring_hits(graph, pattern, kind_set, repo_label, limit, view),
+        None => return substring_hits(graph, pattern, kind_set, repo_label, view),
     };
     // Index ran cleanly. An empty scored vec means BM25 ruled out every
     // symbol; we MUST NOT fall back to substring scan, since that would
@@ -1548,11 +1562,8 @@ fn tantivy_hits(
         .collect();
     let uid_to_idx = index_wanted_uids(graph.nodes.iter().map(|n| n.uid.to_native()), &wanted);
 
-    let mut hits = Vec::with_capacity(scored.len().min(limit));
+    let mut hits = Vec::with_capacity(scored.len());
     for (score, uid) in scored {
-        if hits.len() >= limit {
-            break;
-        }
         let Ok(uid_u64) = uid.parse::<u64>() else {
             continue;
         };
@@ -1583,7 +1594,6 @@ fn substring_hits(
     pattern: &str,
     kind_set: &Option<Vec<String>>,
     repo_label: &Option<String>,
-    limit: usize,
     view: Option<&OverlayView>,
 ) -> (Vec<Hit>, u64) {
     let pattern_lower = pattern.to_lowercase();
@@ -1605,9 +1615,9 @@ fn substring_hits(
         .collect();
     // Best score first, always. Consumers that take the rows as they come
     // used to get node order, which hid an exact match behind earlier 0.4
-    // substring rows: the PreToolUse hook (leading MAX_HITS rows),
-    // `ecp group find --merge none` (prints per-repo order) and `--merge rrf`
-    // (ranks by position), and the tie order of a multi-repo `find`. Those
+    // substring rows: `ecp group find --merge none` (prints per-repo order)
+    // and `--merge rrf` (ranks by position), and the tie order of a
+    // multi-repo `find`. Those
     // change on purpose. `run_single` / `run_batch` re-sort stably in the
     // bucket partition, so their output is unchanged. Substring fallback
     // scans every node; a 3-char pattern on a monorepo returns thousands, so
@@ -1616,8 +1626,8 @@ fn substring_hits(
     // a hundred was the peak allocation of this path.
     let total_before_truncate = scored.len() as u64;
     // `build_hit` re-checks the eligibility the scan already applied, so every
-    // scored row becomes a hit and only the first `limit` are read.
-    keep_top_ranked(&mut scored, limit.min(MULTI_CAP));
+    // scored row becomes a hit.
+    keep_top_ranked(&mut scored, MULTI_CAP);
     let hits = scored
         .into_iter()
         .filter_map(|(score, idx)| {
@@ -1631,7 +1641,6 @@ fn substring_hits(
                 view,
             )
         })
-        .take(limit)
         .collect();
     (hits, total_before_truncate)
 }
@@ -1824,10 +1833,10 @@ fn run_multi(
     targets: Vec<RepoTarget>, // (repo_name, graph_path_str, worktree_root)
 ) -> Result<(), EcpError> {
     let loaded = load_engines_lossy(&targets);
-    let caveat = stale_repos_caveat(&targets, &loaded);
     let (hits, summary) =
         compute_multi_with_engines(&pattern, &mode, kind_filter.as_deref(), &loaded);
     let buckets = BucketedResults::partition(hits);
+    let caveat = stale_repos_caveat(&targets, &loaded, &buckets);
     emit_bucketed(&buckets, format, Some(summary), caveat)
 }
 
@@ -1890,14 +1899,8 @@ pub fn compute_multi_with_engines(
                         // Multi-repo path: cross-repo top-K merging handles its
                         // own truncation, so the substring-fallback truncate
                         // signal from per-repo bm25 is discarded here.
-                        let (hits, _truncated_total) = engine_bm25_hits(
-                            engine,
-                            graph,
-                            pattern,
-                            &kind_set,
-                            &repo_label,
-                            usize::MAX,
-                        );
+                        let (hits, _truncated_total) =
+                            engine_bm25_hits(engine, graph, pattern, &kind_set, &repo_label);
                         hits
                     }),
             };
@@ -1986,56 +1989,36 @@ pub fn run_for_repo(
     .map(|(hits, _truncated)| hits)
 }
 
-/// In-process BM25 entry point for hooks and other internal consumers.
-/// Returns owned `Hit` rows without going through stdout / OutputFormat.
-/// BM25-only — `mode` is honoured at the CLI surface (`run`) but the
-/// flat `FindMatch` shape used by Exact / Fuzzy is structurally
-/// different, so callers wanting those modes should use `run` and parse
-/// the JSON payload. Batch mode is not exposed here — hooks always run
-/// one pattern at a time.
+/// In-process BM25 rows for tests and internal consumers. Returns owned
+/// `Hit` rows without going through stdout / OutputFormat. BM25-only —
+/// `mode` is honoured at the CLI surface (`run`) but the flat `FindMatch`
+/// shape used by Exact / Fuzzy is structurally different, so callers wanting
+/// those modes should use `run` and parse the JSON payload. Batch mode is not
+/// exposed here.
 pub fn compute_hits(args: FindArgs, engine: &Engine) -> Result<Vec<Hit>, EcpError> {
-    compute_hits_limited(args, engine, usize::MAX)
-}
-
-/// [`compute_hits`] returning only the first `limit` rows, identical to the
-/// head of the unlimited result. The PreToolUse hook shows five of up to a
-/// hundred; building the rest is wasted latency on every search tool call.
-pub fn compute_hits_limited(
-    args: FindArgs,
-    engine: &Engine,
-    limit: usize,
-) -> Result<Vec<Hit>, EcpError> {
     let pattern = args.pattern.as_deref().ok_or_else(|| {
         EcpError::InvalidArgument("compute_hits requires a pattern (--batch not supported)".into())
     })?;
     let targets = resolve_targets(args.repo.as_deref())?;
     if targets.is_empty() {
-        compute_single_limited(
-            pattern,
-            &args.mode,
-            args.kind.as_deref(),
-            engine,
-            None,
-            limit,
-        )
-        .map(|(hits, _truncated)| hits)
+        compute_single(pattern, &args.mode, args.kind.as_deref(), engine, None)
+            .map(|(hits, _truncated)| hits)
     } else if targets.len() == 1 {
         let target = targets.into_iter().next().unwrap();
         let local_engine = target.load_engine_labeled()?;
-        compute_single_limited(
+        compute_single(
             pattern,
             &args.mode,
             args.kind.as_deref(),
             &local_engine,
             Some(target.display_name),
-            limit,
         )
         .map(|(hits, _truncated)| hits)
     } else {
         let loaded = load_engines_lossy(&targets);
         let (hits, _summary) =
             compute_multi_with_engines(pattern, &args.mode, args.kind.as_deref(), &loaded);
-        Ok(hits.into_iter().take(limit).collect())
+        Ok(hits)
     }
 }
 
@@ -2296,10 +2279,12 @@ fn stale_graph_caveat(names: &[&str]) -> Option<String> {
 /// Cross-repo staleness sweep: a repo is stale when its loaded graph is
 /// behind HEAD or its engine warm-attached a sibling SHA. Each repo whose
 /// dirty set has changed paths it could not name, or whose overlay hid base
-/// declarations it could not pair, adds its own labelled lines.
+/// declarations it could not pair, adds its own labelled lines, scoped to
+/// the files of that repo's rows.
 fn stale_repos_caveat(
     targets: &[RepoTarget],
     loaded: &[(String, Result<Engine, String>)],
+    buckets: &BucketedResults,
 ) -> Option<String> {
     let engines = targets
         .iter()
@@ -2313,7 +2298,13 @@ fn stale_repos_caveat(
         .map(|(name, _)| name)
         .collect();
     engines
-        .filter_map(|(name, engine)| engine.dirty_set_caveat(Some(name)))
+        .filter_map(|(name, engine)| {
+            let files = buckets
+                .hits()
+                .filter(|h| h.repo.as_deref() == Some(name))
+                .map(|h| h.file.as_str());
+            engine.dirty_set_caveat_for(Some(name), files)
+        })
         .fold(stale_graph_caveat(&stale), |acc, line| {
             merge_caveats(acc, Some(line))
         })
@@ -2330,7 +2321,7 @@ fn emit_bucketed_with_metadata(
     summary: Option<String>,
     bm25_pre_truncate_total: u64,
     caveat: Option<String>,
-    fallback_from: Option<&str>,
+    fallback: Option<Fallback<'_>>,
 ) -> Result<(), EcpError> {
     let all_empty = buckets.source.is_empty()
         && buckets.examples.is_empty()
@@ -2343,9 +2334,7 @@ fn emit_bucketed_with_metadata(
         let hint = "No matches found. Try a shorter pattern or `ecp find --mode fuzzy <fragment>`.";
         match format {
             OutputFormat::Text => {
-                let lines = fallback_line(fallback_from)
-                    .into_iter()
-                    .chain([hint.to_string()]);
+                let lines = fallback_lines(fallback).chain([hint.to_string()]);
                 return emit_text_rows(lines, caveat);
             }
             _ => {
@@ -2353,7 +2342,7 @@ fn emit_bucketed_with_metadata(
                 // the caveat is what stops it reading as a definitive miss.
                 return emit_with_caveat(
                     &with_fallback(
-                        fallback_from,
+                        fallback,
                         serde_json::json!({
                             "status": "success",
                             "source": [],
@@ -2375,7 +2364,7 @@ fn emit_bucketed_with_metadata(
 
     match format {
         OutputFormat::Text => {
-            let mut lines: Vec<String> = fallback_line(fallback_from).into_iter().collect();
+            let mut lines: Vec<String> = fallback_lines(fallback).collect();
             if let Some(s) = &summary {
                 lines.push(s.clone());
             }
@@ -2413,32 +2402,54 @@ fn emit_bucketed_with_metadata(
             if let Some(s) = summary {
                 payload["summary"] = serde_json::Value::String(s);
             }
-            emit_with_caveat(&with_fallback(fallback_from, payload), format, caveat)
+            emit_with_caveat(&with_fallback(fallback, payload), format, caveat)
         }
     }
 }
 
-/// The text line that names an exact miss's fallback, when there is one.
-fn fallback_line(fallback_from: Option<&str>) -> Option<String> {
-    fallback_from.map(|from| format!("mode: bm25, fallback_from: {from}"))
+/// The text lines that name an exact miss's fallback, when there is one:
+/// the fallback, then the unverified miss on its own line.
+fn fallback_lines(fallback: Option<Fallback<'_>>) -> impl Iterator<Item = String> + '_ {
+    fallback.into_iter().flat_map(|fallback| {
+        let unverified = fallback.unverified.map(|reason| {
+            format!(
+                "unverified: no exact match ({reason}). Run `{REINDEX_COMMAND}` for a \
+                 definitive answer."
+            )
+        });
+        std::iter::once(format!("mode: bm25, fallback_from: {}", fallback.from)).chain(unverified)
+    })
 }
 
 /// `body` led by `mode: bm25` and `fallback_from` when an exact miss fell
-/// back to it, so the reader sees which lookup answered before the rows.
-fn with_fallback(fallback_from: Option<&str>, body: serde_json::Value) -> serde_json::Value {
-    match (fallback_from, body) {
-        (Some(from), serde_json::Value::Object(rows)) => {
+/// back to it, so the reader sees which lookup answered before the rows. An
+/// unverified miss also leads with `found: null`, `status: "unverified"`,
+/// `reason` and `next`, as the exact payload of that miss does.
+fn with_fallback(fallback: Option<Fallback<'_>>, body: serde_json::Value) -> serde_json::Value {
+    match (fallback, body) {
+        (Some(fallback), serde_json::Value::Object(rows)) => {
             let mut out = serde_json::Map::new();
             out.insert("mode".into(), "bm25".into());
-            out.insert("fallback_from".into(), from.into());
-            out.extend(rows);
+            out.insert("fallback_from".into(), fallback.from.into());
+            if let Some(reason) = fallback.unverified {
+                out.insert("found".into(), serde_json::Value::Null);
+                out.insert("status".into(), "unverified".into());
+                out.insert("reason".into(), reason.into());
+                out.insert("next".into(), REINDEX_COMMAND.into());
+            }
+            for (key, value) in rows {
+                out.entry(key).or_insert(value);
+            }
             serde_json::Value::Object(out)
         }
         (_, body) => body,
     }
 }
 
-/// Text rows on stdout, then the caveat lines (F3): `head -N` keeps the rows.
+/// Text rows on stdout, then the caveat lines: `head -N` keeps the rows.
+/// `output::emit_to_string` leads with the caveat instead; find's order is
+/// pinned on purpose (`find_bm25_fallback.rs`), because a `head -N` of the
+/// rows lost them behind a multi-line caveat.
 fn emit_text_rows(
     rows: impl IntoIterator<Item = String>,
     caveat: Option<String>,
@@ -2667,5 +2678,31 @@ mod tests {
         let mut empty: Vec<(f32, usize)> = Vec::new();
         keep_top_ranked(&mut empty, 5);
         assert!(empty.is_empty());
+    }
+
+    /// Stands for: only prose falls back. Names with punctuation, padding
+    /// around one word, and blank text do not; whitespace between two word
+    /// characters does, whatever punctuation surrounds it.
+    #[test]
+    fn test_falls_back_to_bm25_prose_only_true() {
+        for prose in ["alpha beta", "a\tb", "foo (bar)", "@Get route", "  x y  "] {
+            assert!(falls_back_to_bm25(prose), "{prose:?}");
+        }
+        for name in [
+            "",
+            "   ",
+            " alpha ",
+            "save!",
+            "empty?",
+            "#priv",
+            "kebab-name",
+            "alpha()",
+            "-- x",
+            "Foo::bar",
+            "a.b@12",
+            "naïve_函数",
+        ] {
+            assert!(!falls_back_to_bm25(name), "{name:?}");
+        }
     }
 }

@@ -29,7 +29,6 @@ mod cli_help_surface_test;
 mod cli_surface;
 mod cli_surface_invariants;
 mod commit_lookup;
-mod compute_hits_limit;
 mod compute_hits_tantivy;
 mod concurrency_hook_flock;
 mod config_cmd;

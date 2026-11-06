@@ -622,6 +622,16 @@ pub(crate) struct Ensured {
     /// The cap an L1 refresh gated and stamped under, so this query's reader
     /// accepts what this query wrote. `None` when no refresh ran.
     pub(crate) size_cap: Option<SizeCap>,
+    /// On a warm attach, the session overlay this gate read before its
+    /// probe, for [`cover_warm_attach`]; `None` for every other outcome.
+    pub(crate) warm_session: Option<SessionSnapshot>,
+}
+
+/// A session overlay dir and its manifest as one read saw them.
+#[derive(Default)]
+pub(crate) struct SessionSnapshot {
+    pub(crate) dir: Option<PathBuf>,
+    pub(crate) manifest: Option<ecp_core::session::DirtyEvents>,
 }
 
 impl Ensured {
@@ -631,6 +641,7 @@ impl Ensured {
             rebuilt: Some(rebuilt),
             dirty: None,
             size_cap: None,
+            warm_session: None,
         }
     }
 
@@ -640,6 +651,7 @@ impl Ensured {
             rebuilt: None,
             dirty,
             size_cap: None,
+            warm_session: None,
         }
     }
 
@@ -705,6 +717,10 @@ pub(crate) fn ensure_fresh_with_rebuild(
                         rebuilt: None,
                         dirty: None,
                         size_cap: None,
+                        warm_session: Some(SessionSnapshot {
+                            dir: session_dir,
+                            manifest,
+                        }),
                     });
                 }
             }
@@ -784,7 +800,9 @@ pub(crate) fn ensure_fresh_with_rebuild(
                 // every later query would repeat the walk until a rebuild.
                 // A porcelain verdict already matched HEAD. A parse leaves the
                 // working tree consistent with the indexed state of HEAD, so
-                // the fingerprint is refreshed as the very last step.
+                // the fingerprint is refreshed as the very last step. A parse
+                // whose fragments were not written leaves it behind, so the
+                // next query parses again.
                 if walked || matches!(refresh, Refresh::Parsed) {
                     write_head_sha_sidecar(graph_path, worktree_root);
                 }
@@ -800,6 +818,10 @@ enum Refresh {
     Current,
     /// The dirty sources whose fragments were stale were parsed.
     Parsed,
+    /// The parse ran, but its fragments and tombstones were not written
+    /// (lock timeout, failed archive, full disk), for this reason. The
+    /// overlay holds what it held before.
+    WriteFailed(String),
 }
 
 /// The L1 refresh of `dirty` over the graph at `graph_path`: parse the dirty
@@ -936,7 +958,7 @@ fn refresh_overlay(
     test_counters::REANALYZE_PATH_COUNT
         .fetch_add(gate.rel_paths.len(), std::sync::atomic::Ordering::Relaxed);
 
-    apply_l1_overlay_updates(
+    let refresh = apply_l1_overlay_updates(
         worktree_root,
         &fresh_graphs,
         &pre_parse_mtimes,
@@ -959,7 +981,7 @@ fn refresh_overlay(
         size_cap,
         &configs,
     );
-    Ok(Refresh::Parsed)
+    Ok(refresh)
 }
 
 /// Version-checked graph load for every path that loads a graph by repo
@@ -1016,10 +1038,12 @@ pub(crate) fn flag_behind_head(
 }
 
 /// Most changed files a warm attach re-parses into the overlay so the
-/// sibling graph answers as HEAD. A sibling passes the distance gate only
-/// as HEAD's parent or a descendant of HEAD, so the diff is one commit or a
-/// branch's work; past this many files the parse costs about what the
-/// background rebuild does, and the answer stays unverified instead.
+/// sibling graph answers as HEAD. A sibling passes the distance gate when
+/// HEAD is at most one commit past it (`rev-list --count sibling..HEAD`):
+/// HEAD's parent, a descendant of HEAD, or a branch forked at HEAD's parent,
+/// whose own commits are unbounded. Past this many files the parse costs
+/// about what the background rebuild does, and the answer stays unverified
+/// instead.
 /// `ECP_WARM_ATTACH_MAX_FILES` overrides it; `0` refuses every non-empty
 /// diff.
 const WARM_ATTACH_MAX_FILES: usize = 256;
@@ -1059,7 +1083,16 @@ impl WarmCover {
 /// present file and tombstones a gone one, so a deletion and both halves of
 /// a rename need no event of their own. No HEAD sidecar is written: the
 /// graph is the sibling's.
-pub(crate) fn cover_warm_attach(worktree_root: &Path, sibling_graph: &Path) -> WarmCover {
+///
+/// `session` is what the gate read before its probe, so it is older than
+/// the `git status` here, as the retire pass requires. `Covered` names the
+/// source paths the refresh covered: the engine checks them against the view
+/// it answers from.
+pub(crate) fn cover_warm_attach(
+    worktree_root: &Path,
+    sibling_graph: &Path,
+    session: SessionSnapshot,
+) -> WarmCover {
     let Some(sibling_sha) = sibling_graph.parent().and_then(commit_dir_sha) else {
         return WarmCover::uncovered("the sibling graph names no commit");
     };
@@ -1103,27 +1136,31 @@ pub(crate) fn cover_warm_attach(worktree_root: &Path, sibling_graph: &Path) -> W
             ))
         };
     }
-    let session_dir = resolve_session_overlay_dir(worktree_root);
-    let manifest = manifest_snapshot(session_dir.as_deref());
     let size_cap = ecp_core::config::resolve_size_cap(worktree_root);
     let refreshed = refresh_overlay(
         worktree_root,
         sibling_graph,
-        session_dir.as_deref(),
-        manifest.as_ref(),
+        session.dir.as_deref(),
+        session.manifest.as_ref(),
         &dirty,
         size_cap,
     );
-    match refreshed {
-        Ok(_) => WarmCover {
-            coverage: crate::engine::HeadCoverage::Covered,
-            dirty: Some(dirty),
-            size_cap: Some(size_cap),
-        },
-        Err(e) => WarmCover {
-            dirty: Some(dirty),
-            ..WarmCover::uncovered(format!("the overlay refresh failed: {e}"))
-        },
+    let reason = match refreshed {
+        Ok(Refresh::Current | Refresh::Parsed) => {
+            return WarmCover {
+                coverage: crate::engine::HeadCoverage::Covered {
+                    sources: dirty_source_paths(&dirty),
+                },
+                dirty: Some(dirty),
+                size_cap: Some(size_cap),
+            }
+        }
+        Ok(Refresh::WriteFailed(e)) => format!("the overlay write failed: {e}"),
+        Err(e) => format!("the overlay refresh failed: {e}"),
+    };
+    WarmCover {
+        dirty: Some(dirty),
+        ..WarmCover::uncovered(reason)
     }
 }
 
@@ -1240,8 +1277,9 @@ fn attach_latest_sibling_sha(worktree_root: &Path) -> Option<PathBuf> {
 }
 
 /// Cap on sibling dirs probed per warm-attach. A within-distance sibling
-/// (distance ≤ `WARM_ATTACH_MAX_DISTANCE`) is, by definition, HEAD or its direct
-/// parent — overwhelmingly among the few most-recently-built graphs. Bounding
+/// (HEAD at most `WARM_ATTACH_MAX_DISTANCE` commits past it) is HEAD, its
+/// parent, a descendant of HEAD or a branch forked at its parent —
+/// overwhelmingly among the few most-recently-built graphs. Bounding
 /// the scan keeps the worst case (a repo with many parallel-branch builds) to a
 /// handful of `git rev-list` execs instead of one per published commit, while
 /// the common case (newest sibling is the parent) still returns on the first.
@@ -1283,11 +1321,13 @@ fn attach_latest_sibling_sha_uncached(worktree_root: &Path) -> Option<PathBuf> {
 /// See the staleness-gate comment in `attach_latest_sibling_sha_uncached`.
 const WARM_ATTACH_MAX_DISTANCE: usize = 1;
 
-/// True when `sibling_dir` names a commit that is an ancestor of the current
-/// HEAD at most `WARM_ATTACH_MAX_DISTANCE` commits back. A non-ancestor
-/// sibling (parallel branch — its diff vs HEAD is unbounded and uncontrolled)
-/// or one whose SHA can't be resolved is treated as "too far": the conservative
-/// choice is a sync build, never a stale warm graph.
+/// True when HEAD is at most `WARM_ATTACH_MAX_DISTANCE` commits past the
+/// commit `sibling_dir` names (`rev-list --count sibling..HEAD`). That admits
+/// HEAD's parent, a descendant of HEAD, and a branch forked at HEAD's parent
+/// with any number of its own commits; `cover_warm_attach` bounds the diff
+/// those leave by file count. A sibling whose SHA can't be resolved is
+/// treated as "too far": the conservative choice is a sync build, never a
+/// stale warm graph.
 ///
 /// `None`-defaulting on any git failure (not a repo, detached state, sibling
 /// SHA absent from the object DB after history rewrite) deliberately refuses
@@ -1921,7 +1961,7 @@ fn apply_l1_overlay_updates(
     tombstones: &[(String, PathClass)],
     gate_meta: Option<SessionMeta>,
     size_cap: SizeCap,
-) -> io::Result<()> {
+) -> io::Result<Refresh> {
     use crate::session::{overlay_writer, promotion};
 
     // Same path the reader (`resolve_session_overlay_dir`) consults — kept in one
@@ -1974,7 +2014,9 @@ fn apply_l1_overlay_updates(
         })
         .collect();
 
-    let (n_written, n_failed) = match overlay_writer::write_dirty_events(
+    // A failed write keeps the query answering, but the caller learns of it:
+    // a warm attach must not count the files as covered.
+    let outs = match overlay_writer::write_dirty_events(
         &session_dir,
         size_cap,
         fresh_graphs,
@@ -1982,19 +2024,18 @@ fn apply_l1_overlay_updates(
         events,
         tombstones,
     ) {
-        Ok(outs) => {
-            let n_failed = outs.iter().filter(|o| o.parse_failed).count();
-            (outs.len() - n_failed, n_failed)
-        }
+        Ok(outs) => outs,
         Err(e) => {
             eprintln!("warning: overlay batch write: {e}");
-            (0, 0)
+            return Ok(Refresh::WriteFailed(e.to_string()));
         }
     };
+    let n_failed = outs.iter().filter(|o| o.parse_failed).count();
+    let n_written = outs.len() - n_failed;
     if n_written > 0 || n_failed > 0 {
         eprintln!("l1.refreshed written={n_written} failed={n_failed}");
     }
-    Ok(())
+    Ok(Refresh::Parsed)
 }
 
 /// Smallest gap between two `last_touched` rewrites. Two orders of magnitude
@@ -3724,7 +3765,11 @@ mod warm_cover_tests {
     #[test]
     fn test_cover_warm_attach_graph_outside_commit_dir_is_uncovered() {
         let dir = tempfile::tempdir().unwrap();
-        let cover = cover_warm_attach(dir.path(), &dir.path().join("graph.bin"));
+        let cover = cover_warm_attach(
+            dir.path(),
+            &dir.path().join("graph.bin"),
+            SessionSnapshot::default(),
+        );
         assert!(matches!(
             cover.coverage,
             crate::engine::HeadCoverage::Uncovered(reason) if reason.contains("names no commit")

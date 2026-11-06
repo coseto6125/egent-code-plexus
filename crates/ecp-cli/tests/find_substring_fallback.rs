@@ -1,8 +1,8 @@
 //! The substring fallback (`ecp find --mode bm25` before a tantivy index
-//! exists) feeds the PreToolUse hook through `compute_hits`, whose consumer
-//! takes the leading rows as the top hits. The rows must therefore come back
-//! best score first, and the ASCII fast path must score exactly like the
-//! lowercase comparison it replaces.
+//! exists) ranks the rows of `compute_hits` and of `ecp group find`, and
+//! `ecp group find` takes the leading rows as the top hits. The rows must
+//! therefore come back best score first, and the ASCII fast path must score
+//! exactly like the lowercase comparison it replaces.
 
 use ecp_cli::commands::find::{compute_hits, run_for_repo, FindArgs, FindMode, ScoreSource};
 use ecp_cli::engine::Engine;

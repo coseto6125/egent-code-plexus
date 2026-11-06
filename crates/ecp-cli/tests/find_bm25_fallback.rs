@@ -99,7 +99,7 @@ fn bucket_names(payload: &serde_json::Value) -> Vec<String> {
 #[test]
 fn test_find_exact_miss_whitespace_pattern_returns_bm25_fallback() {
     let (repo, home) = fixture();
-    for pattern in ["alpha beta", "alpha()"] {
+    for pattern in ["alpha beta", "fn alpha"] {
         let payload = find_json(repo.path(), home.path(), pattern);
         assert_eq!(payload["mode"], "bm25", "{pattern}: {payload}");
         assert_eq!(payload["fallback_from"], "exact", "{pattern}: {payload}");
@@ -124,6 +124,24 @@ fn test_find_exact_miss_identifier_returns_found_false_without_fallback() {
     assert_eq!(payload["status"], "success", "{payload}");
     assert!(payload.get("fallback_from").is_none(), "{payload}");
     assert!(payload.get("mode").is_none(), "{payload}");
+}
+
+/// Failed before: punctuation alone fell back, so a miss on a name that
+/// Ruby (`save!`, `empty?`), JS (`#priv`) or CSS and HCL (`kebab-name`)
+/// declare gave bm25 rows and no `found` key.
+#[test]
+fn test_find_exact_miss_punctuated_names_return_found_false_without_fallback() {
+    let (repo, home) = fixture();
+    for pattern in ["save!", "empty?", "#priv", "kebab-name"] {
+        let payload = find_json(repo.path(), home.path(), pattern);
+        assert_eq!(payload["found"], false, "{pattern}: {payload}");
+        assert_eq!(payload["status"], "success", "{pattern}: {payload}");
+        assert!(
+            payload.get("fallback_from").is_none(),
+            "{pattern}: {payload}"
+        );
+        assert!(payload.get("mode").is_none(), "{pattern}: {payload}");
+    }
 }
 
 #[test]
@@ -271,5 +289,54 @@ fn test_find_bm25_caveat_after_rows_in_text() {
     assert!(
         lines.last().is_some_and(|l| l.contains(WARM_ATTACH_NOTE)),
         "text: caveat last: {stdout}"
+    );
+}
+
+/// Failed before: the prose fallback returned before the unverified check, so
+/// an uncovered warm attach answered `status: "success"` bm25 rows with no
+/// `found` key, though HEAD may hold a declaration the exact lookup missed.
+#[test]
+fn test_find_exact_miss_prose_pattern_uncovered_warm_attach_returns_unverified_bm25() {
+    let (repo, home) = fixture();
+    uncovered_warm_attach(repo.path());
+
+    let stdout = find_out(
+        repo.path(),
+        home.path(),
+        &["find", "alpha beta", "--format", "json"],
+    );
+    let payload: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(payload["mode"], "bm25", "{payload}");
+    assert_eq!(payload["fallback_from"], "exact", "{payload}");
+    assert!(
+        payload.get("found").is_some_and(serde_json::Value::is_null),
+        "found must be present and null: {payload}"
+    );
+    assert_eq!(payload["status"], "unverified", "{payload}");
+    assert!(
+        payload["reason"]
+            .as_str()
+            .is_some_and(|r| r.contains("limit")),
+        "{payload}"
+    );
+    assert_eq!(
+        payload["next"], "ecp admin index --force --repo .",
+        "{payload}"
+    );
+    assert!(
+        bucket_names(&payload).iter().any(|n| n == "alpha"),
+        "bm25 still runs: {payload}"
+    );
+
+    let stdout = find_out(
+        repo.path(),
+        home.path(),
+        &["find", "alpha beta", "--format", "text"],
+    );
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert!(lines[0].contains("fallback_from: exact"), "{stdout}");
+    assert!(
+        lines[1].starts_with("unverified") && lines[1].contains("--force"),
+        "{stdout}"
     );
 }

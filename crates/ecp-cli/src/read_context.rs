@@ -93,6 +93,7 @@ impl ReadContext {
             outcome,
             dirty,
             size_cap,
+            warm_session,
             ..
         } = auto_ensure::ensure_fresh_with_rebuild(IndexNeed::NearCurrent, &resolved, &top)
             .map_err(ReadContextError::Ensure)?;
@@ -106,8 +107,9 @@ impl ReadContext {
             |path: &Path| !graph_path::is_custom(graph_arg) || graph_path::is_cwd_graph(path, &top);
         let (engine, graph_path, dirty, size_cap) = match outcome {
             EnsureFreshOutcome::WarmAttach { sibling_graph_path } => {
-                let own = own_graph(sibling_graph_path.as_path());
-                let (engine, dirty, size_cap) = warm_engine(&top, &sibling_graph_path, own)?;
+                let session = own_graph(sibling_graph_path.as_path())
+                    .then(|| warm_session.unwrap_or_default());
+                let (engine, dirty, size_cap) = warm_engine(&top, &sibling_graph_path, session)?;
                 (engine, sibling_graph_path, dirty, size_cap)
             }
             // A build publishes a new commit dir; resolving again reads it.
@@ -132,11 +134,13 @@ impl ReadContext {
             rebuilt,
             dirty,
             size_cap,
+            warm_session,
         } = auto_ensure::ensure_fresh_with_rebuild(IndexNeed::NearCurrent, graph_path, &top)
             .map_err(ReadContextError::Ensure)?;
         let (engine, graph_path, dirty, size_cap) = match outcome {
             EnsureFreshOutcome::WarmAttach { sibling_graph_path } => {
-                let (engine, dirty, size_cap) = warm_engine(&top, &sibling_graph_path, true)?;
+                let session = Some(warm_session.unwrap_or_default());
+                let (engine, dirty, size_cap) = warm_engine(&top, &sibling_graph_path, session)?;
                 (engine, sibling_graph_path, dirty, size_cap)
             }
             EnsureFreshOutcome::Ready => {
@@ -416,24 +420,25 @@ pub(crate) fn shell_word(word: &str) -> String {
     crate::background::shell_quote(word)
 }
 
-/// The engine of a warm attach: the sibling graph, flagged stale, with the
-/// overlay asked to cover every file that differs from HEAD. Also returns
-/// the dirty set and cap of that refresh. `own_graph` false refuses the
-/// cover: the overlay is not attached to a foreign graph.
+/// A warm engine, the dirty set of its cover's refresh and that refresh's cap.
 type WarmEngine = (Engine, Option<DirtySet<ClassifiedPath>>, Option<SizeCap>);
 
+/// The engine of a warm attach: the sibling graph, flagged stale, with the
+/// overlay asked to cover every file that differs from HEAD. Also returns
+/// the dirty set and cap of that refresh. `session` is the overlay the gate
+/// read before its probe; `None` refuses the cover, because the overlay is
+/// not attached to a foreign graph.
 fn warm_engine(
     top: &Path,
     sibling: &Path,
-    own_graph: bool,
+    session: Option<auto_ensure::SessionSnapshot>,
 ) -> Result<WarmEngine, ReadContextError> {
     let mut engine = load(sibling, true)?;
-    let cover = if own_graph {
-        auto_ensure::cover_warm_attach(top, sibling)
-    } else {
-        auto_ensure::WarmCover::uncovered(
+    let cover = match session {
+        Some(session) => auto_ensure::cover_warm_attach(top, sibling, session),
+        None => auto_ensure::WarmCover::uncovered(
             "the overlay is refused: `--graph` names a graph that is not this worktree's",
-        )
+        ),
     };
     engine.set_head_coverage(cover.coverage);
     Ok((engine, cover.dirty, cover.size_cap))

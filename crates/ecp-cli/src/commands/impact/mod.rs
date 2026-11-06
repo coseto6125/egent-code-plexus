@@ -283,7 +283,7 @@ pub fn run(args: ImpactArgs, engine: &Engine) -> Result<(), EcpError> {
         Err(e @ EcpError::AmbiguousSymbol { .. }) => {
             let target = args.name.as_deref().or(args.target.as_deref());
             let failure = unresolved_payload(&args, target.unwrap_or_default(), &e, engine);
-            let caveat = engine.caveat_for(result_files(&failure));
+            let caveat = impact_caveat(&args, engine, &failure);
             emit_with_caveat(&failure, format, caveat)?;
             return Err(e);
         }
@@ -340,7 +340,7 @@ pub fn run(args: ImpactArgs, engine: &Engine) -> Result<(), EcpError> {
     // line speaks for it.
     let caveat = match args.baseline {
         Some(_) => engine.caveat(),
-        None => engine.caveat_for(result_files(&payload)),
+        None => impact_caveat(&args, engine, &payload),
     };
     emit_with_caveat(
         &payload,
@@ -349,9 +349,23 @@ pub fn run(args: ImpactArgs, engine: &Engine) -> Result<(), EcpError> {
     )
 }
 
+/// The caveat of an impact answer on the target `args` names
+/// ([`Engine::impact_caveat_for`]): a line that lists dirty files stays when
+/// it names a file of `payload`; the unpaired-declarations line, and a C#
+/// call line about the target's bare name, stay whatever the files.
+fn impact_caveat(args: &ImpactArgs, engine: &Engine, payload: &Value) -> Option<String> {
+    let text = args
+        .name
+        .as_deref()
+        .or(args.target.as_deref())
+        .unwrap_or_default();
+    let request = target_request(text, None, None);
+    let target = request.as_ref().map_or(text, |r| r.name());
+    engine.impact_caveat_for(target, result_files(payload))
+}
+
 /// The files an impact payload names: its rows, its heuristic callers, its
-/// `unexplained_refs` sites and an ambiguity's candidates. The caveat keeps
-/// an overlay line only when that line names one of them.
+/// `unexplained_refs` sites and an ambiguity's candidates.
 fn result_files(payload: &Value) -> Vec<&str> {
     let lists = [
         (&payload["impact"], "filePath"),
@@ -496,9 +510,12 @@ fn ambiguity_of(args: &ImpactArgs, target: &str, engine: &Engine) -> Option<Map<
     let request = target_request(target, args.kind.as_deref(), args.file.as_deref()).ok()?;
     let merged = MergedGraph::new(graph, engine.overlay_view());
     match resolve_target(&merged, &request) {
-        TargetResolution::Ambiguous(a) => {
-            Some(symbol::ambiguous_candidates(merged, &a, request.name()))
-        }
+        TargetResolution::Ambiguous(a) => Some(symbol::ambiguous_candidates(
+            merged,
+            &a,
+            request.name(),
+            args.repo.as_deref(),
+        )),
         _ => None,
     }
 }

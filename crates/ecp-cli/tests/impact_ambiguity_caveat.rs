@@ -441,3 +441,94 @@ fn test_unexplained_refs_function_and_class_namesake_python() {
         "the class declaration line is no call site: {class}"
     );
 }
+
+const K_OVERLOADS_JAVA: &str =
+    "class K {\n    void save(int id) {}\n    void save(String name) {}\n}\n";
+
+/// `ecp <args> --format json` in `repo` with the cache root and the session
+/// pinned, so the dirty overlay is this fixture's own.
+fn run_json_in_session(repo: &Path, args: &[&str]) -> serde_json::Value {
+    let out = Command::new(ecp_bin())
+        .args(args)
+        .args(["--format", "json"])
+        .current_dir(repo)
+        .env("HOME", repo)
+        .env_remove("ECP_HOME")
+        .env_remove("CLAUDE_CODE_SESSION_ID")
+        .env("ECP_SESSION_ID", "caveat-scope-overloads")
+        .env("ECP_SKIP_BG_REBUILD", "1")
+        .output()
+        .expect("ecp failed to spawn");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let start = stdout
+        .find('{')
+        .unwrap_or_else(|| panic!("{args:?} gave no JSON: {stdout}"));
+    serde_json::Deserializer::from_str(&stdout[start..])
+        .into_iter()
+        .next()
+        .unwrap()
+        .unwrap_or_else(|e| panic!("{args:?} gave bad JSON: {e}\n{stdout}"))
+}
+
+/// A comment-only edit leaves `K.java`'s two `save` overloads unpairable.
+fn dirty_k_overloads(repo: &Path) {
+    let path = repo.join("K.java");
+    let text = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(path, format!("{text}// edited\n")).unwrap();
+}
+
+/// Case (a). Stands for: a `find` hit whose top row lies in a clean file
+/// still says that the dirty overloads of the same name are hidden, so their
+/// lost callers do not read as none. Red before the fix: the scope held only
+/// the rows' files on a hit, and the line was dropped.
+#[test]
+fn test_find_dirty_overloads_top_match_elsewhere_keeps_unpaired_line() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    write(repo, "K.java", K_OVERLOADS_JAVA);
+    write(repo, "Other.java", "class Other {\n    void save() {}\n}\n");
+    write(
+        repo,
+        "Use.java",
+        "class Use {\n    void a(Other o) { o.save(); }\n    void b(Other o) { o.save(); }\n    void c(Other o) { o.save(); }\n}\n",
+    );
+    init_and_analyze(repo);
+    assert!(
+        !caveat_of(&run_json_in_session(repo, &["find", "save"])).contains("could not pair"),
+        "setup: a clean tree has no gap"
+    );
+
+    dirty_k_overloads(repo);
+    let json = run_json_in_session(repo, &["find", "save"]);
+    let caveat = caveat_of(&json);
+    assert!(caveat.contains("could not pair"), "{json}");
+    assert!(caveat.contains("K.java"), "{json}");
+}
+
+/// Case (b). Stands for: an impact answer keeps the unpaired-declarations
+/// line even when no result row lies in the dirty file, because the hidden
+/// declarations' edges may be the ones the traversal lost. Red before the
+/// fix: the line was scoped to the result files and dropped.
+#[test]
+fn test_impact_dirty_overloads_unrelated_target_keeps_unpaired_line() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    write(repo, "K.java", K_OVERLOADS_JAVA);
+    write(
+        repo,
+        "A.java",
+        "class A {\n    void alpha() {}\n    void run() { alpha(); }\n}\n",
+    );
+    init_and_analyze(repo);
+    let impact = ["impact", "alpha", "--direction", "up", "--repo", "."];
+    assert!(
+        !caveat_of(&run_json_in_session(repo, &impact)).contains("could not pair"),
+        "setup: a clean tree has no gap"
+    );
+
+    dirty_k_overloads(repo);
+    let json = run_json_in_session(repo, &impact);
+    let caveat = caveat_of(&json);
+    assert!(caveat.contains("could not pair"), "{json}");
+    assert!(caveat.contains("K.save"), "{json}");
+}
