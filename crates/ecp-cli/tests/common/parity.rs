@@ -8,6 +8,7 @@ use ecp_analyzer::resolution::builder::GraphBuilder;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::LocalGraph;
 use ecp_core::graph::{ArchivedZeroCopyGraph, RelType};
+use ecp_core::session::closure::{invalidation_closure, ConfigEdits};
 use ecp_core::session::merged::MergedGraph;
 use ecp_core::session::view::{CallGap, OverlayFileInput, OverlayView};
 use std::path::Path;
@@ -137,11 +138,7 @@ pub fn edges_after_edit_with(
 
     let base = rkyv::to_bytes::<rkyv::rancor::Error>(&build_all(files)).unwrap();
     let base = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&base).unwrap();
-    let inputs: Vec<OverlayFileInput> = edits
-        .iter()
-        .map(|(path, source)| parse(path, source).into())
-        .collect();
-    let view = OverlayView::build(base, &inputs).expect("edits make a view");
+    let view = overlay_view(base, parse, files, edits);
     // Every view a test builds must survive the session view cache unchanged.
     assert_eq!(
         OverlayView::from_cache_bytes(&view.to_cache_bytes(), base.nodes.len()).as_ref(),
@@ -150,6 +147,44 @@ pub fn edges_after_edit_with(
     );
     let overlay = edges(base, &MergedGraph::new(base, Some(&view)), rel, selects);
     EdgeParity { reindex, overlay }
+}
+
+/// The session's view of `edits` over `base`, the index of `files`, built
+/// as a query builds it: the dirty parses plus the parses of the clean files
+/// of their invalidation closure, the closure's stale set, and the current
+/// text of the edited tree as the source reader.
+fn overlay_view(
+    base: &ArchivedZeroCopyGraph,
+    parse: &dyn Fn(&str, &str) -> LocalGraph,
+    files: &[(&str, &str)],
+    edits: &[(&str, &str)],
+) -> OverlayView {
+    let mut inputs: Vec<OverlayFileInput> = edits
+        .iter()
+        .map(|(path, source)| parse(path, source).into())
+        .collect();
+    let closure = invalidation_closure(base, &inputs, &[]);
+    let tree = edited_tree(files, edits);
+    let text = |rel: &str| {
+        tree.iter()
+            .find(|(path, _)| *path == rel)
+            .map(|&(_, source)| source)
+    };
+    inputs.extend(closure.paths.iter().map(|path| {
+        let source = text(path).unwrap_or_else(|| panic!("closure file {path} is not in the tree"));
+        OverlayFileInput::from(parse(path, source))
+    }));
+    let sources = |rel: &str| text(rel).map(str::to_string);
+    OverlayView::build_with_configs(
+        base,
+        &inputs,
+        &[],
+        &[],
+        &closure.stale,
+        &ConfigEdits::default(),
+        Some(&sources),
+    )
+    .expect("edits make a view")
 }
 
 /// The calls the overlay of `edits` over the base index of `files` reports
@@ -166,11 +201,7 @@ pub fn call_gaps_after_edit(
     }
     let base = rkyv::to_bytes::<rkyv::rancor::Error>(&builder.build()).unwrap();
     let base = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&base).unwrap();
-    let inputs: Vec<OverlayFileInput> = edits
-        .iter()
-        .map(|(path, source)| parse(path, source).into())
-        .collect();
-    let view = OverlayView::build(base, &inputs).expect("edits make a view");
+    let view = overlay_view(base, parse, files, edits);
     let cached = OverlayView::from_cache_bytes(&view.to_cache_bytes(), base.nodes.len())
         .expect("view cache round trip");
     cached.call_gaps().to_vec()

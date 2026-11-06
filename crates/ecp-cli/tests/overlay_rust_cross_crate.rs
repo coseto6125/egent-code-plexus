@@ -2731,10 +2731,11 @@ fn test_overlay_rust_glob_import_matches_reindex() {
             ("src/registry.rs", "pub fn lookup() {}\n"),
         ]
     };
-    for (label, base, edited) in [
-        ("glob added", without, with_glob),
-        ("glob removed", with_glob, without),
-        ("named import control", with_glob, named),
+    let member: &[(&str, &str)] = &[("src/other/registry.rs", "lookup")];
+    for (label, base, edited, expected) in [
+        ("glob added", without, with_glob, member),
+        ("glob removed", with_glob, without, &[]),
+        ("named import control", with_glob, named, member),
     ] {
         let files = crate_files(&tree(base), true);
         let (reindex, overlay) = reindex_and_overlay(&files, "src/lib.rs", edited, &["run"]);
@@ -2742,12 +2743,7 @@ fn test_overlay_rust_glob_import_matches_reindex() {
             !reindex.iter().any(|c| c.callee_file == "src/registry.rs"),
             "{label}: the undeclared decoy binds: {reindex:#?}"
         );
-        assert_reindex_binds(
-            &reindex,
-            None,
-            &[("src/other/registry.rs", "lookup")],
-            label,
-        );
+        assert_reindex_binds(&reindex, None, expected, label);
         assert_eq!(overlay, reindex, "{label}");
     }
 }
