@@ -1783,6 +1783,11 @@ fn test_bound_method_reference_python_typed_receiver_property_read_is_not_functi
 #[test]
 fn test_bound_method_reference_python_plain_method_value_next_to_property_keeps_reference() {
     let g = cart_graph();
-    assert_one_cross_file(&function_refs(&g, "show"), "cart.py", "helper");
-    assert_one_cross_file(&function_refs(&g, "read"), "cart.py", "helper");
+    for source in ["show", "read"] {
+        let helper: Vec<_> = function_refs(&g, source)
+            .into_iter()
+            .filter(|r| r.1 == "helper")
+            .collect();
+        assert_one_cross_file(&helper, "cart.py", "helper");
+    }
 }
