@@ -57,3 +57,160 @@ fn test_nullable_return_annotation_binds_project_type() {
     assert_eq!(annotated(&g, "Find"), vec![pair("src/Tok.cs", "Tok")]);
     assert_eq!(annotated(&g, "All"), vec![pair("src/Tok.cs", "Tok")]);
 }
+
+/// A10: a field type argument that names a class type parameter binds no
+/// project type, even when a project class shares the parameter's name.
+mod a10 {
+    use crate::name_ref_support::{annotated, graph};
+    use ecp_analyzer::c_sharp::parser::CSharpProvider;
+    use ecp_core::graph::ZeroCopyGraph;
+
+    fn pair(file: &str, name: &str) -> (String, String) {
+        (file.to_string(), name.to_string())
+    }
+
+    /// Target names of every type-annotation edge out of `source`.
+    fn names(g: &ZeroCopyGraph, source: &str) -> Vec<String> {
+        annotated(g, source).into_iter().map(|(_, n)| n).collect()
+    }
+
+    fn token_file(token: &str) -> String {
+        format!("src/{token}.cs")
+    }
+
+    fn build(generic: Option<&str>, token: &str) -> ZeroCopyGraph {
+        let arg = generic.unwrap_or(token);
+        let params = generic.map_or(String::new(), |p| format!("<{p}>"));
+        let _ = (&arg, &params);
+        let files = vec![
+            (token_file(token), format!("class {token} {{}}\n")),
+            (
+                "src/Box.cs".to_string(),
+                format!("using System.Collections.Generic;\nclass Box{params} {{\n    List<{arg}> items;\n}}\n"),
+            ),
+            (
+                "src/Holder.cs".to_string(),
+                format!("using System.Collections.Generic;\nclass Holder {{\n    List<{token}> tokens;\n}}\n"),
+            ),
+        ];
+        let refs: Vec<(&str, &str)> = files
+            .iter()
+            .map(|(p, s)| (p.as_str(), s.as_str()))
+            .collect();
+        graph(&CSharpProvider::new().unwrap(), &refs)
+    }
+
+    /// Stands for: a field whose type argument names a class type parameter
+    /// binds no project type, although a project class has the same name; the
+    /// sibling field in an unparameterised holder (POSITIVE CONTROL) binds it.
+    #[test]
+    fn test_field_annotation_class_type_parameter_named_like_project_class_binds_nothing() {
+        let g = build(Some("Token"), "Token");
+        assert!(
+            !names(&g, "items").iter().any(|n| n == "Token"),
+            "items binds a type parameter as a project class: {:?}",
+            annotated(&g, "items")
+        );
+        assert!(
+            annotated(&g, "tokens").contains(&pair(&token_file("Token"), "Token")),
+            "control: {:?}",
+            annotated(&g, "tokens")
+        );
+    }
+
+    /// Stands for: a generic argument in a holder with no type parameters
+    /// binds the project class it names.
+    #[test]
+    fn test_field_annotation_project_class_in_unparameterised_holder_binds_class() {
+        let g = build(Some("Token"), "Token");
+        assert!(
+            annotated(&g, "tokens").contains(&pair(&token_file("Token"), "Token")),
+            "{:?}",
+            annotated(&g, "tokens")
+        );
+    }
+
+    /// Stands for (M07, rename the parameter): `Box<E>` / `List<E>` binds no
+    /// project edge, and `tokens` still binds `Token`.
+    #[test]
+    fn test_field_annotation_renamed_class_type_parameter_binds_nothing() {
+        let g = build(Some("E"), "Token");
+        assert!(
+            !names(&g, "items").iter().any(|n| n == "Token"),
+            "{:?}",
+            annotated(&g, "items")
+        );
+        assert!(
+            annotated(&g, "tokens").contains(&pair(&token_file("Token"), "Token")),
+            "control: {:?}",
+            annotated(&g, "tokens")
+        );
+    }
+
+    /// Stands for (M07, rename the project class): the project class is `Tok`
+    /// and the parameter stays `Token`; `items` binds neither, `tokens` binds `Tok`.
+    #[test]
+    fn test_field_annotation_renamed_project_class_keeps_parameter_binding_nothing() {
+        let g = build(Some("Token"), "Tok");
+        let items = names(&g, "items");
+        assert!(
+            !items.iter().any(|n| n == "Tok" || n == "Token"),
+            "{:?}",
+            annotated(&g, "items")
+        );
+        assert!(
+            annotated(&g, "tokens").contains(&pair(&token_file("Tok"), "Tok")),
+            "control: {:?}",
+            annotated(&g, "tokens")
+        );
+    }
+
+    /// Stands for (M07, remove the parameter): with no class type parameter
+    /// the same field binds the project class `Token`.
+    #[test]
+    fn test_field_annotation_without_class_type_parameter_binds_project_class() {
+        let g = build(None, "Token");
+        assert!(
+            annotated(&g, "items").contains(&pair(&token_file("Token"), "Token")),
+            "{:?}",
+            annotated(&g, "items")
+        );
+    }
+
+    fn method_files() -> Vec<(String, String)> {
+        vec![
+            (token_file("Token"), "class Token {}\n".to_string()),
+            (
+                "src/Box.cs".to_string(),
+                "using System.Collections.Generic;\nclass Box {\n    void put<Token>(List<Token> xs) {}\n}\n".to_string(),
+            ),
+            (
+                "src/Holder.cs".to_string(),
+                "using System.Collections.Generic;\nclass Holder {\n    void take(List<Token> xs) {}\n}\n".to_string(),
+            ),
+        ]
+    }
+
+    /// Stands for: a method type parameter named like a project class binds
+    /// nothing for `put`; `take`, declared where no such parameter exists
+    /// (POSITIVE CONTROL), binds the project class.
+    #[test]
+    fn test_field_annotation_method_type_parameter_named_like_project_class_binds_nothing() {
+        let files = method_files();
+        let refs: Vec<(&str, &str)> = files
+            .iter()
+            .map(|(p, s)| (p.as_str(), s.as_str()))
+            .collect();
+        let g = graph(&CSharpProvider::new().unwrap(), &refs);
+        assert!(
+            !names(&g, "put").iter().any(|n| n == "Token"),
+            "{:?}",
+            annotated(&g, "put")
+        );
+        assert!(
+            annotated(&g, "take").contains(&pair(&token_file("Token"), "Token")),
+            "control: {:?}",
+            annotated(&g, "take")
+        );
+    }
+}

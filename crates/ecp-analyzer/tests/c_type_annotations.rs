@@ -132,3 +132,21 @@ fn test_pointer_return_annotation_binds_project_type() {
     );
     assert_eq!(annotated(&g, "find"), Vec::<(String, String)>::new());
 }
+
+/// A10 no-regression. Stands for: C has no class type parameters, so a field
+/// typed with a project struct keeps binding it (positive only).
+#[test]
+fn test_field_annotation_no_class_type_parameters_binds_project_class() {
+    let g = name_ref_support::graph(
+        &CProvider::new().unwrap(),
+        &[(
+            "src/box.c",
+            "struct Token { int x; };\nstruct Box { struct Token *tokens; };\n",
+        )],
+    );
+    assert!(
+        annotated(&g, "tokens").contains(&("src/box.c".to_string(), "Token".to_string())),
+        "{:?}",
+        annotated(&g, "tokens")
+    );
+}

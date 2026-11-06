@@ -2668,3 +2668,201 @@ fn test_overlay_view_index_only_subtree_unreadable_or_path_attr_reads_no_rows() 
         );
     }
 }
+
+// ------------------------------ A11, A13, A15c, A15d: module-path owners
+
+const PKG_MANIFEST: &str = "[package]\nname = \"x\"\nversion = \"0.1.0\"\nedition = \"2021\"\n";
+
+/// `files` of a single crate, with `Cargo.toml` when `manifest` is set.
+fn crate_files(files: &[(&str, &str)], manifest: bool) -> Vec<(String, String)> {
+    let mut all = if manifest {
+        owned(&[("Cargo.toml", PKG_MANIFEST)])
+    } else {
+        Vec::new()
+    };
+    all.extend(owned(files));
+    all
+}
+
+/// Stands for (A15d): with no `Cargo.toml`, `pub mod a;` in `lib.rs` still
+/// proves module `a`, and the overlay of a dirty `lib.rs` agrees with the
+/// reindex: `a::top()` binds `src/a/mod.rs`, never the same-named `c`. A tree
+/// where no `mod` declares `a` binds nothing, whatever stray file exists.
+#[test]
+fn test_overlay_rust_bare_path_without_manifest_matches_reindex() {
+    let lib = "pub mod a;\npub mod c;\npub fn run() { a::top(); }\n";
+    let layout = |lib: &'static str| {
+        [
+            ("src/lib.rs", lib),
+            ("src/a/mod.rs", "pub fn top() {}\npub mod b;\n"),
+            ("src/a/b.rs", "pub fn deep() {}\n"),
+            ("src/c/mod.rs", "pub fn top() {}\n"),
+        ]
+    };
+    let undeclared = "pub fn run() { a::top(); }\n";
+    for (label, manifest, lib, expected) in [
+        ("no manifest", false, lib, vec![("src/a/mod.rs", "top")]),
+        ("manifest control", true, lib, vec![("src/a/mod.rs", "top")]),
+        ("no mod declaration", false, undeclared, vec![]),
+    ] {
+        let files = crate_files(&layout(lib), manifest);
+        for edited in [lib.to_string(), one_line_edit(lib)] {
+            let (reindex, overlay) = reindex_and_overlay(&files, "src/lib.rs", &edited, &["run"]);
+            assert_reindex_binds(&reindex, None, &expected, label);
+            assert_eq!(overlay, reindex, "{label}");
+        }
+    }
+}
+
+/// Stands for (A15c): a glob import resolves its members, in the overlay as
+/// in the reindex, and the undeclared `src/registry.rs` never binds. The
+/// import is the dirty line: adding and removing `use other::*;` flips the
+/// reindex and the overlay together.
+#[test]
+fn test_overlay_rust_glob_import_matches_reindex() {
+    let with_glob = "mod other;\nuse other::*;\npub fn run() { registry::lookup(); }\n";
+    let without = "mod other;\npub fn run() { registry::lookup(); }\n";
+    let named = "mod other;\nuse other::registry;\npub fn run() { registry::lookup(); }\n";
+    let tree = |lib: &'static str| {
+        [
+            ("src/lib.rs", lib),
+            ("src/other/mod.rs", "pub mod registry;\n"),
+            ("src/other/registry.rs", "pub fn lookup() {}\n"),
+            ("src/registry.rs", "pub fn lookup() {}\n"),
+        ]
+    };
+    for (label, base, edited) in [
+        ("glob added", without, with_glob),
+        ("glob removed", with_glob, without),
+        ("named import control", with_glob, named),
+    ] {
+        let files = crate_files(&tree(base), true);
+        let (reindex, overlay) = reindex_and_overlay(&files, "src/lib.rs", edited, &["run"]);
+        assert!(
+            !reindex.iter().any(|c| c.callee_file == "src/registry.rs"),
+            "{label}: the undeclared decoy binds: {reindex:#?}"
+        );
+        assert_reindex_binds(
+            &reindex,
+            None,
+            &[("src/other/registry.rs", "lookup")],
+            label,
+        );
+        assert_eq!(overlay, reindex, "{label}");
+    }
+}
+
+const TWIN_BASE: &str = "mod a { pub mod b { pub fn right() {} } }\n\
+                         fn caller() { crate::a::b::wrong(); }\n\
+                         fn caller2() { crate::a::b::right(); }\n";
+const TWIN_OUTER: &str = "mod outer { pub mod a { pub mod b { pub fn wrong() {} } } }\n";
+
+/// Stands for (A13): an exact path through a module the file declares twice
+/// binds the member at that path (`caller2 -> right`) and never the namesake
+/// of the other twin (`caller` names no declaration: no edge). The twin
+/// appears or vanishes (`mod outer` added or removed), the caller moves, and
+/// the overlay agrees with the reindex in each.
+#[test]
+fn test_overlay_rust_exact_path_through_twin_modules_matches_reindex() {
+    let with_twin = format!("{TWIN_OUTER}{TWIN_BASE}");
+    for (label, base, edited) in [
+        ("twin added", TWIN_BASE.to_string(), with_twin.clone()),
+        ("twin removed", with_twin.clone(), TWIN_BASE.to_string()),
+        (
+            "caller shifted",
+            with_twin.clone(),
+            format!("\n{with_twin}"),
+        ),
+    ] {
+        let files = crate_files(&[("src/lib.rs", base.as_str())], true);
+        let (reindex, overlay) =
+            reindex_and_overlay(&files, "src/lib.rs", &edited, &["caller", "caller2"]);
+        assert_reindex_binds(&reindex, None, &[("src/lib.rs", "right")], label);
+        assert_eq!(overlay, reindex, "{label}");
+    }
+}
+
+/// Stands for (A13b): the two `new` of `api::v1::Config` and
+/// `api::v2::Config` share file and name, so the callee line tells them
+/// apart: `use_v1` binds the earlier `new`, `use_v2` the later one, in the
+/// reindex and in the overlay of a dirty caller or a dirty `api/mod.rs`.
+#[test]
+fn test_overlay_rust_versioned_twin_types_match_reindex() {
+    let lib = "pub mod api;\n\
+               pub fn use_v1() { api::v1::Config::new(); }\n\
+               pub fn use_v2() { api::v2::Config::new(); }\n";
+    let api = "pub mod v1 {\n    pub struct Config;\n    impl Config { pub fn new() {} }\n}\n\
+               pub mod v2 {\n    pub struct Config;\n    impl Config { pub fn new() {} }\n}\n";
+    let files = crate_files(&[("src/lib.rs", lib), ("src/api/mod.rs", api)], true);
+    let shifted_api = format!("\n{api}");
+    let edits: [(&str, &str, String); 2] = [
+        ("src/lib.rs", "src/lib.rs", one_line_edit(lib)),
+        ("src/api/mod.rs", "src/lib.rs", shifted_api),
+    ];
+    for (dirty, caller_file, edited) in &edits {
+        let line_of = |caller: &str| {
+            let (reindex, overlay) =
+                reindex_and_overlay_of(&files, dirty, edited, caller_file, &[caller]);
+            assert_eq!(overlay, reindex, "{dirty} dirty, {caller}");
+            assert_reindex_binds(
+                &reindex,
+                None,
+                &[("src/api/mod.rs", "new")],
+                &format!("{dirty} dirty, {caller}"),
+            );
+            reindex[0].callee_line
+        };
+        let (v1, v2) = (line_of("use_v1"), line_of("use_v2"));
+        assert!(
+            v1 < v2,
+            "{dirty} dirty: use_v1 binds line {v1}, use_v2 line {v2}"
+        );
+    }
+}
+
+/// Stands for (A11): a union inside an inline module is a confirmable middle
+/// segment, in the overlay as in the reindex. `r` binds the union's `mk` and
+/// never the decoy union in `b.rs`; `rs` (the struct, POSITIVE CONTROL) binds
+/// the later `mk` of the same file. The union becomes a struct and back, the
+/// decoy goes away, and the caller shifts.
+#[test]
+fn test_overlay_rust_union_in_inline_module_matches_reindex() {
+    let lib =
+        "pub mod a;\npub mod b;\npub fn r() { a::m::U::mk(); }\npub fn rs() { a::m::S::mk(); }\n";
+    let a_union = "pub mod m {\n    pub union U { pub x: u32 }\n    impl U { pub fn mk() -> U { U { x: 0 } } }\n    pub struct S { pub x: u32 }\n    impl S { pub fn mk() -> S { S { x: 0 } } }\n}\n";
+    let a_struct = a_union.replace("pub union U", "pub struct U");
+    let decoy = "pub union U { pub x: u32 }\nimpl U { pub fn mk() -> U { U { x: 0 } } }\n";
+    let files = crate_files(
+        &[
+            ("src/lib.rs", lib),
+            ("src/a/mod.rs", a_union),
+            ("src/b.rs", decoy),
+        ],
+        true,
+    );
+    let edits: [(&str, String); 4] = [
+        ("src/lib.rs", one_line_edit(lib)),
+        ("src/a/mod.rs", a_struct.clone()),
+        ("src/a/mod.rs", a_union.to_string()),
+        ("src/b.rs", format!("\n{decoy}")),
+    ];
+    for (dirty, edited) in &edits {
+        let line_of = |caller: &str| {
+            let (reindex, overlay) =
+                reindex_and_overlay_of(&files, dirty, edited, "src/lib.rs", &[caller]);
+            assert_eq!(overlay, reindex, "{dirty} dirty, {caller}");
+            assert_reindex_binds(
+                &reindex,
+                None,
+                &[("src/a/mod.rs", "mk")],
+                &format!("{dirty} dirty, {caller}"),
+            );
+            reindex[0].callee_line
+        };
+        let (union_mk, struct_mk) = (line_of("r"), line_of("rs"));
+        assert!(
+            union_mk < struct_mk,
+            "{dirty} dirty: {union_mk} vs {struct_mk}"
+        );
+    }
+}
