@@ -158,13 +158,9 @@ impl LocalTypes {
 
 /// Build `LocalTypes` by scanning every `function_declaration` and
 /// `method_declaration` in the file.
-pub fn collect_local_types(root: Node<'_>, source: &[u8], recv_map: &ReceiverMap) -> LocalTypes {
-    collect_local_types_at(root, source, recv_map, Path::new(""))
-}
-
-/// [`collect_local_types`] for the file at `path`, which the receiver-budget
-/// blind spots quote.
-pub fn collect_local_types_at(
+///
+/// `path` is the file the receiver-budget blind spots quote.
+pub fn collect_local_types(
     root: Node<'_>,
     source: &[u8],
     recv_map: &ReceiverMap,

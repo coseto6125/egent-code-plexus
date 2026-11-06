@@ -30,7 +30,7 @@ use crate::calls::{
     attach_to_enclosing, reference_function, span_holds, span_width, start_pos, Pos,
 };
 use crate::receiver::{analyze_file, FileReceivers, Receiver as CoreReceiver};
-use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
+use ecp_core::analyzer::types::{BlindSpot, CallSite, RawNode, RawPathLiteral, RawSqlRef};
 use ecp_core::graph::NodeKind;
 use std::collections::HashMap;
 use std::path::Path;
@@ -75,7 +75,7 @@ impl LocalTypes {
 
 /// The import bindings of the file, and the receiver state of its locals
 /// ([`KotlinLowering`]).
-fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
+fn collect_local_types(root: Node<'_>, source: &[u8], path: &Path) -> LocalTypes {
     let mut imports = HashMap::new();
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
@@ -116,7 +116,7 @@ fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
         }
     }
     LocalTypes {
-        receivers: analyze_file(&KotlinLowering, &(), root, source, Path::new("")),
+        receivers: analyze_file(&KotlinLowering, &(), root, source, path),
         imports,
     }
 }
@@ -226,8 +226,11 @@ pub fn extract_kotlin_calls_and_path_literals(
     root: Node<'_>,
     source: &[u8],
     nodes: &mut [RawNode],
+    path: &Path,
+    blind_spots: &mut Vec<BlindSpot>,
 ) -> (Vec<RawPathLiteral>, Vec<RawSqlRef>) {
-    let local_types = collect_local_types(root, source);
+    let mut local_types = collect_local_types(root, source, path);
+    blind_spots.append(&mut local_types.receivers.blind_spots);
     let mut path_literals: Vec<RawPathLiteral> = Vec::new();
     let mut sql_refs: Vec<RawSqlRef> = Vec::new();
     let mut stack: Vec<Node<'_>> = vec![root];

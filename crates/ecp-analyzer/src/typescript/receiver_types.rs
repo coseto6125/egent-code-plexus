@@ -104,13 +104,9 @@ impl LocalTypes {
 
 /// Walk every `function_declaration` / `method_definition` / `arrow_function` node
 /// and collect typed bindings plus every parameter and local declaration name.
-pub fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
-    collect_local_types_at(root, source, Path::new(""))
-}
-
-/// [`collect_local_types`] for the file at `path`, which the receiver-budget
-/// blind spots quote.
-pub fn collect_local_types_at(root: Node<'_>, source: &[u8], path: &Path) -> LocalTypes {
+///
+/// `path` is the file the receiver-budget blind spots quote.
+pub fn collect_local_types(root: Node<'_>, source: &[u8], path: &Path) -> LocalTypes {
     let mut scopes: Vec<(PosRange, HashMap<String, String>)> = Vec::new();
     let mut bindings: Vec<(PosRange, HashSet<String>)> = Vec::new();
     let mut stack: Vec<Node<'_>> = vec![root];

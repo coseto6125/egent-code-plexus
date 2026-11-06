@@ -37,7 +37,9 @@ use crate::calls::{
 };
 use crate::receiver::{analyze_file, FileReceivers, Receiver as CoreReceiver};
 use ecp_core::analyzer::csharp_extension::system_type_name;
-use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef, THIS_MEMBER_PREFIX};
+use ecp_core::analyzer::types::{
+    BlindSpot, CallSite, RawNode, RawPathLiteral, RawSqlRef, THIS_MEMBER_PREFIX,
+};
 use ecp_core::graph::NodeKind;
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -91,7 +93,7 @@ impl LocalTypes {
 
 /// Walk the file once for every field and property a type declares, and for
 /// the receiver state of its locals ([`CSharpLowering`]).
-fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
+fn collect_local_types(root: Node<'_>, source: &[u8], path: &Path) -> LocalTypes {
     let mut members: HashMap<String, Vec<(PosRange, String)>> = HashMap::new();
     let mut explicit: Vec<PosRange> = Vec::new();
     let mut stack: Vec<Node<'_>> = vec![root];
@@ -115,7 +117,7 @@ fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
         }
     }
     LocalTypes {
-        receivers: analyze_file(&CSharpLowering, &(), root, source, Path::new("")),
+        receivers: analyze_file(&CSharpLowering, &(), root, source, path),
         members,
         explicit,
     }
@@ -631,8 +633,11 @@ pub fn extract_csharp_calls_and_path_literals(
     root: Node<'_>,
     source: &[u8],
     nodes: &mut [RawNode],
+    path: &Path,
+    blind_spots: &mut Vec<BlindSpot>,
 ) -> (Vec<RawPathLiteral>, Vec<RawSqlRef>) {
-    let local_types = collect_local_types(root, source);
+    let mut local_types = collect_local_types(root, source, path);
+    blind_spots.append(&mut local_types.receivers.blind_spots);
     let mut path_literals: Vec<RawPathLiteral> = Vec::new();
     let mut sql_refs: Vec<RawSqlRef> = Vec::new();
     let mut stack: Vec<(Node<'_>, Option<Node<'_>>)> = vec![(root, None)];

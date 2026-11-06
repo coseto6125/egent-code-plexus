@@ -30,7 +30,7 @@ use crate::calls::{
 };
 use crate::indirect_dispatch::FnPtrVars;
 use crate::receiver::{analyze_file, FileReceivers};
-use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
+use ecp_core::analyzer::types::{BlindSpot, CallSite, RawNode, RawPathLiteral, RawSqlRef};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::path::Path;
 use tree_sitter::Node;
@@ -49,12 +49,15 @@ pub struct CppBindings {
     /// declares them: two namespaces' `Foo` keep their own fields.
     class_fields: FxHashMap<String, FxHashMap<String, String>>,
     /// The type each local or parameter receiver holds where it is used.
-    /// The budget blind spots it collects are not surfaced: the lowering
-    /// is built without the file path.
     receivers: FileReceivers,
 }
 
 impl CppBindings {
+    /// The receiver-budget blind spots of the file, left behind once.
+    pub fn take_blind_spots(&mut self) -> Vec<BlindSpot> {
+        std::mem::take(&mut self.receivers.blind_spots)
+    }
+
     /// Every local and parameter binding in its own function, lambda or
     /// `catch` scope, and every data member of a class this file declares
     /// over the class body and the class's out-of-class definitions, for
@@ -156,7 +159,7 @@ impl CppBindings {
     }
 }
 
-pub fn collect_bindings(root: Node<'_>, source: &[u8]) -> CppBindings {
+pub fn collect_bindings(root: Node<'_>, source: &[u8], path: &Path) -> CppBindings {
     let mut fn_scopes: Vec<(PosRange, FxHashMap<String, String>)> = Vec::new();
     let mut class_scopes: Vec<(PosRange, String)> = Vec::new();
     let mut class_fields: FxHashMap<String, FxHashMap<String, String>> = FxHashMap::default();
@@ -223,7 +226,7 @@ pub fn collect_bindings(root: Node<'_>, source: &[u8]) -> CppBindings {
         fn_scopes,
         class_scopes,
         class_fields,
-        receivers: analyze_file(&CppLowering, &(), root, source, Path::new("")),
+        receivers: analyze_file(&CppLowering, &(), root, source, path),
     }
 }
 

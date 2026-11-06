@@ -61,7 +61,6 @@ pub struct SwiftBindings {
 
 impl SwiftBindings {
     /// The receiver-budget blind spots of the file, left behind once.
-    #[allow(dead_code)] // the parser hook appends them once it passes `cx.path`
     pub fn take_blind_spots(&mut self) -> Vec<BlindSpot> {
         std::mem::take(&mut self.receivers.blind_spots)
     }
@@ -117,14 +116,9 @@ impl SwiftBindings {
 }
 
 /// Walk the AST collecting class scopes and per-function local-type maps.
-pub fn collect_bindings(root: Node<'_>, source: &[u8]) -> SwiftBindings {
-    collect_bindings_at(root, source, Path::new(""))
-}
-
-/// [`collect_bindings`] for the file at `path`, which the receiver-budget
-/// blind spots quote.
-#[allow(dead_code)] // the parser hook calls it once it passes `cx.path`
-pub fn collect_bindings_at(root: Node<'_>, source: &[u8], path: &Path) -> SwiftBindings {
+///
+/// `path` is the file the receiver-budget blind spots quote.
+pub fn collect_bindings(root: Node<'_>, source: &[u8], path: &Path) -> SwiftBindings {
     let mut fn_scopes: Vec<FnScope> = Vec::new();
     let mut class_scopes: Vec<ClassScope> = Vec::new();
 

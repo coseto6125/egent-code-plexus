@@ -957,7 +957,8 @@ impl ParseSpec for GoSpec {
                 // Replaces the shared `extract_calls` for Go so `obj.Method()`
                 // is recorded as `Type.Method` when `obj`'s type is locally known.
                 let recv_map = build_receiver_map(root, source);
-                f.local_types = collect_local_types(root, source, &recv_map);
+                f.local_types = collect_local_types(root, source, &recv_map, cx.path);
+                cx.blind_spots.extend(f.local_types.take_blind_spots());
                 let (raw_path_literals, raw_sql_refs) =
                     extract_go_calls_and_path_literals_with_imports(
                         root,

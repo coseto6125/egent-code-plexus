@@ -1044,7 +1044,8 @@ impl ParseSpec for CppSpec {
                 // `this.method()` → `Class.method`, `Base::method()` → `Base.method`,
                 // and typed-var `obj.method()` / `obj->method()` → `Type.method`.
                 // Feeds the resolver's Tier 2.5 qualifier-scoped lookup.
-                let mut bindings = collect_bindings(root, source);
+                let mut bindings = collect_bindings(root, source, cx.path);
+                cx.blind_spots.extend(bindings.take_blind_spots());
                 for (span, name) in std::mem::take(&mut f.recovered_classes) {
                     bindings.push_class_scope(span, name);
                 }

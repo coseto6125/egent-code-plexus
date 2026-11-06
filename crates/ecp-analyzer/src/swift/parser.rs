@@ -557,7 +557,8 @@ impl ParseSpec for SwiftSpec {
                 // `Class.method`, `super.method()` → `Super.method`, typed-var
                 // `obj.method()` → `Type.method` (P0 of Constructor Inference, mirrors
                 // Python's `4e4fb1b` for the resolver's Tier 2.5 qualifier lookup).
-                let bindings = collect_bindings(root, cx.source);
+                let mut bindings = collect_bindings(root, cx.source, cx.path);
+                cx.blind_spots.extend(bindings.take_blind_spots());
                 let (raw_path_literals, raw_sql_refs) = extract_swift_calls_and_path_literals(
                     root,
                     cx.source,

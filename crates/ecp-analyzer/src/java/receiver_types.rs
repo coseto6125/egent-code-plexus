@@ -22,7 +22,7 @@ use crate::calls::{
     Pos,
 };
 use crate::receiver::{analyze_file, FileReceivers, Receiver};
-use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
+use ecp_core::analyzer::types::{BlindSpot, CallSite, RawNode, RawPathLiteral, RawSqlRef};
 use ecp_core::graph::NodeKind;
 use rustc_hash::FxHashSet;
 use std::cell::RefCell;
@@ -127,9 +127,12 @@ pub fn extract_java_calls_and_path_literals(
     root: Node<'_>,
     source: &[u8],
     nodes: &mut [RawNode],
+    path: &Path,
+    blind_spots: &mut Vec<BlindSpot>,
 ) -> (Vec<RawPathLiteral>, Vec<RawSqlRef>) {
     let locals = RefCell::default();
-    let receivers = analyze_file(&JavaLowering, &locals, root, source, Path::new(""));
+    let mut receivers = analyze_file(&JavaLowering, &locals, root, source, path);
+    blind_spots.append(&mut receivers.blind_spots);
     let locals = locals.into_inner();
 
     let mut path_literals: Vec<RawPathLiteral> = Vec::new();

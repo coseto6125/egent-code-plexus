@@ -861,7 +861,8 @@ impl<const TSX: bool> ParseSpec for TsSpec<TSX> {
             // - `obj.method()` where `obj` has a type annotation → `Type.method`
             // - everything else falls back to the bare/qualified method name.
             TypeScriptHook::Calls => {
-                let local_types = collect_local_types(root, source);
+                let mut local_types = collect_local_types(root, source, cx.path);
+                cx.blind_spots.extend(local_types.take_blind_spots());
                 // A literal `import('<lit>')` / function-scoped `require('<lit>')`
                 // is a synthetic namespace import, like the static arms above.
                 let mut dynamic = collect_dynamic_imports(root, source);
