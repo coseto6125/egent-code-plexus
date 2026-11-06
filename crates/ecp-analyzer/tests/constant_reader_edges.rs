@@ -205,10 +205,9 @@ fn test_value_read_python_imported_constant_returns_cross_file_edge() {
 }
 
 // A Python type alias (`IntOrStr = int | str`) is a `Typedef` node, and
-// `isinstance(x, IntOrStr)` reads it as a value. main filed the alias as a
-// `Variable` and gave both readers a `value_read` edge; this branch's
-// `Typedef` lost them. Stands for: an alias read keeps its reader edge, a
-// parameter still shadows it, and a class of the name binds no value read.
+// `isinstance(x, IntOrStr)` reads it as a value. Stands for: an alias read
+// keeps its reader edge, a parameter still shadows it, and a class of the
+// name binds no value read.
 const PY_ALIASES: &str = "IntOrStr = int | str\n\n\
 class Shape:\n    pass\n\n\
 def check(x):\n    return isinstance(x, IntOrStr)\n\n\
@@ -259,8 +258,8 @@ fn test_value_read_python_unimported_type_alias_returns_no_edge() {
 }
 
 // Stands for: an unrelated `Num = 3` in another file is a Global-tier value,
-// which Python rejects, so it must not block the alias retry. main binds
-// the alias (then a `Variable`); HEAD binds nothing. Expected: the alias.
+// which Python rejects, so it must not block the alias retry. Expected: the
+// alias.
 #[test]
 fn test_value_read_python_imported_type_alias_beside_unrelated_variable_returns_cross_file_edge() {
     let g = graph(

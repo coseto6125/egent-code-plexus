@@ -2014,8 +2014,8 @@ fn test_overlay_rust_mod_rs_relative_heads_match_reindex() {
 }
 
 // Stands for: a path segment past the item binds only when it is declared
-// inside the segment before it, out of a dirty caller as in a reindex.
-// HEAD's reindex binds `a::m::S::new()` to the `S` beside `m`.
+// inside the segment before it, out of a dirty caller as in a reindex:
+// `a::m::S::new()` never reaches the `S` beside `m`.
 #[test]
 fn test_overlay_rust_path_segment_not_declared_inside_previous_matches_reindex() {
     parity(
@@ -2031,6 +2031,40 @@ fn test_overlay_rust_path_segment_not_declared_inside_previous_matches_reindex()
         &[(
             "src/lib.rs",
             "pub mod a;\nfn run() { a::m::S::new(); crate::a::m::S::new(); a::S::Other::new(); }",
+        )],
+        &[],
+    );
+}
+
+// Stands for: a path through a module or type its file declares twice
+// (`v1::Config` beside `v2::Config`, `outer::a::b` beside `a::b`) binds
+// nothing, out of a dirty caller or a dirty target file as in a reindex.
+#[test]
+fn test_overlay_rust_path_through_twin_qualifier_matches_reindex() {
+    let twins = "pub mod v1 { pub struct Config; impl Config { pub fn new() {} } }\n\
+                 pub mod v2 { pub struct Config; impl Config { pub fn new() {} } }";
+    let caller =
+        "pub mod api;\nfn run() { api::v2::Config::new(); crate::api::v1::Config::new(); }";
+    let bare = "pub mod api;\nfn run() {}";
+    for (base_api, edits) in [
+        (twins, &[("src/lib.rs", caller)][..]),
+        ("", &[("src/api/mod.rs", twins), ("src/lib.rs", caller)][..]),
+    ] {
+        parity(
+            &RustProvider::new().unwrap(),
+            &[("src/lib.rs", bare), ("src/api/mod.rs", base_api)],
+            edits,
+            &[],
+        );
+    }
+    let nested = "mod outer { pub mod a { pub mod b { pub fn wrong() {} } } }\n\
+                  mod a { pub mod b { pub fn right() {} } }\nfn run() {}";
+    parity(
+        &RustProvider::new().unwrap(),
+        &[("src/lib.rs", nested)],
+        &[(
+            "src/lib.rs",
+            &nested.replace("fn run() {}", "fn run() { crate::a::b::wrong(); }"),
         )],
         &[],
     );
@@ -3203,8 +3237,7 @@ fn test_overlay_python_type_alias_value_read_matches_reindex() {
 }
 
 // The alias read keeps its edge beside an unrelated `Num = 3` in another
-// file (a Global-tier value Python rejects), whichever file is dirty. HEAD's
-// reindex has no edge.
+// file (a Global-tier value Python rejects), whichever file is dirty.
 #[test]
 fn test_overlay_python_type_alias_beside_unrelated_variable_matches_reindex() {
     let aliases = "Num = int | float\n";

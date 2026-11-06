@@ -19,6 +19,8 @@
 //! | C caller, vendor prototype + header definition | `Calls` to the definition |
 //! | C++ caller, unnamed `void *` prototype + definition | `Calls` to the definition |
 //! | C++ caller, prototype + K&R C definition | `Calls` to the definition    |
+//! | C++ caller, variadic `.h` prototype + C definition | `Calls` to the definition |
+//! | C++ caller, `struct` + line break in a prototype type | `Calls` to the definition |
 //!
 //! Where the header or the definition is dirty too, the prototype (or the
 //! definition) is an overlay symbol, so the overlay reads its flags from
@@ -517,5 +519,84 @@ fn test_overlay_c_family_field_cpp_caller_kr_definition_matches_reindex() {
         reason: None,
         source_file: "main.cpp",
         expected: &[("run", "lib.c", "kr")],
+    });
+}
+
+const VARIADIC_HEADER: &str = "int lg(const char *fmt, ...);\n";
+const VARIADIC_DEFINITION: &str = "int lg(const char *fmt, ...) { return 0; }\n";
+const VARIADIC_USER_BARE: &str = "#include \"api.h\"\nvoid run() { }\n";
+const VARIADIC_USER: &str = "#include \"api.h\"\nvoid run() { lg(\"x\"); }\n";
+
+/// Stands for: a C-style `...` counts one parameter in a C++-parsed header,
+/// in the base graph and in a dirty header alike, so its C definition
+/// settles it.
+#[test]
+fn test_overlay_c_family_field_cpp_caller_variadic_header_matches_reindex() {
+    assert_case(&Case {
+        label: "C++ caller, variadic prototype + C definition, caller dirty",
+        files: &[
+            ("api.h", VARIADIC_HEADER),
+            ("lib.c", VARIADIC_DEFINITION),
+            ("main.cpp", VARIADIC_USER_BARE),
+        ],
+        edits: &[("main.cpp", VARIADIC_USER)],
+        rel: RelType::Calls,
+        reason: None,
+        source_file: "main.cpp",
+        expected: &[("run", "lib.c", "lg")],
+    });
+    assert_case(&Case {
+        label: "C++ caller, variadic prototype + C definition, header and caller dirty",
+        files: &[
+            ("api.h", ""),
+            ("lib.c", VARIADIC_DEFINITION),
+            ("main.cpp", VARIADIC_USER_BARE),
+        ],
+        edits: &[("api.h", VARIADIC_HEADER), ("main.cpp", VARIADIC_USER)],
+        rel: RelType::Calls,
+        reason: None,
+        source_file: "main.cpp",
+        expected: &[("run", "lib.c", "lg")],
+    });
+}
+
+const BROKEN_STRUCT_HEADER: &str = "struct Foo {};\nvoid f(struct\nFoo);\n";
+const BROKEN_STRUCT_DEFINITION: &str = "#include \"api.hpp\"\nvoid f(Foo x) {}\n";
+const BROKEN_STRUCT_USER_BARE: &str = "#include \"api.hpp\"\nvoid run() { }\n";
+const BROKEN_STRUCT_USER: &str = "#include \"api.hpp\"\nvoid run() { f(Foo{}); }\n";
+
+/// Stands for: `struct\nFoo` and `Foo` are one parameter type on both
+/// sides, so the definition settles the prototype whether the header is
+/// clean or dirty.
+#[test]
+fn test_overlay_c_family_field_cpp_caller_struct_line_break_matches_reindex() {
+    assert_case(&Case {
+        label: "C++ caller, struct + line break prototype + definition, caller dirty",
+        files: &[
+            ("api.hpp", BROKEN_STRUCT_HEADER),
+            ("impl.cpp", BROKEN_STRUCT_DEFINITION),
+            ("main.cpp", BROKEN_STRUCT_USER_BARE),
+        ],
+        edits: &[("main.cpp", BROKEN_STRUCT_USER)],
+        rel: RelType::Calls,
+        reason: None,
+        source_file: "main.cpp",
+        expected: &[("run", "impl.cpp", "f")],
+    });
+    assert_case(&Case {
+        label: "C++ caller, struct + line break prototype + definition, header and caller dirty",
+        files: &[
+            ("api.hpp", "struct Foo {};\n"),
+            ("impl.cpp", BROKEN_STRUCT_DEFINITION),
+            ("main.cpp", BROKEN_STRUCT_USER_BARE),
+        ],
+        edits: &[
+            ("api.hpp", BROKEN_STRUCT_HEADER),
+            ("main.cpp", BROKEN_STRUCT_USER),
+        ],
+        rel: RelType::Calls,
+        reason: None,
+        source_file: "main.cpp",
+        expected: &[("run", "impl.cpp", "f")],
     });
 }

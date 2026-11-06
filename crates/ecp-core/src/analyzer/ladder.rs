@@ -137,6 +137,18 @@ pub fn module_item<D: PickFacts + ?Sized>(decls: &D, id: u32) -> Option<u32> {
     past_body_local(decls, id, |id| is_module_item(decls, id))
 }
 
+/// Whether `file` declares more than one module or type named `name`
+/// (`v1::Config` beside `v2::Config`, `outer::a` beside `a`). A member
+/// records its owner as a bare name ([`owner_key`]), so it cannot say which
+/// of such twins holds it: a Rust path through one binds nothing.
+fn declares_twin_qualifiers<D: ResolveFacts>(decls: &D, file: &str, name: &str) -> bool {
+    decls
+        .call_decls(file, name)
+        .filter(|&(_, kind)| kind.is_qualifier())
+        .nth(1)
+        .is_some()
+}
+
 /// What a call site adds to a name lookup. The index's
 /// `Resolver::resolve_call` and the overlay's edge pass both build one per
 /// call site; `None` in its place is a plain symbol lookup.
@@ -1215,7 +1227,9 @@ pub struct QualifiedSite<'s> {
 ///
 /// A Rust path (`crate::x::parse`) binds a method only when the qualifier
 /// is its owning type (`K::st`): a module path never names a method
-/// ([`rust_path_may_bind`]).
+/// ([`rust_path_may_bind`]). Nor does it bind through a qualifier the file
+/// declares twice ([`declares_twin_qualifiers`]), unless it is the caller's
+/// own type.
 pub fn qualified_member<F: QualifierFacts>(
     facts: &F,
     site: QualifiedSite<'_>,
@@ -1250,6 +1264,16 @@ pub fn qualified_member<F: QualifierFacts>(
     .or_else(|| caller_type.then(|| facts.stored_file(source)).flatten())?;
     let file = file.as_ref();
     let heritage: &[String] = if caller_type { heritage } else { &[] };
+    // `crate::a::b::f()` beside an `outer::a::b`: the file holds two `b`s,
+    // and the owner name cannot say whose `f` the path names. The caller's
+    // own type keeps its `impl` block rule ([`prefer_owned`]).
+    if language == Language::Rust
+        && callee.contains("::")
+        && !caller_type
+        && owner_key(qualifier).is_some_and(|key| declares_twin_qualifiers(decls, file, key))
+    {
+        return None;
+    }
     let pick = decls.first_decl_in_file(file, member, target)?;
     // Only Rust's `impl_only` reads it once `caller_type` holds.
     let declares_type = (!caller_type || language == Language::Rust)
@@ -1791,7 +1815,10 @@ pub fn anchored_module_file<F: ModuleTreeFacts>(
 /// `impl` block counts), every middle segment one declared inside the
 /// segment before it, and the member is picked from the last of them.
 /// `a::missing::top()` and `a::m::S::new()` (no `S` inside `m`) then bind
-/// nothing, never the `top` or `S::new` of `a`'s file.
+/// nothing, never the `top` or `S::new` of `a`'s file. Nor does a path
+/// through a module or type that the file declares twice
+/// ([`declares_twin_qualifiers`]): `api::v2::Config::new()` beside a
+/// `v1::Config` never binds `v1`'s `new`.
 pub fn module_tree_member<F: ModuleTreeFacts, D: ResolveFacts>(
     facts: &F,
     decls: &D,
@@ -1856,6 +1883,9 @@ pub fn module_tree_member<F: ModuleTreeFacts, D: ResolveFacts>(
                 continue;
             }
             let outer = owner_key(qualifier)?;
+            if declares_twin_qualifiers(decls, file, outer) {
+                return None;
+            }
             let (id, _) = decls.call_decls(file, name).find(|&(id, kind)| {
                 kind.is_qualifier() && decls.owner(id).and_then(owner_key) == Some(outer)
             })?;
@@ -1897,6 +1927,9 @@ pub fn module_tree_member<F: ModuleTreeFacts, D: ResolveFacts>(
         return Some(pick);
     }
     let item_key = owner_key(qualifier)?;
+    if declares_twin_qualifiers(decls, file, item_key) {
+        return None;
+    }
     let owned_by_item =
         |id: u32| usable(id) && decls.owner(id).and_then(owner_key) == Some(item_key);
     let owned = candidates

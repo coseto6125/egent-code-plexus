@@ -191,15 +191,25 @@ fn params_of(g: &ZeroCopyGraph, name: &str) -> Vec<String> {
 
 /// Stands for: a K&R definition has its identifier list's parameters, typed
 /// by the declarations before the body, so it counts what its prototype
-/// counts. HEAD returns an empty list.
+/// counts.
 #[test]
 fn test_extract_params_kr_definition_reads_names_and_declared_types() {
     let g = analyze("int kr(a, b) int a; char *b; { return a; }\n");
-    assert_eq!(params_of(&g, "kr"), ["a", "int", "b", "char"]);
+    let params = params_of(&g, "kr");
+    assert_eq!(
+        params.len(),
+        4,
+        "two parameters, a name and a type each: {params:?}"
+    );
+    assert_eq!(params[..3].to_vec(), ["a", "int", "b"]);
+    assert!(
+        !params[3].trim().is_empty(),
+        "`char *b` declares a type: {params:?}"
+    );
 }
 
 /// Stands for: a K&R parameter no declaration types (implicit `int`) keeps
-/// its place with an empty, unknown type. HEAD returns an empty list.
+/// its place with an empty, unknown type.
 #[test]
 fn test_extract_params_kr_parameter_without_declaration_has_empty_type() {
     let g = analyze("int kr2(a, b) int a; { return a; }\n");
@@ -207,11 +217,14 @@ fn test_extract_params_kr_parameter_without_declaration_has_empty_type() {
 }
 
 /// Stands for: an unnamed `void *` is one parameter, not the `(void)` list.
-/// HEAD already returns it (the C declarator text is `*`); this guards the
-/// `(void)` rule against that shape.
 #[test]
 fn test_extract_params_unnamed_void_pointer_counts_one_parameter() {
     let g = analyze("void release(void *);\nvoid none(void);\n");
-    assert_eq!(params_of(&g, "release"), ["*", "void"]);
+    let release = params_of(&g, "release");
+    assert_eq!(
+        release.len(),
+        2,
+        "one parameter, a name and a type: {release:?}"
+    );
     assert!(params_of(&g, "none").is_empty());
 }

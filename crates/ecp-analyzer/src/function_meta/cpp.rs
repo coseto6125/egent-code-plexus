@@ -415,9 +415,13 @@ fn extract_params(fn_node: &Node<'_>, source: &[u8]) -> Vec<String> {
                 }
                 result.push(name);
                 result.push(ty);
-            } else if child.kind() == "variadic_parameter_declaration"
-                || child.kind() == "variadic_parameter"
-            {
+            } else if matches!(
+                child.kind(),
+                // tree-sitter-cpp files a C-style `...` as a bare token, where
+                // tree-sitter-c files a `variadic_parameter` node: both count,
+                // so a `.h` prototype keeps the arity of its `.c` definition.
+                "variadic_parameter_declaration" | "variadic_parameter" | "..."
+            ) {
                 result.push("...".to_string());
                 result.push(String::new());
             }

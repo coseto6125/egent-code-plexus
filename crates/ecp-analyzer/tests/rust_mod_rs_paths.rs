@@ -65,8 +65,8 @@ fn mod_rs_layout(lib: &str) -> [(&str, &str); 4] {
     ]
 }
 
-// main: no `run -> top` edge, because `a/mod.rs` is filed under the stem
-// `mod` and no file is named `a`. Expected: the edge to `src/a/mod.rs`.
+// Stands for: `a/mod.rs` holds module `a`, though its file stem is `mod`
+// and no file is named `a`. Expected: the edge to `src/a/mod.rs`.
 #[test]
 fn test_bare_module_path_call_into_mod_rs_with_child_module_binds_mod_rs() {
     let g = crate_graph(&mod_rs_layout(MOD_RS_LIB), true);
@@ -192,9 +192,8 @@ fn test_module_path_calls_into_inline_module_bind_the_inline_function() {
 }
 
 // Stands for: a path binds only when the tree or the file confirms every
-// segment but the member. main binds `crate::a::missing::top()` to `a`'s
-// `top`, and this branch's `self::` retry also binds the bare
-// `a::missing::top()`. Expected: no edge for either spelling.
+// segment but the member, never `a`'s `top` for `a::missing::top()`.
+// Expected: no edge for any spelling.
 #[test]
 fn test_module_path_call_with_missing_middle_segment_records_no_edge() {
     for call in [
@@ -209,8 +208,9 @@ fn test_module_path_call_with_missing_middle_segment_records_no_edge() {
 }
 
 // Stands for: an inline `mod` past the deepest file module is a segment the
-// file confirms. main binds `self::deep::nope::g()` to the `g` of the inline
-// `deep::inner`. Expected: only the spelled path `deep::inner::g` binds.
+// file confirms, so `self::deep::nope::g()` never reaches the `g` of the
+// inline `deep::inner`. Expected: only the spelled path `deep::inner::g`
+// binds.
 #[test]
 fn test_module_path_call_through_inline_modules_binds_only_declared_segments() {
     let lib = "mod deep { pub mod inner { pub fn g() {} } }\n\
@@ -223,8 +223,8 @@ fn test_module_path_call_through_inline_modules_binds_only_declared_segments() {
 
 // Stands for: a type segment past the module still reaches its associated
 // function (`a::S::new()`), also through a turbofish (`a::S::<u8>::new()`),
-// so the confirmation keeps the type route. main binds the plain spellings;
-// this branch binds all four.
+// so the confirmation keeps the type route. Expected: all four spellings
+// bind it.
 #[test]
 fn test_module_path_call_to_associated_function_of_module_type_binds_it() {
     let files = [
@@ -266,8 +266,7 @@ const NESTED_A: &str = "pub struct S;\npub struct Other;\nimpl S { pub fn new() 
                         pub mod m { pub fn f() {} pub struct T; impl T { pub fn make() {} } }\n";
 
 // Stands for: each segment past the item must be declared inside the one
-// before it. HEAD binds `a::m::S::new()` and `crate::a::m::S::new()` to
-// `S::new` (the `S` beside `m`, not in it); main binds the first.
+// before it, so `a::m::S::new()` never reaches the `S` beside `m`.
 // Expected: no edge for any spelling, `a::S::Other::new()` included.
 #[test]
 fn test_module_path_call_through_segment_not_declared_inside_previous_records_no_edge() {
@@ -285,8 +284,7 @@ fn test_module_path_call_through_segment_not_declared_inside_previous_records_no
 
 // Stands for: the member comes from the last qualifier. `a::m::f()` binds
 // `m`'s own `f`, never the `f` beside `m`, and `a::m::T::make()` reaches
-// the type `T` inside `m`. HEAD and main bind `m::f` (another tier, 0.85);
-// HEAD binds `T::make`, main none.
+// the type `T` inside `m`.
 #[test]
 fn test_module_path_call_into_inline_module_member_binds_the_last_qualifiers_member() {
     let files = [
@@ -304,8 +302,8 @@ fn test_module_path_call_into_inline_module_member_binds_the_last_qualifiers_mem
 }
 
 // Stands for: the Rust parser files no node for a `union`, only its
-// `impl`, and that `impl` names the item as a type. HEAD and main bind
-// nothing; expected: the associated function.
+// `impl`, and that `impl` names the item as a type. Expected: the
+// associated function.
 #[test]
 fn test_module_path_call_to_union_associated_function_binds_it() {
     let files = [
@@ -320,4 +318,67 @@ fn test_module_path_call_to_union_associated_function_binds_it() {
     ];
     let g = crate_graph(&files, true);
     assert_eq!(targets(&g, "r_union"), vec![to("src/a/mod.rs", "mk")]);
+}
+
+const TWIN_CONFIGS: &str = "pub mod v1 {\n    pub struct Config;\n    \
+                            impl Config { pub fn new() -> Self { Config } }\n}\n\
+                            pub mod v2 {\n    pub struct Config;\n    \
+                            impl Config { pub fn new() -> Self { Config } }\n}\n";
+
+// Stands for: a member records its owner as a bare name, so a path through
+// a type the file declares twice (`v1::Config`, `v2::Config`) cannot name
+// one twin's member. Expected: no edge rather than the first `new` of the
+// file, for each spelling and each twin.
+#[test]
+fn test_module_path_call_through_type_declared_twice_in_file_records_no_edge() {
+    let files = [
+        (
+            "src/lib.rs",
+            "pub mod api;\n\
+             pub fn use_v1() { api::v1::Config::new(); }\n\
+             pub fn use_v2() { api::v2::Config::new(); }\n\
+             pub fn use_v2_crate() { crate::api::v2::Config::new(); }\n",
+        ),
+        ("src/api/mod.rs", TWIN_CONFIGS),
+    ];
+    let g = crate_graph(&files, true);
+    for caller in ["use_v1", "use_v2", "use_v2_crate"] {
+        assert_eq!(targets(&g, caller), vec![], "{caller}");
+    }
+}
+
+// Stands for: a top-level type is still a twin of a same-named type inside
+// an inline `mod` of its file: their members share the owner name.
+// Expected: no edge for `a::Config::new()`.
+#[test]
+fn test_module_path_call_to_top_level_type_with_nested_twin_records_no_edge() {
+    let files = [
+        (
+            "src/lib.rs",
+            "pub mod a;\npub fn r_top() { a::Config::new(); }\n",
+        ),
+        (
+            "src/a/mod.rs",
+            "pub mod v1 { pub struct Config; impl Config { pub fn new() {} } }\n\
+             pub struct Config;\nimpl Config { pub fn new() {} }\n",
+        ),
+    ];
+    let g = crate_graph(&files, true);
+    assert_eq!(targets(&g, "r_top"), vec![]);
+}
+
+// Stands for: a path through an inline module the file declares twice
+// (`outer::a::b` beside `a::b`) cannot tell whose member it names, so
+// `crate::a::b::wrong()` never binds `outer::a::b::wrong`. A twin-free
+// path in the same file still binds.
+#[test]
+fn test_module_path_call_through_inline_module_declared_twice_records_no_edge() {
+    let lib = "mod outer { pub mod a { pub mod b { pub fn wrong() {} } } }\n\
+               mod a { pub mod b { pub fn right() {} } }\n\
+               mod solo { pub fn one() {} }\n\
+               fn caller() { crate::a::b::wrong(); }\n\
+               fn plain() { crate::solo::one(); }\n";
+    let g = crate_graph(&[("src/lib.rs", lib)], true);
+    assert_eq!(targets(&g, "caller"), vec![]);
+    assert_eq!(targets(&g, "plain"), vec![to("src/lib.rs", "one")]);
 }

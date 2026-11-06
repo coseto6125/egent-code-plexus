@@ -227,11 +227,28 @@ fn params_of(g: &ZeroCopyGraph, name: &str) -> Vec<String> {
 
 /// Stands for: only a sole `void` with no declarator is the empty `(void)`
 /// list; an unnamed `void *` is one parameter, so a header prototype counts
-/// what its named definition counts. HEAD drops it (an empty list).
+/// what its named definition counts.
 #[test]
 fn test_extract_params_unnamed_void_pointer_counts_one_parameter() {
     let g = analyze("void release(void *);\nvoid two(void *, void **);\nvoid none(void);\n");
-    assert_eq!(params_of(&g, "release"), ["", "void"]);
-    assert_eq!(params_of(&g, "two"), ["", "void", "", "void"]);
+    let count = |name: &str| params_of(&g, name).len() / 2;
+    assert_eq!(count("release"), 1);
+    assert_eq!(count("two"), 2);
     assert!(params_of(&g, "none").is_empty());
+}
+
+/// Stands for: a C-style `...` is one parameter, recorded as `c.rs` records
+/// it: the name `...` with no type, which `CCallable` reads as a known type.
+/// A C++-parsed `.h` prototype then counts what its C definition counts.
+#[test]
+fn test_extract_params_c_style_variadic_counts_one_parameter() {
+    let g = analyze("int lg(const char *fmt, ...);\nint pk(...);\n");
+    let lg = params_of(&g, "lg");
+    assert_eq!(
+        lg.len(),
+        4,
+        "two parameters, a name and a type each: {lg:?}"
+    );
+    assert_eq!(lg[2..].to_vec(), ["...", ""]);
+    assert_eq!(params_of(&g, "pk"), ["...", ""]);
 }

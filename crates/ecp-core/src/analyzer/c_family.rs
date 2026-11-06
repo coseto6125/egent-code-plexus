@@ -88,13 +88,17 @@ impl CCallable {
 
 /// Feed the parameter type `ty` to `hasher` in one spelling: whitespace
 /// kept only between two identifier characters (`T *` == `T*`), and a
-/// leading elaborated keyword dropped (`struct foo` == `foo`), so a C
-/// header and a C++ definition of one function agree.
+/// leading elaborated keyword dropped (`struct foo` == `foo`, also across a
+/// line break: `struct\nfoo`), so a C header and a C++ definition of one
+/// function agree.
 fn hash_type(hasher: &mut FxHasher, ty: &str) {
     let ty = ty.trim();
-    let ty = ["struct ", "enum ", "union ", "class "]
+    let ty = ["struct", "enum", "union", "class"]
         .iter()
-        .find_map(|keyword| ty.strip_prefix(keyword))
+        .find_map(|keyword| {
+            ty.strip_prefix(keyword)
+                .filter(|rest| rest.starts_with(char::is_whitespace))
+        })
         .map_or(ty, str::trim_start);
     let (mut gap, mut prev_ident) = (false, false);
     for c in ty.chars() {

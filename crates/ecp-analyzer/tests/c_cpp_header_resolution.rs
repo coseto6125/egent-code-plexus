@@ -387,8 +387,7 @@ fn test_c_family_field_c_caller_variadic_prototype_binds_definition() {
 
 /// Stands for: one parameter count is not one function; `f(double)` is
 /// another overload of the `f(int)` the header declares, so the C++ caller
-/// gets no edge rather than one to the wrong overload. HEAD binds
-/// `run -> other.cpp::f`; main binds nothing.
+/// gets no edge rather than one to the wrong overload.
 #[test]
 fn test_c_family_field_cpp_overload_of_same_arity_other_types_binds_nothing() {
     let g = graph(&[
@@ -400,8 +399,7 @@ fn test_c_family_field_cpp_overload_of_same_arity_other_types_binds_nothing() {
 }
 
 /// Stands for: a C caller binds the prototype its header declares, never a
-/// C++ overload of the same count and other types. HEAD binds
-/// `crun -> other.cpp::g`.
+/// C++ overload of the same count and other types.
 #[test]
 fn test_c_family_field_c_caller_cpp_overload_of_same_arity_other_types_binds_prototype() {
     let g = graph(&[
@@ -431,10 +429,47 @@ fn test_c_family_field_cpp_prototype_of_other_type_spelling_binds_definition() {
     assert_eq!(calls(&g, "run"), vec![pair("h.cpp", "h")]);
 }
 
+/// Stands for: a line break after the elaborated keyword is whitespace like
+/// a space, so `struct\nFoo` and `Foo` are one parameter type.
+#[test]
+fn test_c_family_field_cpp_prototype_with_line_break_after_struct_binds_definition() {
+    let g = graph(&[
+        ("api.hpp", "struct Foo {};\nvoid f(struct\nFoo);\n"),
+        ("impl.cpp", "#include \"api.hpp\"\nvoid f(Foo x) {}\n"),
+        (
+            "main.cpp",
+            "#include \"api.hpp\"\nvoid run() { f(Foo{}); }\n",
+        ),
+    ]);
+    assert_eq!(calls(&g, "run"), vec![pair("impl.cpp", "f")]);
+}
+
+/// Stands for: a `...` counts as a parameter on both sides of the family, so
+/// a C++-parsed `.h` variadic prototype and its C definition are one
+/// function, and a C definition without the `...` is another overload.
+#[test]
+fn test_c_family_field_cpp_caller_variadic_header_prototype_c_definition_binds_definition() {
+    let header = ("api.h", "int lg(const char *fmt, ...);\n");
+    let user = (
+        "main.cpp",
+        "#include \"api.h\"\nvoid prun() { lg(\"x\"); }\n",
+    );
+    let g = graph(&[
+        header,
+        ("lib.c", "int lg(const char *fmt, ...) { return 0; }\n"),
+        user,
+    ]);
+    assert_eq!(calls(&g, "prun"), vec![pair("lib.c", "lg")]);
+    let g = graph(&[
+        header,
+        ("lib.c", "int lg(const char *fmt) { return 0; }\n"),
+        user,
+    ]);
+    assert_eq!(calls(&g, "prun"), vec![pair("api.h", "lg")]);
+}
+
 /// Stands for: a vendor prototype the caller cannot reach shapes nothing,
 /// so the header definition of another count stays the caller's target.
-/// HEAD binds nothing (the vendor `f(int)` pushes out `f(void)`, then the
-/// vendor barrier drops itself).
 #[test]
 fn test_c_family_field_c_caller_vendor_prototype_beside_header_definition_binds_definition() {
     let g = graph(&[
@@ -446,8 +481,8 @@ fn test_c_family_field_c_caller_vendor_prototype_beside_header_definition_binds_
 }
 
 /// Stands for: an unnamed `void *` is a parameter, not the `(void)` list,
-/// so the header prototype and its named definition count alike. HEAD binds
-/// nothing for the C++ definition and the prototype `api.h` for the C one.
+/// so the header prototype and its named definition count alike, whichever
+/// language defines it.
 #[test]
 fn test_c_family_field_cpp_unnamed_void_pointer_prototype_binds_definition() {
     for (file, definition) in [
@@ -467,7 +502,7 @@ fn test_c_family_field_cpp_unnamed_void_pointer_prototype_binds_definition() {
 }
 
 /// Stands for: a K&R definition counts and types its identifier list from
-/// the declarations before its body. HEAD binds the prototype `api.h`.
+/// the declarations before its body.
 #[test]
 fn test_c_family_field_cpp_caller_kr_definition_binds_definition() {
     let g = graph(&[
@@ -479,8 +514,7 @@ fn test_c_family_field_cpp_caller_kr_definition_binds_definition() {
 }
 
 /// Stands for: a K&R parameter no declaration types has an unknown type,
-/// so its definition settles nothing and stays beside the prototype. HEAD
-/// binds the prototype `api.h` (it counts the definition 0).
+/// so its definition settles nothing and stays beside the prototype.
 #[test]
 fn test_c_family_field_cpp_caller_kr_definition_with_untyped_parameter_binds_nothing() {
     let g = graph(&[
