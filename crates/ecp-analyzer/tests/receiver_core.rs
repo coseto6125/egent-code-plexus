@@ -237,11 +237,12 @@ fn annotated_branch(swap: bool, use_in_else: bool) -> Abstract {
         (annotated, b.new_block())
     };
     let join_block = b.new_block();
-    b.branch(if swap {
-        &[other, annotated]
+    let targets = if swap {
+        [other, annotated]
     } else {
-        &[annotated, other]
-    });
+        [annotated, other]
+    };
+    b.branch(&targets);
     let lower_annotated = |b: &mut IrBuilder| {
         b.switch_to(annotated);
         b.assign(
@@ -620,7 +621,7 @@ fn find_identifier<'t>(node: Node<'t>, source: &[u8], name: &str) -> Option<Node
         .find_map(|child| find_identifier(child, source, name))
 }
 
-fn receiver_of(function: Node<'_>, source: &[u8]) -> Option<Node<'_>> {
+fn receiver_of<'t>(function: Node<'t>, source: &[u8]) -> Option<Node<'t>> {
     find_identifier(function.child_by_field_name("body")?, source, "obj")
 }
 

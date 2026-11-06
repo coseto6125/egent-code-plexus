@@ -294,9 +294,10 @@ fn test_resolve_call_untyped_member_ignores_use_function_returns_no_edge() {
     assert_call_targets(&graph, "go", &[]);
 }
 
-/// An external `use function select` does not suppress `$repo->select()`.
+/// Stands for: an external `use function select` does not suppress
+/// `$repo->select()`; the untyped receiver binds as the tagged guess.
 #[test]
-fn test_resolve_call_untyped_member_ignores_external_use_function_keeps_global() {
+fn test_resolve_call_untyped_member_ignores_external_use_function_binds_tagged_guess() {
     let graph = php_graph(&[
         (
             "src/Repo.php",
@@ -307,11 +308,7 @@ fn test_resolve_call_untyped_member_ignores_external_use_function_keeps_global()
             "<?php use function External\\select; function go($repo) { $repo->select(); }",
         ),
     ]);
-    assert_call_targets(
-        &graph,
-        "go",
-        &[("src/Repo.php", "Repo", "select", global())],
-    );
+    assert_call_targets(&graph, "go", &[("src/Repo.php", "Repo", "select", 0.55)]);
 }
 
 #[test]

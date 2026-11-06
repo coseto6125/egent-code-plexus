@@ -208,12 +208,12 @@ fn test_extract_params_kr_definition_reads_names_and_declared_types() {
     );
 }
 
-/// Stands for: a K&R parameter no declaration types (implicit `int`) keeps
-/// its place with an empty, unknown type.
+/// Stands for: a K&R parameter no declaration types keeps its place and reads
+/// as C89's implicit `int`.
 #[test]
-fn test_extract_params_kr_parameter_without_declaration_has_empty_type() {
+fn test_extract_params_kr_parameter_without_declaration_reads_implicit_int() {
     let g = analyze("int kr2(a, b) int a; { return a; }\n");
-    assert_eq!(params_of(&g, "kr2"), ["a", "int", "b", ""]);
+    assert_eq!(params_of(&g, "kr2"), ["a", "int", "b", "int"]);
 }
 
 /// Stands for: a parameter's type keeps its declarator's shape (pointer,
