@@ -735,6 +735,31 @@ fn test_value_read_rust_const_and_static_return_same_file_edges() {
     );
 }
 
+/// A generic parameter used as a path inside a macro (`S::NAME`) is no value
+/// read; before the fix it bound the only project-wide `const S` at 0.7.
+#[test]
+fn test_value_read_rust_macro_path_segment_returns_no_edge() {
+    let g = graph(
+        &RustProvider::new().unwrap(),
+        &[
+            ("src/a.rs", "pub const S: u8 = 1;\n"),
+            (
+                "src/b.rs",
+                "pub trait Spec { const NAME: &'static str; }\n\
+                 pub fn named<S: Spec>() { println!(\"{}\", S::NAME); }\n\
+                 pub fn plain() { println!(\"{}\", crate::a::S); }\n\
+                 pub fn bare() -> u8 { println!(\"{}\", S); 0 }\n",
+            ),
+        ],
+    );
+    assert_eq!(value_reads(&g, "named"), none());
+    assert!(
+        value_reads(&g, "bare").iter().any(|r| r.1 == "S"),
+        "{:?}",
+        value_reads(&g, "bare")
+    );
+}
+
 #[test]
 fn test_value_read_rust_parameter_shadows_const_returns_no_edge() {
     let g = graph(&RustProvider::new().unwrap(), &[("src/r.rs", RS_SAME_FILE)]);

@@ -295,30 +295,40 @@ fn declared_in<'s>(at: Node<'_>, source: &'s [u8], within: PosRange) -> Vec<Decl
         if from < start || to.0 > end.0 {
             break;
         }
-        let paired = paired_declarators(parent, source);
-        if paired.is_empty() {
-            // C `int a, b = g();` lists the bare `a` in a `declarator` field
-            // next to the `init_declarator`; it still counts as a declarator.
-            let mut shared = named_fields(parent, "declarator");
-            if shared.len() < 2 {
-                let mut cursor = parent.walk();
-                shared = parent
-                    .named_children(&mut cursor)
-                    .filter(|child| is_declarator_kind(child.kind()))
-                    .collect();
-            }
-            if shared.len() >= 2 {
-                declarators.extend(shared.into_iter().map(|d| Declarator {
-                    range: node_range(d),
-                    name: declared_name(d.child_by_field_name("name").unwrap_or(d), source),
-                }));
-            }
-        } else {
-            declarators.extend(paired);
-        }
+        declarators.extend(statement_declarators(parent, source));
         node = parent;
     }
     declarators
+}
+
+/// The declarators of `statement` when it declares two or more values;
+/// empty otherwise. Calls ([`declared_in`]) and reads ([`field_reads_walk`])
+/// both split a shared statement by this rule.
+fn statement_declarators<'s>(statement: Node<'_>, source: &'s [u8]) -> Vec<Declarator<'s>> {
+    let paired = paired_declarators(statement, source);
+    if !paired.is_empty() {
+        return paired;
+    }
+    // C `int a, b = g();` lists the bare `a` in a `declarator` field next to
+    // the `init_declarator`; it still counts as a declarator.
+    let mut shared = named_fields(statement, "declarator");
+    if shared.len() < 2 {
+        let mut cursor = statement.walk();
+        shared = statement
+            .named_children(&mut cursor)
+            .filter(|child| is_declarator_kind(child.kind()))
+            .collect();
+    }
+    if shared.len() < 2 {
+        return Vec::new();
+    }
+    shared
+        .into_iter()
+        .map(|d| Declarator {
+            range: node_range(d),
+            name: declared_name(d.child_by_field_name("name").unwrap_or(d), source),
+        })
+        .collect()
 }
 
 /// A node that declares one value of its statement and holds that value's
@@ -532,8 +542,9 @@ fn field_reads_walk(
             } else {
                 frame.local_scope
             };
-            let mut declarator_count = 0u32;
-            let mut first_declarator = None;
+            // Two of a kind mark a statement that may declare several values;
+            // only those pay for `statement_declarators`.
+            let (mut declarator_kinds, mut name_fields, mut declarator_fields) = (0u32, 0u32, 0u32);
             let mut after_dot = 0;
             loop {
                 let child = cursor.node();
@@ -556,17 +567,10 @@ fn field_reads_walk(
                         local_scope = child_scope;
                     }
                 }
-                if child_kind & kind_flag::DECLARATOR != 0 {
-                    declarator_count += 1;
-                    match declarator_count {
-                        1 => first_declarator = Some(child),
-                        2 => {
-                            for declarator in first_declarator.into_iter().chain([child]) {
-                                declarators.push(Declarator::new(declarator, source, &mut memo));
-                            }
-                        }
-                        _ => declarators.push(Declarator::new(child, source, &mut memo)),
-                    }
+                if child.is_named() {
+                    declarator_kinds += u32::from(child_kind & kind_flag::VALUE_DECLARATOR != 0);
+                    name_fields += u32::from(field & field_flag::NAME != 0);
+                    declarator_fields += u32::from(field & field_flag::DECLARATOR != 0);
                 }
                 stack.push(Frame {
                     node: child,
@@ -589,6 +593,9 @@ fn field_reads_walk(
                 if !cursor.goto_next_sibling() {
                     break;
                 }
+            }
+            if declarator_kinds.max(name_fields).max(declarator_fields) >= 2 {
+                declarators.extend(statement_declarators(n, source));
             }
         }
     }
@@ -907,6 +914,8 @@ mod kind_flag {
     pub const DOT: u32 = 1 << 22;
     /// A kind of the spec's [`NameRefSpec::qualified_values`].
     pub const QUALIFIED_VALUE: u32 = 1 << 23;
+    /// A node that declares one value of its statement ([`super::is_declarator_kind`]).
+    pub const VALUE_DECLARATOR: u32 = 1 << 24;
 }
 
 /// Bits [`KindMemo::field`] records for a field name.
@@ -929,6 +938,8 @@ mod field_flag {
     /// Not a field: a token-tree child right after a `.` token, the member
     /// name of `parts.join(",")` inside `format!(..)`.
     pub const AFTER_DOT: u16 = 1 << 10;
+    /// `declarator`: C/C++ list each declared name in one.
+    pub const DECLARATOR: u16 = 1 << 11;
 }
 
 /// What each node kind and field means to the walk, recorded per file on
@@ -979,6 +990,7 @@ impl<'a> KindMemo<'a> {
                 TYPE_PARAMETERS,
             ),
             (kind.contains("declarator"), DECLARATOR),
+            (is_declarator_kind(kind), VALUE_DECLARATOR),
             (kind == "for_element", COMPREHENSION),
             (kind == "for_in_clause", COMPREHENSION_CLAUSE),
             (
@@ -1045,6 +1057,7 @@ impl<'a> KindMemo<'a> {
             (SKIP_FIELDS.contains(&field), SKIP),
             (NON_VALUE_FIELDS.contains(&field), NON_VALUE),
             (field == "name", NAME),
+            (field == "declarator", DECLARATOR),
             (field == "left", LEFT),
             (matches!(field, "parameter" | "parameters"), PARAMS),
             (
@@ -1179,6 +1192,12 @@ impl NameRefSpec {
             || (field & f::LEFT != 0 && parent & k::ASSIGNMENT != 0)
             || parent & k::SKIP_PARENT != 0
         {
+            return false;
+        }
+        // A macro argument keeps `S::NAME` as loose tokens; a name before
+        // `::` is a path segment (module, type, generic parameter), never a
+        // value, and binding it reached a lone `const S` crates away.
+        if parent & k::TOKEN_TREE != 0 && ident.next_sibling().is_some_and(|s| s.kind() == "::") {
             return false;
         }
         if !self.call_suffixes.is_empty()
@@ -1968,19 +1987,6 @@ struct Declarator<'s> {
     range: PosRange,
     /// The name it declares, when that is a bare name (`b`, not `{ cb }`).
     name: Option<&'s str>,
-}
-
-impl<'s> Declarator<'s> {
-    fn new(node: Node<'_>, source: &'s [u8], memo: &mut KindMemo<'_>) -> Self {
-        let name = node
-            .child_by_field_name("name")
-            .filter(|name| memo.kind(*name) & kind_flag::IDENT != 0)
-            .and_then(|name| name.utf8_text(source).ok());
-        Self {
-            range: node_range(node),
-            name,
-        }
-    }
 }
 
 /// The member of `run`, the value declarations that share the statement

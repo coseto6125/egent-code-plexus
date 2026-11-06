@@ -1,7 +1,7 @@
 use ecp_analyzer::resolution::builder::GraphBuilder;
 use ecp_analyzer::rust::parser::RustProvider;
 use ecp_core::analyzer::provider::LanguageProvider;
-use ecp_core::graph::{NodeKind, ZeroCopyGraph};
+use ecp_core::graph::{FunctionMeta, NodeKind, ZeroCopyGraph};
 
 fn assert_flags(path: &str, source: &str, expected: &[(&str, bool)]) -> ZeroCopyGraph {
     let local = RustProvider::new()
@@ -283,4 +283,72 @@ fn plain() {
 "#,
         &[("helper", true), ("method", true), ("plain", false)],
     );
+}
+
+fn const_is_test(path: &str, source: &str, name: &str) -> bool {
+    let local = RustProvider::new()
+        .unwrap()
+        .parse_file(path.as_ref(), source.as_bytes())
+        .unwrap();
+    let mut builder = GraphBuilder::new();
+    builder.add_graph(local);
+    let graph = builder.build();
+    let index = graph
+        .nodes
+        .iter()
+        .position(|node| {
+            node.kind == NodeKind::Const && node.name.resolve(&graph.string_pool) == name
+        })
+        .unwrap_or_else(|| panic!("missing const {name}"));
+    let by_meta = graph
+        .function_meta(index as u32)
+        .is_some_and(|meta| meta.is_test());
+    let by_node_flags = graph.node_flags[index] & FunctionMeta::FLAG_TEST as u8 != 0;
+    assert_eq!(by_meta, by_node_flags, "node_flags mirrors function_metas");
+    by_node_flags
+}
+
+#[test]
+fn test_extract_const_and_static_in_cfg_test_mod_carry_test_flag() {
+    let source = r#"
+const PROD: usize = 1;
+static PROD_STATIC: usize = 2;
+#[cfg(test)]
+mod tests {
+    const W: usize = super::width();
+    static S: usize = super::width();
+    mod deeper { pub const NESTED: usize = 3; }
+}
+mod tests_by_name { const NAME_ONLY: usize = 4; }
+"#;
+    for (name, expected) in [
+        ("W", true),
+        ("S", true),
+        ("NESTED", true),
+        ("PROD", false),
+        ("PROD_STATIC", false),
+        ("NAME_ONLY", false),
+    ] {
+        assert_eq!(
+            const_is_test("src/lib.rs", source, name),
+            expected,
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn test_extract_const_with_cfg_test_attribute_carries_test_flag() {
+    let source = "#[cfg(test)]\nconst GATED: usize = 1;\nconst OPEN: usize = 2;";
+    assert!(const_is_test("src/lib.rs", source, "GATED"));
+    assert!(!const_is_test("src/lib.rs", source, "OPEN"));
+}
+
+#[test]
+fn test_extract_const_in_test_file_carries_test_flag() {
+    assert!(const_is_test(
+        "tests/integration.rs",
+        "const W: usize = 1;",
+        "W"
+    ));
 }

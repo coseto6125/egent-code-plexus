@@ -709,3 +709,73 @@ fn test_build_php_global_const_new_initializer_gets_constructor_holder() {
         "X must hold the Foo constructor call, got {got:?}"
     );
 }
+
+// ---- Reads in a statement that declares several values ----
+//
+// The read path splits a shared statement by the same declarator rule as the
+// call path: each read lands on its own declarator's value.
+
+fn read_names(provider: &dyn LanguageProvider, path: &str, src: &str, reader: &str) -> Vec<String> {
+    let g = graph(provider, &[(path, src)]);
+    let mut names: Vec<String> = value_reads(&g, reader).into_iter().map(|r| r.1).collect();
+    names.sort();
+    names
+}
+
+fn assert_own_reads(provider: &dyn LanguageProvider, path: &str, src: &str, readers: [&str; 2]) {
+    assert_eq!(read_names(provider, path, src, readers[0]), ["X"], "{src}");
+    assert_eq!(read_names(provider, path, src, readers[1]), ["Y"], "{src}");
+}
+
+#[test]
+fn test_build_c_shared_declaration_read_gets_own_declarator() {
+    let src = "const int X = 1;\nconst int Y = 2;\nint a = X, b = Y;\n";
+    assert_own_reads(&CProvider::new().unwrap(), "t.c", src, ["a", "b"]);
+}
+
+#[test]
+fn test_build_c_bare_and_initialized_declarators_read_gets_initialized_one() {
+    let src = "const int Y = 2;\nint a, b = Y;\n";
+    let p = CProvider::new().unwrap();
+    assert_eq!(read_names(&p, "t.c", src, "b"), ["Y"]);
+    assert!(read_names(&p, "t.c", src, "a").is_empty());
+}
+
+#[test]
+fn test_build_cpp_namespace_shared_declaration_read_gets_own_declarator() {
+    let src = "const int X = 1;\nconst int Y = 2;\nnamespace N { int a = X, b = Y; }\n";
+    assert_own_reads(&CppProvider::new().unwrap(), "t.cpp", src, ["a", "b"]);
+}
+
+#[test]
+fn test_build_go_shared_var_read_pairs_by_position() {
+    let src = "package p\nconst X = 1\nconst Y = 2\nvar A, B = X, Y\n";
+    assert_own_reads(&GoProvider::new().unwrap(), "t.go", src, ["A", "B"]);
+}
+
+#[test]
+fn test_build_go_blank_name_shared_var_read_gets_no_value_holder() {
+    let src = "package p\nconst X = 1\nconst Y = 2\nvar A, _ = X, Y\n";
+    assert_eq!(
+        read_names(&GoProvider::new().unwrap(), "t.go", src, "A"),
+        ["X"]
+    );
+}
+
+#[test]
+fn test_build_swift_top_level_shared_let_read_gets_own_declarator() {
+    let src = "let X = 1\nlet Y = 2\nlet a = X, b = Y\n";
+    assert_own_reads(&SwiftProvider::new().unwrap(), "t.swift", src, ["a", "b"]);
+}
+
+#[test]
+fn test_build_dart_top_level_shared_final_read_gets_own_declarator() {
+    let src = "const X = 1;\nconst Y = 2;\nfinal a = X, b = Y;\n";
+    assert_own_reads(&DartProvider::new().unwrap(), "t.dart", src, ["a", "b"]);
+}
+
+#[test]
+fn test_build_typescript_shared_const_read_gets_own_declarator() {
+    let src = "const X = 1;\nconst Y = 2;\nconst a = X, b = Y;\n";
+    assert_own_reads(&TypeScriptProvider::new().unwrap(), "t.ts", src, ["a", "b"]);
+}

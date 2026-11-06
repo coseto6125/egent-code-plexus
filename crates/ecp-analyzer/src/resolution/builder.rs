@@ -3113,9 +3113,14 @@ fn pass1_8_function_metas(
                     .collect();
                 meta_idx.sort_by_key(|(s, _)| *s);
                 for (raw_idx, raw_node) in local_graph.nodes.iter().enumerate() {
+                    // A Rust test `const`/`static` holds calls and carries a
+                    // flags-only meta, so `--exclude-tests` can drop it.
                     if !matches!(
                         raw_node.kind,
-                        NodeKind::Function | NodeKind::Method | NodeKind::Constructor
+                        NodeKind::Function
+                            | NodeKind::Method
+                            | NodeKind::Constructor
+                            | NodeKind::Const
                     ) {
                         continue;
                     }

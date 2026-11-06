@@ -5,7 +5,7 @@
 //! parameter/return_type signatures.
 
 use super::{declared_type_params, extract_with, node_text, scoped_type_params, ts_span};
-use ecp_core::analyzer::types::{RawFunctionMeta, RawNode};
+use ecp_core::analyzer::types::{RawFunctionMeta, RawNode, Span};
 use ecp_core::graph::{FileCategory, FunctionMeta, NodeKind};
 use tree_sitter::Node;
 
@@ -22,14 +22,47 @@ pub fn extract(
     nodes: &[RawNode],
     file_category: FileCategory,
 ) -> Vec<RawFunctionMeta> {
-    extract_with(
+    let mut metas = extract_with(
         root,
         source,
         nodes,
         file_category,
         RUST_FN_KINDS,
         extract_one,
-    )
+    );
+    // A `const` or `static` is a call holder, and `--exclude-tests` reads the
+    // test verdict from its metadata. Only the test flag is set: the callable
+    // flags and the visibility bits mean nothing here, and a production
+    // constant gets no metadata at all, so every constant reads the same
+    // visibility.
+    metas.extend(
+        nodes
+            .iter()
+            .filter(|node| node.kind == NodeKind::Const)
+            .filter_map(|node| const_item_at(root, node.span))
+            .filter(|item| file_category == FileCategory::Test || in_test_scope(*item, source))
+            .map(|item| RawFunctionMeta {
+                span: ts_span(&item),
+                flags: FunctionMeta::FLAG_TEST,
+                params: Vec::new(),
+                return_type: String::new(),
+                decorators: Vec::new(),
+                type_params: Vec::new(),
+            }),
+    );
+    metas
+}
+
+/// The `const_item` / `static_item` whose span is `span`.
+fn const_item_at(root: Node<'_>, span: Span) -> Option<Node<'_>> {
+    let (start_row, start_col, end_row, end_col) = span;
+    let point = |row: u32, col: u32| tree_sitter::Point::new(row as usize, col as usize);
+    let mut item =
+        root.descendant_for_point_range(point(start_row, start_col), point(end_row, end_col))?;
+    while !matches!(item.kind(), "const_item" | "static_item") {
+        item = item.parent().filter(|parent| ts_span(parent) == span)?;
+    }
+    (ts_span(&item) == span).then_some(item)
 }
 
 fn extract_one(

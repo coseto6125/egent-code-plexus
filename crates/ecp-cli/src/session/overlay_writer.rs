@@ -235,9 +235,11 @@ pub fn fragment_file_from_local_graph(graph: &LocalGraph) -> FragmentFile {
             .nodes
             .iter()
             .map(|n| {
+                // A Rust test-scope `const`/`static` carries a test-flag meta:
+                // it holds calls, and `--exclude-tests` reads the flag.
                 let meta = matches!(
                     n.kind,
-                    NodeKind::Function | NodeKind::Method | NodeKind::Constructor
+                    NodeKind::Function | NodeKind::Method | NodeKind::Constructor | NodeKind::Const
                 )
                 .then(|| metas.get(&n.span))
                 .flatten();
@@ -1132,6 +1134,24 @@ mod flags_tests {
             non_callable.iter().all(|s| s.flags.is_none()),
             "{non_callable:?}"
         );
+    }
+
+    /// Stands for: a dirty Rust file gives its test-module const the same
+    /// test flag a full index gives it, and a production const stays `None`.
+    #[test]
+    fn test_fragment_file_from_local_graph_rust_test_const_carries_test_flag() {
+        let src = "pub const fn width() -> usize { 4 }\npub const PROD: usize = width();\n#[cfg(test)]\nmod tests {\n    const W: usize = super::width();\n}\n";
+        let graph = parse_graph("src/lib.rs", src, SizeCap::BUILT_IN).unwrap();
+        let symbols = fragment_file_from_local_graph(&graph).symbols;
+        let flags_of = |name: &str| {
+            symbols
+                .iter()
+                .find(|s| s.name == name && s.kind == NodeKind::Const)
+                .unwrap_or_else(|| panic!("{name} missing: {symbols:?}"))
+                .flags
+        };
+        assert!(flags_of("W").is_some_and(|f| f & ecp_core::graph::FunctionMeta::FLAG_TEST != 0));
+        assert_eq!(flags_of("PROD"), None);
     }
 }
 
