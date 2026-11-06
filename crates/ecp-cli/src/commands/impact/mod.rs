@@ -1,10 +1,10 @@
-mod ambiguous;
 mod baseline;
 pub(crate) mod bfs;
 mod coverage;
 mod literal;
 pub mod payload;
 mod symbol;
+mod unexplained;
 
 pub use baseline::build_baseline_payload;
 pub use literal::build_literal_coherence_payload;
@@ -13,13 +13,13 @@ pub use symbol::{run_for_symbol, LocalImpact};
 
 use crate::engine::Engine;
 use crate::output::{emit_with_caveat, merge_caveats, OutputFormat};
-use crate::read_context::{ambiguity_candidates, resolve_target, target_request};
+use crate::read_context::{resolve_target, target_request};
 use clap::{Args, ValueEnum};
 use ecp_core::config;
 use ecp_core::contracts::identity::TargetResolution;
 use ecp_core::session::MergedGraph;
 use ecp_core::{EcpError, HIGH_TRUST_CONFIDENCE};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::path::PathBuf;
 
 #[derive(ValueEnum, Clone, Debug, PartialEq)]
@@ -147,7 +147,12 @@ pub struct ImpactArgs {
     /// carries `requires_verification`: true when an edge on its path is heuristic or
     /// below 0.7 confidence (the row keeps its place). `ownerClass` is the stored
     /// owner, null for a nested fn or closure. `lexicalParent` is the enclosing chain (`K::m`),
-    /// else the stored owner.
+    /// else the stored owner. `unexplained_refs` is present when the text scan ran (see
+    /// --ambiguous-callers). `blind_spot_warning.files` is an array: upstream, the files of
+    /// the `unexplained_refs` sites; downstream, the target's own file. An ambiguous target
+    /// exits non-zero and prints `status: "ambiguous"` with at most 5 `candidates`, most
+    /// `callers` first, each with `target`, `file`, `line`, `kind`, `callers` and
+    /// `top_callers`; `more` and `more_command` name the candidates not shown.
     #[arg(long)]
     pub format: Option<OutputFormat>,
 
@@ -181,19 +186,23 @@ pub struct ImpactArgs {
     #[arg(long, conflicts_with_all = ["name", "baseline", "literal", "literal_coherence"])]
     pub batch: bool,
 
-    /// List the call sites the graph could not attribute: when the target's
-    /// name has two or more same-named definitions of a competing kind, the
-    /// resolver drops bare calls to it as ambiguous, so the caller set is a
-    /// lower bound. This
-    /// runs one `git grep` over tracked files in the definitions' language
-    /// family (`.ts` also searches `.tsx`) and reports, under
-    /// `ambiguous_callers`, each `name(` / `.name(` / `->name(` / `::name(`
-    /// site outside the definitions and outside functions already listed as
-    /// callers (at most 50 sites; `total` counts every call). A site whose
-    /// line holds several calls carries `count`; it is omitted when 1. Sites
-    /// are text-match candidates, never merged into the caller list or
-    /// counts. Ruby calls without parentheses are not matched. Upstream
-    /// walks only: ignored with `--direction down`.
+    /// Force the `unexplained_refs` text scan. Without this flag the scan runs
+    /// on an upstream or both walk when the target has at most 2 non-test
+    /// direct callers, or shares its name with another definition of a
+    /// competing kind. The scan runs one `git grep` for whole-word occurrences
+    /// of the bare name in every tracked file except vendored code and build
+    /// output (`node_modules/`, `vendor/`, `.venv/`, `site-packages/`,
+    /// `dist/`, `build/`, `*.min.js`, lockfiles) and documents (`.md`,
+    /// `.rst`, `.txt`), in every language. It lists each occurrence that no
+    /// edge into a same-named definition explains, as `{path, line, form,
+    /// enclosing}`: `form` is `bare` or `member` for a call, `reference` for
+    /// any other use. At most 20 sites; `total` counts every occurrence and
+    /// `files` the files that hold one. A site whose line holds several
+    /// occurrences carries `count`. `total: 0` means the scan ran and found
+    /// none; `error` says why the scan failed. Sites are text matches, never
+    /// merged into the caller list or counts. With `--batch` the scan keeps
+    /// its old rule: it runs only with this flag and only for a name with
+    /// two or more same-named definitions. Ignored with `--direction down`.
     #[arg(
         long = "ambiguous-callers",
         alias = "ambiguous_callers",
@@ -244,12 +253,14 @@ struct ImpactHints {
     hidden_heuristic_edges: u64,
     /// Test callers dropped by `--exclude-tests`.
     hidden_test_callers: u64,
-    /// Payload caveat, merged with `Engine::caveat()` into the `result`
+    /// Payload caveat, merged with `Engine::caveat_for` into the `result`
     /// field by `run`. Symbol mode: the target name collides with other
     /// definitions, so bare calls were Tier-3-suppressed at index time and
     /// the caller set is a lower bound. Baseline mode: changed files over
     /// the size cap were not compared.
     payload_caveat: Option<String>,
+    /// The text scan's `total`, or why it failed; `None` when it did not run.
+    unexplained_refs: Option<Result<u32, String>>,
 }
 
 pub fn run(args: ImpactArgs, engine: &Engine) -> Result<(), EcpError> {
@@ -271,29 +282,39 @@ pub fn run(args: ImpactArgs, engine: &Engine) -> Result<(), EcpError> {
         Err(e @ EcpError::AmbiguousSymbol { .. }) => {
             let target = args.name.as_deref().or(args.target.as_deref());
             let failure = unresolved_payload(&args, target.unwrap_or_default(), &e, engine);
-            emit_with_caveat(&failure, format, engine.caveat())?;
+            let caveat = engine.caveat_for(result_files(&failure));
+            emit_with_caveat(&failure, format, caveat)?;
             return Err(e);
         }
         other => other?,
     };
     if let Some(name) = &hints.empty_hint_name {
-        if hints.hidden_test_callers > 0 {
-            eprintln!(
-                "→ \"{name}\" has no non-test callers; its {} test callers are hidden by --exclude-tests",
-                hints.hidden_test_callers
-            );
-        } else if hints.payload_caveat.is_some() {
-            let action = match args.ambiguous_callers {
-                true => "check `ambiguous_callers`",
-                false => "rerun with --ambiguous-callers to list the candidate call sites",
-            };
-            eprintln!(
-                "→ \"{name}\" has 0 resolved callers, but other definitions share its name, so bare calls to it may have been left unresolved. {action} before treating it as dead code"
-            );
-        } else {
-            eprintln!(
+        // Each conclusion cites the scan that backs it, never a guess.
+        match (hints.hidden_test_callers, &hints.unexplained_refs) {
+            (hidden @ 1.., _) => eprintln!(
+                "→ \"{name}\" has no non-test callers; its {hidden} test callers are hidden by --exclude-tests"
+            ),
+            (0, Some(Ok(0))) => eprintln!(
+                "→ \"{name}\" has 0 resolved callers and no text reference outside its definition. Possible: entry point, dead code, or a name built at run time (string dispatch, reflection)"
+            ),
+            (0, Some(Ok(n))) => {
+                // The collision caveat is set only when other definitions
+                // share the name: the likeliest reason the resolver left a
+                // bare call unattributed.
+                let shared = match hints.payload_caveat.is_some() {
+                    true => "; other definitions share its name",
+                    false => "",
+                };
+                eprintln!(
+                    "→ \"{name}\" has 0 resolved callers{shared}, but {n} text references the graph does not explain (`unexplained_refs`). Read them before treating it as dead code"
+                )
+            }
+            (0, Some(Err(reason))) => eprintln!(
+                "→ \"{name}\" has 0 resolved callers; the text scan failed ({reason}), so this is no proof of dead code"
+            ),
+            (0, None) => eprintln!(
                 "→ \"{name}\" exists but has 0 incoming references. Possible: entry point, dead code, or recent rename. Try --direction both"
-            );
+            ),
         }
         if hints.empty_hint_is_field {
             eprintln!(
@@ -314,11 +335,36 @@ pub fn run(args: ImpactArgs, engine: &Engine) -> Result<(), EcpError> {
             hints.hidden_heuristic_edges
         );
     }
+    let caveat = engine.caveat_for(result_files(&payload));
     emit_with_caveat(
         &payload,
         format,
-        merge_caveats(engine.caveat(), hints.payload_caveat),
+        merge_caveats(caveat, hints.payload_caveat),
     )
+}
+
+/// The files an impact payload names: its rows, its heuristic callers, its
+/// `unexplained_refs` sites and an ambiguity's candidates. The caveat keeps
+/// an overlay line only when that line names one of them.
+fn result_files(payload: &Value) -> Vec<&str> {
+    let lists = [
+        (&payload["impact"], "filePath"),
+        (&payload["heuristic_callers"], "filePath"),
+        (&payload["unexplained_refs"]["sites"], "path"),
+        (&payload["candidates"], "file"),
+    ];
+    let mut files: Vec<&str> = lists
+        .into_iter()
+        .flat_map(|(list, key)| {
+            list.as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(move |row| row[key].as_str())
+        })
+        .collect();
+    files.sort_unstable();
+    files.dedup();
+    files
 }
 
 // ── Batch dispatch ────────────────────────────────────────────────────────────
@@ -380,7 +426,8 @@ fn run_batch(args: ImpactArgs, engine: &Engine) -> Result<(), EcpError> {
             format: args.format,
             literal: None,
             literal_coherence: false,
-            batch: false,
+            // Keeps the opt-in text scan (`symbol::scan_runs`).
+            batch: true,
             ambiguous_callers: args.ambiguous_callers,
             max_results: args.max_results,
         };
@@ -414,7 +461,8 @@ fn run_batch(args: ImpactArgs, engine: &Engine) -> Result<(), EcpError> {
 
 /// The payload of a target that did not resolve. An agent branches on
 /// `status`: a name with several declarations is not a missing name. An
-/// ambiguity lists its `candidates`, each with the arguments that select it.
+/// ambiguity lists its `candidates` with their evidence
+/// ([`symbol::ambiguous_candidates`]).
 fn unresolved_payload(args: &ImpactArgs, target: &str, e: &EcpError, engine: &Engine) -> Value {
     let status = match e {
         EcpError::AmbiguousSymbol { .. } => "ambiguous",
@@ -425,23 +473,26 @@ fn unresolved_payload(args: &ImpactArgs, target: &str, e: &EcpError, engine: &En
         "target": target,
         "status": status,
     });
-    if let Some(candidates) = (status == "ambiguous")
+    let fields = (status == "ambiguous")
         .then(|| ambiguity_of(args, target, engine))
-        .flatten()
-    {
-        p["candidates"] = candidates;
+        .flatten();
+    if let (Some(fields), Some(obj)) = (fields, p.as_object_mut()) {
+        obj.extend(fields);
     }
     p
 }
 
-/// The candidates of an ambiguous target, resolved again on the error path
-/// only: `EcpError` has no room for them, and its callers (`peers plan`,
+/// The candidate fields of an ambiguous target, resolved again on the error
+/// path only: `EcpError` has no room for them, and its callers (`peers plan`,
 /// `group impact`) match on it.
-fn ambiguity_of(args: &ImpactArgs, target: &str, engine: &Engine) -> Option<Value> {
+fn ambiguity_of(args: &ImpactArgs, target: &str, engine: &Engine) -> Option<Map<String, Value>> {
     let graph = engine.graph().ok()?;
     let request = target_request(target, args.kind.as_deref(), args.file.as_deref()).ok()?;
-    match resolve_target(&MergedGraph::new(graph, engine.overlay_view()), &request) {
-        TargetResolution::Ambiguous(a) => Some(ambiguity_candidates(&a)),
+    let merged = MergedGraph::new(graph, engine.overlay_view());
+    match resolve_target(&merged, &request) {
+        TargetResolution::Ambiguous(a) => {
+            Some(symbol::ambiguous_candidates(merged, &a, request.name()))
+        }
         _ => None,
     }
 }

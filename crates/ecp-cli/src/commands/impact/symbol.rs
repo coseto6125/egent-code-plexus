@@ -1,6 +1,7 @@
-use super::bfs::{merged_node_meta, run_bfs, WalkOpts};
+use super::bfs::{merged_node_is_test, merged_node_meta, run_bfs, WalkOpts};
 use super::coverage::{build_coverage_json, coverage_analyses};
 use super::payload::SymbolImpactPayload;
+use super::unexplained::{self, is_vendored, UnexplainedRefs, UNEXPLAINED_SCAN_MAX_CALLERS};
 use super::{
     parse_csv_lower, resolve_min_conf, ImpactArgs, ImpactHints, DEFAULT_CONFIDENCE_THRESHOLD,
 };
@@ -10,13 +11,21 @@ use crate::commands::impact::{
 };
 use crate::commands::symbol_id::same_name_def_count;
 use crate::engine::Engine;
-use crate::read_context::{resolve_target, shell_word, target_request};
-use ecp_core::contracts::identity::{TargetRequest, TargetResolution};
+use crate::read_context::{ambiguity_candidates, resolve_target, shell_word, target_request};
+use ecp_core::contracts::identity::{Ambiguity, TargetRequest, TargetResolution};
+use ecp_core::graph::RelType;
 use ecp_core::session::MergedGraph;
 use ecp_core::EcpError;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::Path;
+
+/// Candidates an ambiguous target lists, most-called first.
+const MAX_CANDIDATES: usize = 5;
+
+/// Callers each ambiguous candidate names as evidence.
+const TOP_CALLERS: usize = 3;
 
 // ── Per-symbol library API (used by `ecp group impact`) ─────────────────────
 
@@ -109,7 +118,9 @@ pub fn run_for_symbol(
         explain_confidence: false,
         literal: None,
         literal_coherence: false,
-        batch: false,
+        // A library caller fans out over many symbols, as `--batch` does, so
+        // it keeps the opt-in text scan (`scan_runs`).
+        batch: true,
         ambiguous_callers: false,
         max_results,
     };
@@ -129,12 +140,13 @@ pub(super) fn impact_by_name(
         .expect("build_payload_with_hints gates on name||target");
     let graph = engine.graph().map_err(|e| EcpError::Rkyv(e.to_string()))?;
     let view = engine.overlay_view();
+    let merged = MergedGraph::new(graph, view);
     let request = target_request(name, args.kind.as_deref(), args.file.as_deref())?;
     let bare_name = request.name();
 
     // A narrowing flag that leaves 2+ declarations (two `load` overloads,
     // `--kind method`) must not merge unrelated blast radii.
-    let (start_idx, target_kind) = match resolve_target(&MergedGraph::new(graph, view), &request) {
+    let (start_idx, target_kind) = match resolve_target(&merged, &request) {
         TargetResolution::Unique(c) => (c.node as usize, c.kind),
         TargetResolution::Ambiguous(a) => return Err(a.to_error(&request)),
         TargetResolution::NotFound { named } => return Err(not_found(&request, named)),
@@ -182,8 +194,29 @@ pub(super) fn impact_by_name(
             .iter()
             .any(|e| e["depth"].as_u64() == Some(0) && e["kind"].as_str() == Some("property"));
 
+    let upstream = matches!(args.direction, Direction::Up | Direction::Both);
+    let scan = (upstream
+        && scan_runs(args, same_name_defs, || {
+            direct_callers(merged, start_idx as u32).len()
+        }))
+    .then(|| {
+        let repo = Path::new(args.repo.as_deref().unwrap_or("."));
+        unexplained::scan(merged, bare_name, repo)
+    });
+
+    // Blind spots scoped to this answer's evidence: an upstream walk counts
+    // the files of the unexplained sites, where a construct the parser
+    // cannot read may hold a caller; a downstream walk counts the target's
+    // own file, where it may hold a callee.
     let target_file = merged_node_meta(graph, view, start_idx).file_path;
-    let all_blind_spot_kinds = collect_blind_spots(graph, &target_file);
+    let mut spot_files: BTreeSet<&str> = scan
+        .as_ref()
+        .map(UnexplainedRefs::files)
+        .unwrap_or_default();
+    if matches!(args.direction, Direction::Down | Direction::Both) {
+        spot_files.insert(&target_file);
+    }
+    let blind_spots = collect_blind_spots(graph, &spot_files);
     // `coverage_analyses` reads the walk behind `--test-coverage` only, both
     // buckets; the default path moves the results into the payload once.
     let coverage_walk = args.test_coverage.then(|| {
@@ -212,13 +245,8 @@ pub(super) fn impact_by_name(
         args.confidence_threshold,
     );
 
-    if !all_blind_spot_kinds.is_empty() {
-        let mut by_kind = std::collections::BTreeMap::<String, u32>::new();
-        for k in &all_blind_spot_kinds {
-            *by_kind.entry(k.clone()).or_insert(0) += 1;
-        }
-        result_obj["blind_spot_warning"] =
-            blind_spot_warning(json!(target_file), all_blind_spot_kinds.len(), &by_kind);
+    if let Some(warning) = blind_spot_warning(&blind_spots, &args.direction) {
+        result_obj["blind_spot_warning"] = warning;
     }
 
     if let Some(walk) = &coverage_walk {
@@ -239,16 +267,24 @@ pub(super) fn impact_by_name(
     // resolver may have suppressed bare calls to this name at index time
     // (`DecisionTier::AmbiguousGlobal`; language and vendor barriers exempt
     // some), so the upstream caller set is a lower bound — the payload must
-    // say so instead of reading as complete.
-    let ambiguity_caveat = (same_name_defs >= 2
-        && matches!(args.direction, Direction::Up | Direction::Both))
-    .then(|| {
-        let action = match args.ambiguous_callers {
-            true => "The `ambiguous_callers` field lists the call sites the graph could not \
-                     attribute."
-                .to_string(),
-            false => format!(
-                "Run `{}` to list the call sites the graph could not attribute.",
+    // say so instead of reading as complete, and cite what the scan found.
+    let ambiguity_caveat = (same_name_defs >= 2 && upstream).then(|| {
+        let action = match &scan {
+            Some(refs) => match (refs.error(), refs.total()) {
+                (Some(reason), _) => format!(
+                    "The text scan for references the graph does not explain failed \
+                     ({reason})."
+                ),
+                (None, 0) => {
+                    "The text scan found no reference the graph does not explain.".to_string()
+                }
+                (None, n) => format!(
+                    "`unexplained_refs` lists the {n} text reference(s) the graph does not \
+                     explain."
+                ),
+            },
+            None => format!(
+                "Run `{}` to list the text references the graph does not explain.",
                 ambiguous_callers_command(name, args.file.as_deref(), args.kind.as_deref())
             ),
         };
@@ -258,10 +294,8 @@ pub(super) fn impact_by_name(
              import/qualifier context) may be unattributed. {action}"
         )
     });
-    if args.ambiguous_callers && ambiguity_caveat.is_some() {
-        let repo = Path::new(args.repo.as_deref().unwrap_or("."));
-        result_obj["ambiguous_callers"] =
-            super::ambiguous::ambiguous_callers(MergedGraph::new(graph, view), bare_name, repo);
+    if let Some(refs) = &scan {
+        result_obj["unexplained_refs"] = refs.to_json();
     }
 
     Ok((
@@ -273,11 +307,140 @@ pub(super) fn impact_by_name(
             hidden_heuristic_edges: hidden_heuristic_total,
             hidden_test_callers: hidden_test_total,
             payload_caveat: ambiguity_caveat,
+            unexplained_refs: scan.as_ref().map(|refs| match refs.error() {
+                Some(reason) => Err(reason.to_string()),
+                None => Ok(refs.total()),
+            }),
         },
     ))
 }
 
-/// The exact command that lists the unattributed call sites, carrying the
+/// Whether the `unexplained_refs` text scan runs on an upstream walk. With
+/// `batch` set (`--batch`, and the library callers that fan out over many
+/// symbols) the scan stays opt-in, as before: one `git grep` per target
+/// would undo the graph load they amortise. `direct_callers` runs last: a
+/// colliding name or the flag decides first.
+fn scan_runs(
+    args: &ImpactArgs,
+    same_name_defs: usize,
+    direct_callers: impl FnOnce() -> usize,
+) -> bool {
+    match args.batch {
+        true => args.ambiguous_callers && same_name_defs >= 2,
+        false => {
+            args.ambiguous_callers
+                || same_name_defs >= 2
+                || direct_callers() <= UNEXPLAINED_SCAN_MAX_CALLERS
+        }
+    }
+}
+
+/// The non-test nodes an upstream walk reaches at depth 1 through a resolved
+/// edge: the sources of the in-edges of `idx`, of the other parts of its C#
+/// `partial` type and of its constructors, minus containment, `PartOf` and
+/// heuristic edges. Sorted by merged index, each once.
+pub(super) fn direct_callers(merged: MergedGraph<'_>, idx: u32) -> Vec<u32> {
+    let mut seeds = merged.partial_parts(idx);
+    if seeds.is_empty() {
+        seeds.push(idx);
+    }
+    let constructors: Vec<u32> = seeds
+        .iter()
+        .flat_map(|&s| merged.constructors_of(s))
+        .collect();
+    seeds.extend(constructors);
+    let mut callers: Vec<u32> = seeds
+        .iter()
+        .flat_map(|&s| merged.in_edges(s))
+        .filter(|e| {
+            let rel = e.rel_type();
+            !rel.is_scope_containment() && rel != RelType::PartOf && !rel.is_heuristic()
+        })
+        .map(|e| e.source)
+        .filter(|s| !seeds.contains(s))
+        .filter(|&s| {
+            merged
+                .node(s)
+                .is_some_and(|n| n.file_path(&merged).is_some())
+                && !merged_node_is_test(&merged, s)
+        })
+        .collect();
+    callers.sort_unstable();
+    callers.dedup();
+    callers
+}
+
+/// The first [`TOP_CALLERS`] of `callers` by file and line, as `name file:line`.
+fn top_callers(merged: MergedGraph<'_>, callers: &[u32]) -> Vec<String> {
+    let mut rows: Vec<(&str, u32, &str)> = callers
+        .iter()
+        .filter_map(|&c| {
+            let node = merged.node(c)?;
+            Some((
+                node.file_path(&merged)?,
+                node.start_line(),
+                node.name(&merged),
+            ))
+        })
+        .collect();
+    rows.sort_unstable();
+    rows.into_iter()
+        .take(TOP_CALLERS)
+        .map(|(file, line, name)| format!("{name} {file}:{line}"))
+        .collect()
+}
+
+/// The payload fields of an ambiguous target: at most [`MAX_CANDIDATES`]
+/// candidates, most-called first (ties keep the resolver's order), each with
+/// the arguments that select it and its callers as evidence. A candidate in
+/// a vendored directory is dropped unless every candidate is in one. `more`
+/// counts the candidates not shown, dropped ones included, and names the
+/// command that lists them all. The agent picks; this never does.
+pub(super) fn ambiguous_candidates(
+    merged: MergedGraph<'_>,
+    ambiguity: &Ambiguity,
+    name: &str,
+) -> Map<String, Value> {
+    let selectors = ambiguity_candidates(ambiguity);
+    let selectors = selectors.as_array().map(Vec::as_slice).unwrap_or_default();
+    let all_vendored = ambiguity.candidates().iter().all(|c| is_vendored(&c.file));
+    let mut rows: Vec<(usize, Value)> = ambiguity
+        .candidates()
+        .iter()
+        .zip(selectors)
+        .filter(|(c, _)| all_vendored || !is_vendored(&c.file))
+        .map(|(c, selector)| {
+            let callers = direct_callers(merged, c.node);
+            let row = json!({
+                "target": selector["target"],
+                "file": c.file,
+                "line": c.line,
+                "kind": selector["kind"],
+                "callers": callers.len(),
+                "top_callers": top_callers(merged, &callers),
+            });
+            (callers.len(), row)
+        })
+        .collect();
+    rows.sort_by(|a, b| b.0.cmp(&a.0));
+    rows.truncate(MAX_CANDIDATES);
+    let more = ambiguity.total() - rows.len();
+    let mut fields = Map::new();
+    fields.insert(
+        "candidates".to_string(),
+        rows.into_iter().map(|(_, row)| row).collect(),
+    );
+    if more > 0 {
+        fields.insert("more".to_string(), json!(more));
+        fields.insert(
+            "more_command".to_string(),
+            json!(format!("ecp find {} --all", shell_word(name))),
+        );
+    }
+    fields
+}
+
+/// The exact command that lists the unexplained references, carrying the
 /// `--file` / `--kind` that narrowed this run: a colliding name without them
 /// is rejected as ambiguous, so a bare `--target` would not run.
 fn ambiguous_callers_command(name: &str, file: Option<&str>, kind: Option<&str>) -> String {
@@ -308,31 +471,58 @@ fn not_found(request: &TargetRequest, named: u32) -> EcpError {
     })
 }
 
-pub(super) fn collect_blind_spots(
-    graph: &ecp_core::graph::ArchivedZeroCopyGraph,
-    target_file_path: &str,
-) -> Vec<String> {
+/// The `(file, kind)` of every blind spot in `files`.
+pub(super) fn collect_blind_spots<'g>(
+    graph: &'g ecp_core::graph::ArchivedZeroCopyGraph,
+    files: &BTreeSet<&str>,
+) -> Vec<(&'g str, &'g str)> {
+    if files.is_empty() {
+        return Vec::new();
+    }
     graph
         .blind_spots
         .iter()
-        .filter(|bs| bs.file_path.resolve(&graph.string_pool) == target_file_path)
-        .map(|bs| bs.kind.resolve(&graph.string_pool).to_string())
+        .filter_map(|bs| {
+            let file = bs.file_path.resolve(&graph.string_pool);
+            files
+                .contains(file)
+                .then(|| (file, bs.kind.resolve(&graph.string_pool)))
+        })
         .collect()
 }
 
-/// The counts cover the target's own file only; a blind spot that hides a
-/// caller sits in the caller's file, so the note says those files are unread.
-fn blind_spot_warning(
-    files: Value,
-    total: usize,
-    by_kind: &std::collections::BTreeMap<String, u32>,
-) -> Value {
-    json!({
-        "file": files,
-        "total": total,
+/// The `blind_spot_warning` object, `None` when no blind spot is in scope.
+/// `files` lists the files that hold the counted blind spots, always as an
+/// array.
+fn blind_spot_warning(spots: &[(&str, &str)], direction: &Direction) -> Option<Value> {
+    if spots.is_empty() {
+        return None;
+    }
+    let files: BTreeSet<&str> = spots.iter().map(|&(file, _)| file).collect();
+    let mut by_kind = BTreeMap::<&str, u32>::new();
+    for &(_, kind) in spots {
+        *by_kind.entry(kind).or_insert(0) += 1;
+    }
+    let scope = match direction {
+        Direction::Up => {
+            "blind spots in the files of the `unexplained_refs` sites, where a construct \
+             the parser cannot read may hold a caller"
+        }
+        Direction::Down => {
+            "blind spots in the target's own file, where a construct the parser cannot \
+             read may hold a callee"
+        }
+        Direction::Both => {
+            "blind spots in the files of the `unexplained_refs` sites (a possible caller) \
+             and in the target's own file (a possible callee)"
+        }
+    };
+    Some(json!({
+        "files": files,
+        "total": spots.len(),
         "by_kind": by_kind,
-        "note": "counts cover only the target's own file(s) listed in `file`; blind spots in callers' files are not included, so traversal may be incomplete — see `ecp doctor` blind spots catalog",
-    })
+        "note": format!("{scope} — see `ecp doctor` blind spots catalog"),
+    }))
 }
 
 #[cfg(test)]
@@ -340,13 +530,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_blind_spot_warning_note_names_scope_and_excludes_callers() {
-        let by_kind = std::collections::BTreeMap::from([("php-variable-call".to_string(), 6)]);
-        let w = blind_spot_warning(json!("app/Svc.php"), 6, &by_kind);
-        let note = w["note"].as_str().unwrap();
-        assert_eq!(w["file"], "app/Svc.php");
-        assert!(note.contains("only the target's own file"), "{note}");
-        assert!(note.contains("callers' files are not included"), "{note}");
+    fn test_blind_spot_warning_files_array_and_note_name_the_scope() {
+        let spots = [
+            ("app/Svc.php", "php-variable-call"),
+            ("app/Svc.php", "php-variable-call"),
+            ("app/Use.php", "php-dynamic-new"),
+        ];
+        let up = blind_spot_warning(&spots, &Direction::Up).unwrap();
+        assert_eq!(up["files"], json!(["app/Svc.php", "app/Use.php"]));
+        assert_eq!(up["total"], 3);
+        assert_eq!(up["by_kind"]["php-variable-call"], 2);
+        let note = up["note"].as_str().unwrap();
+        assert!(note.contains("`unexplained_refs` sites"), "{note}");
+        let down = blind_spot_warning(&spots[..1], &Direction::Down).unwrap();
+        assert_eq!(
+            down["files"],
+            json!(["app/Svc.php"]),
+            "an array, never a scalar"
+        );
+        assert!(down["note"].as_str().unwrap().contains("target's own file"));
+    }
+
+    #[test]
+    fn test_blind_spot_warning_no_spot_none() {
+        assert!(blind_spot_warning(&[], &Direction::Both).is_none());
     }
 
     #[test]

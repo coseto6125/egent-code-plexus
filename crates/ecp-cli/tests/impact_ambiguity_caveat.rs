@@ -107,20 +107,26 @@ fn impact_on_collision_name_flags_incomplete_callers() {
         caveat.contains("2 same-named"),
         "caveat must count the same-named definitions: {caveat}"
     );
-    // The contract: the caveat names a command the agent can run as-is,
-    // carrying the --file that made the colliding name resolvable.
+    // The contract: a colliding name is scanned by default, and the caveat
+    // cites what the scan found instead of a command to run.
+    let total = json["unexplained_refs"]["total"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("a colliding name is scanned without the flag: {json}"));
     assert!(
-        caveat.contains("ecp impact --target process --file src/alpha.py --ambiguous-callers"),
-        "caveat must name the runnable command: {caveat}"
+        total >= 1,
+        "the suppressed bare call is unexplained: {json}"
     );
     assert!(
-        json.get("ambiguous_callers").is_none(),
-        "without the flag the payload must not carry the sites: {json}"
+        caveat.contains(&format!(
+            "`unexplained_refs` lists the {total} text reference(s)"
+        )),
+        "caveat must cite the scan: {caveat}"
     );
+    assert!(!caveat.contains("--ambiguous-callers"), "{caveat}");
 }
 
 #[test]
-fn test_ambiguous_callers_json_format_parses_and_lists_suppressed_bare_call() {
+fn test_unexplained_refs_json_format_parses_and_lists_suppressed_bare_call() {
     let tmp = tempfile::tempdir().unwrap();
     let home_tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path();
@@ -132,12 +138,12 @@ fn test_ambiguous_callers_json_format_parses_and_lists_suppressed_bare_call() {
         home_tmp.path(),
         &["process", "--file", "src/alpha.py", "--ambiguous-callers"],
     );
-    let field = &json["ambiguous_callers"];
+    let field = &json["unexplained_refs"];
     let sites = field["sites"]
         .as_array()
-        .unwrap_or_else(|| panic!("ambiguous_callers.sites expected: {json}"));
+        .unwrap_or_else(|| panic!("unexplained_refs.sites expected: {json}"));
     assert!(
-        sites.iter().any(|s| s["file"] == "src/caller.py"
+        sites.iter().any(|s| s["path"] == "src/caller.py"
             && s["line"] == 2
             && s["enclosing"] == "run_all"
             && s["form"] == "bare"),
@@ -146,19 +152,19 @@ fn test_ambiguous_callers_json_format_parses_and_lists_suppressed_bare_call() {
     assert!(
         sites
             .iter()
-            .all(|s| s["file"] != "src/alpha.py" && s["file"] != "src/beta.py"),
+            .all(|s| s["path"] != "src/alpha.py" && s["path"] != "src/beta.py"),
         "definition lines must be dropped: {json}"
     );
     assert_eq!(field["shown"].as_u64(), Some(sites.len() as u64));
     let caveat = json["result"].as_str().unwrap_or_default();
     assert!(
-        caveat.contains("`ambiguous_callers` field"),
-        "with the flag set the caveat points at the field: {caveat}"
+        caveat.contains("`unexplained_refs` lists"),
+        "the caveat points at the field: {caveat}"
     );
 }
 
 #[test]
-fn test_ambiguous_callers_batch_targets_each_get_own_field() {
+fn test_unexplained_refs_batch_targets_each_get_own_field() {
     use std::io::Write;
     let tmp = tempfile::tempdir().unwrap();
     let home_tmp = tempfile::tempdir().unwrap();
@@ -215,7 +221,7 @@ fn test_ambiguous_callers_batch_targets_each_get_own_field() {
         "the refusal lists both candidates: {stdout}"
     );
     assert!(
-        blocks[1].1.get("ambiguous_callers").is_none(),
+        blocks[1].1.get("unexplained_refs").is_none(),
         "collision-free target carries no field: {stdout}"
     );
 }
@@ -369,11 +375,12 @@ fn test_impact_caveat_class_and_own_constructor_do_not_compete_java() {
 }
 
 /// Python `def Q` beside `class Q(Base):`. The function target weighs
-/// callables only, so it carries no `ambiguous_callers`; the class target is
-/// competed by the function, and the class declaration line `Q(Base)` is a
-/// definition, never a call site.
+/// callables only, so it carries no collision caveat, and both declarations
+/// are explained; the class target is competed by the
+/// function, and the class declaration line `Q(Base)` is a definition,
+/// never an unexplained site.
 #[test]
-fn test_ambiguous_callers_function_and_class_namesake_python() {
+fn test_unexplained_refs_function_and_class_namesake_python() {
     let tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path();
     write(
@@ -402,8 +409,16 @@ fn test_ambiguous_callers_function_and_class_namesake_python() {
         ],
     );
     assert!(
-        function.get("ambiguous_callers").is_none(),
+        !caveat_of(&function).contains("same-named"),
         "a function target is not competed by a class: {function}"
+    );
+    assert!(
+        function["unexplained_refs"]["sites"]
+            .as_array()
+            .unwrap_or_else(|| panic!("the flag forces the scan: {function}"))
+            .iter()
+            .all(|s| s["path"] == "q3.py"),
+        "both declarations are explained: {function}"
     );
 
     let class = run_impact(
@@ -418,11 +433,11 @@ fn test_ambiguous_callers_function_and_class_namesake_python() {
             "--ambiguous-callers",
         ],
     );
-    let sites = class["ambiguous_callers"]["sites"]
+    let sites = class["unexplained_refs"]["sites"]
         .as_array()
         .unwrap_or_else(|| panic!("a class target competed by `def Q` lists sites: {class}"));
     assert!(
-        sites.iter().all(|s| s["file"] != "q1.py"),
+        sites.iter().all(|s| s["path"] != "q1.py"),
         "the class declaration line is no call site: {class}"
     );
 }

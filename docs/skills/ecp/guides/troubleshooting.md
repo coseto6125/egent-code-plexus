@@ -23,8 +23,10 @@ the *what to do* once you've spotted one.
 
 ## 5. `ecp impact` returned fewer callers than expected
 - The caller set is a lower bound — a bare call to a name with several same-named definitions is suppressed rather than mis-attributed.
-- **Do, when the result carries the ambiguity caveat:** run the command the caveat prints. It adds the `--file` or `--kind` filter a colliding name needs, plus `--ambiguous-callers`, and lists the call sites the graph could not attribute, as text-match candidates (at most 50).
-- **Do, when there is no caveat, or for Ruby calls without parentheses:** `grep` the call sites before a refactor. Count same-named defs with `ecp cypher 'MATCH (n) WHERE n.name = "<name>" RETURN count(n)'`.
+- **Do:** read `unexplained_refs` when the payload carries it. Each site is a whole-word occurrence of the name that no graph edge explains: a bare call the resolver suppressed, a function passed as a value, a template or a file of another language. `total` counts them all; the payload shows at most 20.
+- **Do, when the field is absent:** the target has 3 or more callers and a unique name, so the scan did not run. Add `--ambiguous-callers` to force it. With `--batch`, the scan runs only with that flag and only for a colliding name.
+- **Do, when the ambiguity caveat prints a command (`--batch` only):** run it. It adds the `--file` or `--kind` filter a colliding name needs, plus `--ambiguous-callers`.
+- **Do, when a reference is built at run time (string dispatch, reflection):** no text scan finds it; `grep` the dispatch table before a refactor. Count same-named defs with `ecp cypher 'MATCH (n) WHERE n.name = "<name>" RETURN count(n)'`.
 
 ## 6. A symbol-type ecp doesn't capture yet
 - Dead **by design**, not a freshness issue: function-body **locals** (intentionally dropped), Java `record`, PHP in-class `trait use` composition, C# `operator` / `event` / `indexer` / `destructor`.
