@@ -36,5 +36,5 @@ the *what to do* once you've spotted one.
 - **Do:** read the actual definition, run a fresh reindex, or grep to cross-check. doc-comment inference ≠ verification; a passing `parse_file` unit test ≠ the indexing pipeline uses that path. Confirm with a fresh query against a rebuilt graph.
 
 ## 8. The hook's `ecp graph delta` looked like the whole caller set
-- After a `rg` / `grep` / `egrep` / `git grep` call or a Grep tool call, the PostToolUse hook names the definitions and the direct (d=1) non-test caller files that the graph holds and the search output does not show. It prints nothing when the output shows all of them.
+- After a `rg` / `grep` / `egrep` / `git grep` call or a Grep tool call, the PostToolUse hook names the definitions and the direct (d=1) non-test caller files that the graph holds and the search output does not show. It prints nothing when the output shows all of them, and also when it cannot tell: no index for the repo, piped input, a `cd` it cannot follow, an identifier past the third, or a fact whose file changed since the index. Silence proves nothing.
 - **Do:** run `ecp impact --target <name> --direction upstream` before you size a refactor from the search output.

@@ -312,7 +312,7 @@ ecp admin claude install skills all     # paquetes de habilidades ecp + simplify
 ecp admin claude install mcp-server     # opcional — hooks + skills + CLI ya son suficientes
 ```
 
-Los hooks alimentan contexto del grafo en cada Grep/Glob/Bash sin una llamada de herramienta explícita. La habilidad `ecp` enseña flujos de trabajo de símbolo / impacto / ruta / contrato / renombrado. `simplify` impulsa la revisión de código centrada en el grafo.
+Después de una búsqueda (una llamada a la herramienta Grep, o `rg` / `grep` en Bash), un hook señala las definiciones y los archivos llamadores que la salida no mostró, sin una llamada de herramienta explícita. La habilidad `ecp` enseña flujos de trabajo de símbolo / impacto / ruta / contrato. `simplify` impulsa la revisión de código centrada en el grafo.
 
 ### Gemini CLI
 

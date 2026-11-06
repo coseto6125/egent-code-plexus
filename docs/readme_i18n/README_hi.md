@@ -312,7 +312,7 @@ ecp admin claude install skills all     # ecp + simplify skill packs (या: ec
 ecp admin claude install mcp-server     # optional — hooks + skills + CLI already sufficient
 ```
 
-Hooks बिना explicit tool call के हर Grep/Glob/Bash पर graph context feed करते हैं। `ecp` skill symbol / impact / route / contract / rename workflows सिखाता है। `simplify` graph-first code review चलाता है।
+किसी search (Grep tool call, या Bash में `rg` / `grep`) के बाद, hook बिना explicit tool call के वे definitions और caller files बताता है जो output में नहीं थीं। `ecp` skill symbol / impact / route / contract workflows सिखाता है। `simplify` graph-first code review चलाता है।
 
 ### Gemini CLI
 

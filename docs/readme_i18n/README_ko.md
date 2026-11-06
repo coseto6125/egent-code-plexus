@@ -312,7 +312,7 @@ ecp admin claude install skills all     # ecp + simplify 스킬 팩 (또는: ecp
 ecp admin claude install mcp-server     # 선택적 — 훅 + 스킬 + CLI로 이미 충분
 ```
 
-훅은 명시적인 도구 호출 없이 모든 Grep/Glob/Bash에 그래프 컨텍스트를 제공합니다. `ecp` 스킬은 심볼 / impact / route / contract / rename 워크플로를 가르칩니다. `simplify`는 그래프 우선 코드 리뷰를 구동합니다.
+검색(Grep 도구 호출, 또는 Bash의 `rg` / `grep`) 후에 훅이 출력에 빠진 정의와 호출자 파일을 명시적인 도구 호출 없이 알려 줍니다. `ecp` 스킬은 심볼 / impact / route / contract 워크플로를 가르칩니다. `simplify`는 그래프 우선 코드 리뷰를 구동합니다.
 
 ### Gemini CLI
 
