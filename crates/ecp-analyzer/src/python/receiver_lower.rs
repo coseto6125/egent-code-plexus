@@ -10,7 +10,10 @@
 //! value assigned at that point (`PointOfAssignment`).
 
 use crate::framework_helpers::node_span;
-use crate::receiver::ir::{BindingId, BindingOrigin, CaptureMode, ScopeKind, TypeOrigin, Value};
+use crate::receiver::ir::{
+    BindingId, BindingOrigin, BlockId, CaptureMode, ScopeKind, TypeOrigin, Value,
+};
+use crate::receiver::lattice::UnknownCause;
 use crate::receiver::{DeclaredTypePolicy, IrBuilder, LangPolicy, Lowered, Lowering, ScopeRule};
 use rustc_hash::FxHashSet;
 use tree_sitter::Node;
@@ -142,6 +145,44 @@ fn scan_declarations<'s>(body: Node<'_>, source: &'s [u8]) -> (Vec<&'s str>, Vec
         );
     }
     (globals, nonlocals)
+}
+
+/// The names a function body binds anywhere in it, nested scopes aside.
+/// Python makes each one local to the whole function, so a closure made
+/// above the first assignment reads the local, not an enclosing variable.
+fn local_names<'s>(body: Node<'_>, source: &'s [u8]) -> Vec<&'s str> {
+    let mut out = Vec::new();
+    let mut stack = vec![body];
+    while let Some(node) = stack.pop() {
+        let target = match node.kind() {
+            "function_definition" | "lambda" | "class_definition" => continue,
+            "assignment" | "augmented_assignment" | "for_statement" => {
+                node.child_by_field_name("left")
+            }
+            "named_expression" => node.child_by_field_name("name"),
+            "as_pattern" | "except_clause" | "except_group_clause" => {
+                node.child_by_field_name("alias")
+            }
+            "delete_statement" => {
+                let mut cursor = node.walk();
+                for target in node.named_children(&mut cursor) {
+                    bound_names(target, source, &mut out);
+                }
+                None
+            }
+            "case_pattern" => {
+                case_capture_names(node, source, &mut out);
+                None
+            }
+            _ => None,
+        };
+        if let Some(target) = target {
+            bound_names(target, source, &mut out);
+        }
+        let mut cursor = node.walk();
+        stack.extend(node.named_children(&mut cursor));
+    }
+    out
 }
 
 /// Every name an assignment target, `for` target or parameter binds.
@@ -456,6 +497,12 @@ impl<'s> Lower<'s> {
             "identifier" => {
                 if let Ok(name) = target.utf8_text(self.source) {
                     bind(b, name, value);
+                    // Any call may rebind a module global.
+                    if self.is_global(name) {
+                        if let Some(binding) = b.lookup(name) {
+                            b.havoc(Some(binding), UnknownCause::Escape);
+                        }
+                    }
                 }
             }
             "pattern_list"
@@ -611,11 +658,14 @@ impl<'s> Lower<'s> {
             }
         }
         let handler = b.new_block();
+        // `finally` lowers inline here; created before `enter_try`, it
+        // inherits the outer handler.
+        let after = b.new_block();
+        let finally_entry = finally.map(|_| after);
         b.enter_try(handler);
         self.visit_opt(b, node.child_by_field_name("body"));
         b.leave_try();
-        self.visit_opt(b, otherwise);
-        let after = b.new_block();
+        self.guarded(b, finally_entry, |this, b| this.visit_opt(b, otherwise));
         b.goto(after);
 
         let clause_blocks: Vec<_> = clauses.iter().map(|_| b.new_block()).collect();
@@ -627,11 +677,29 @@ impl<'s> Lower<'s> {
         b.branch(&targets);
         for (clause, block) in clauses.into_iter().zip(clause_blocks) {
             b.switch_to(block);
-            self.except_clause(b, clause);
+            self.guarded(b, finally_entry, |this, b| this.except_clause(b, clause));
             b.goto(after);
         }
         b.switch_to(after);
         self.visit_opt(b, finally);
+    }
+
+    /// Runs `body` so that its abrupt exits (`return`, `raise`, `break`,
+    /// `continue`) also reach `finally`, when there is one.
+    fn guarded(
+        &mut self,
+        b: &mut IrBuilder,
+        finally: Option<BlockId>,
+        body: impl FnOnce(&mut Self, &mut IrBuilder),
+    ) {
+        match finally {
+            Some(finally) => {
+                b.enter_try(finally);
+                body(self, b);
+                b.leave_try();
+            }
+            None => body(self, b),
+        }
     }
 
     fn except_clause(&mut self, b: &mut IrBuilder, clause: Node<'_>) {
@@ -828,6 +896,13 @@ impl<'s> Lower<'s> {
         for name in nonlocals {
             b.capture(name, CaptureMode::ByRef);
         }
+        if let Some(body) = body {
+            for name in local_names(body, self.source) {
+                if !self.is_global(name) && b.lookup(name).is_none() {
+                    b.declare(name, BindingOrigin::Local, None);
+                }
+            }
+        }
         self.visit_opt(b, body);
         self.globals.pop();
     }
@@ -931,7 +1006,7 @@ mod tests {
     fn test_lower_global_name_binds_no_receiver_until_written() {
         let got = receivers("def f(v):\n    global x\n    x.m()\n    x = v\n    x.n()\n");
         assert_eq!(got[0].1, None);
-        assert_eq!(got[1].1, unknown(UnknownCause::NoEvidence));
+        assert_eq!(got[1].1, unknown(UnknownCause::Escape));
     }
 
     #[test]
@@ -1021,5 +1096,67 @@ mod tests {
             "def f(obj: A):\n    try:\n        pass\n    except ValueError as obj:\n        obj.m()\n",
         );
         assert_eq!(got[0].1, unknown(UnknownCause::NoEvidence));
+    }
+
+    #[test]
+    fn test_try_statement_except_raise_reaches_finally() {
+        let got = receivers(
+            "def f():\n    obj: A = A()\n    try:\n        risky()\n    except ValueError:\n        obj: B = B()\n        raise\n    finally:\n        obj.m()\n",
+        );
+        assert_eq!(got[0].1, unknown(UnknownCause::Conflict));
+    }
+
+    #[test]
+    fn test_try_statement_except_return_reaches_finally() {
+        let got = receivers(
+            "def f():\n    obj: A = A()\n    try:\n        risky()\n    except ValueError:\n        obj: B = B()\n        return\n    finally:\n        obj.m()\n",
+        );
+        assert_eq!(got[0].1, unknown(UnknownCause::Conflict));
+    }
+
+    #[test]
+    fn test_try_statement_except_break_reaches_finally() {
+        let got = receivers(
+            "def f(xs):\n    obj: A = A()\n    for x in xs:\n        try:\n            risky()\n        except ValueError:\n            obj: B = B()\n            break\n        finally:\n            obj.m()\n",
+        );
+        assert_eq!(got[0].1, unknown(UnknownCause::Conflict));
+    }
+
+    #[test]
+    fn test_try_statement_else_return_reaches_finally() {
+        let got = receivers(
+            "def f():\n    obj: A = A()\n    try:\n        risky()\n    except ValueError:\n        pass\n    else:\n        obj: C = C()\n        return\n    finally:\n        obj.m()\n",
+        );
+        assert_eq!(got[0].1, unknown(UnknownCause::Conflict));
+    }
+
+    #[test]
+    fn test_try_statement_except_return_without_finally_keeps_the_type() {
+        let got = receivers(
+            "def f():\n    obj: A = A()\n    try:\n        risky()\n    except ValueError:\n        obj: B = B()\n        return\n    obj.m()\n",
+        );
+        assert!(same_type(&got[0].1, "A"), "{got:?}");
+    }
+
+    #[test]
+    fn test_function_body_closure_above_assignment_reads_the_local() {
+        let got = receivers(
+            "def outer(a: A, c: B):\n    o = a\n    def inner():\n        g = lambda: o.m()\n        o = c\n        return g()\n    return inner\n",
+        );
+        assert_eq!(got[0].1, unknown(UnknownCause::Conflict));
+    }
+
+    #[test]
+    fn test_function_body_name_bound_only_in_inner_scope_is_still_captured() {
+        let got = receivers(
+            "def outer(o: A):\n    def inner():\n        g = lambda: o.m()\n        return [o for o in g()]\n    return inner\n",
+        );
+        assert!(same_type(&got[0].1, "A"), "{got:?}");
+    }
+
+    #[test]
+    fn test_assign_target_global_write_escapes() {
+        let got = receivers("def f(a: A):\n    global x\n    x = a\n    reset()\n    x.m()\n");
+        assert_eq!(got[0].1, unknown(UnknownCause::Escape));
     }
 }

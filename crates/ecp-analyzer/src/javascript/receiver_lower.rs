@@ -17,10 +17,11 @@
 use crate::calls::unparenthesized;
 use crate::framework_helpers::node_span;
 use crate::receiver::ir::{
-    BindingId, BindingOrigin, CaptureMode, ScopeId, ScopeKind, TypeId, TypeOrigin, Value,
+    BindingId, BindingOrigin, BlockId, CaptureMode, ScopeId, ScopeKind, TypeId, TypeOrigin, Value,
 };
 use crate::receiver::lattice::UnknownCause;
 use crate::receiver::{DeclaredTypePolicy, IrBuilder, LangPolicy, Lowered, Lowering, ScopeRule};
+use std::mem;
 use tree_sitter::Node;
 
 /// Nesting beyond this leaves the function to the extractor's own path.
@@ -114,6 +115,7 @@ pub(crate) fn lower_function(
         unsupported: None,
         ahead: Vec::new(),
         dynamic: Vec::new(),
+        inherited_dynamic: Vec::new(),
     };
     lower.callable(b, function);
     match lower.unsupported {
@@ -257,13 +259,18 @@ struct Lower<'s> {
     source: &'s [u8],
     depth: u32,
     unsupported: Option<&'static str>,
-    /// `let` / `const` names a block declared before its function
-    /// declarations lowered, so a hoisted closure captures the same binding
-    /// the declaration later assigns: `(name, scope)`.
+    /// `let` / `const` names a block declared before its statements
+    /// lowered, so a closure above the declaration captures the same
+    /// binding the declaration later assigns: `(name, scope)`. Per frame:
+    /// `ScopeId`s restart in every closure.
     ahead: Vec<(&'s str, ScopeId)>,
     /// Bindings annotated `any` / `unknown`: a read of one is a dynamic
-    /// value, which drops the pin of the binding it is written to.
-    dynamic: Vec<BindingId>,
+    /// value, which drops the pin of the binding it is written to. Per
+    /// frame: `BindingId`s restart in every closure.
+    dynamic: Vec<(BindingId, &'s str)>,
+    /// Names an enclosing frame binds to a dynamic binding that this frame
+    /// does not shadow: a capture of one is dynamic too.
+    inherited_dynamic: Vec<&'s str>,
 }
 
 impl<'s> Lower<'s> {
@@ -272,8 +279,19 @@ impl<'s> Lower<'s> {
     }
 
     /// The binding `name` names here: own, else captured by reference.
-    fn resolve(&mut self, b: &mut IrBuilder, name: &str) -> Option<BindingId> {
-        b.lookup_or_capture(name, CaptureMode::ByRef)
+    fn resolve(&mut self, b: &mut IrBuilder, name: &'s str) -> Option<BindingId> {
+        if let Some(id) = b.lookup(name) {
+            return Some(id);
+        }
+        let id = b.capture(name, CaptureMode::ByRef)?;
+        if self.inherited_dynamic.contains(&name) {
+            self.dynamic.push((id, name));
+        }
+        Some(id)
+    }
+
+    fn is_dynamic(&self, id: BindingId) -> bool {
+        self.dynamic.iter().any(|&(dynamic, _)| dynamic == id)
     }
 
     fn use_receiver(&mut self, b: &mut IrBuilder, receiver: Node<'_>) {
@@ -282,13 +300,13 @@ impl<'s> Lower<'s> {
         }
     }
 
-    fn assign_unknown(&mut self, b: &mut IrBuilder, name: &str) {
+    fn assign_unknown(&mut self, b: &mut IrBuilder, name: &'s str) {
         self.assign_element(b, name, &Value::Unknown);
     }
 
     /// Writes `value`, `Unknown` or `Dynamic`, an element of a pattern's
     /// source, to `name`.
-    fn assign_element(&mut self, b: &mut IrBuilder, name: &str, value: &Value) {
+    fn assign_element(&mut self, b: &mut IrBuilder, name: &'s str, value: &Value) {
         if let Some(id) = self.resolve(b, name) {
             b.assign(id, value.clone());
         }
@@ -306,8 +324,10 @@ impl<'s> Lower<'s> {
     /// annotation is `any` / `unknown`.
     fn note_dynamic(&mut self, b: &IrBuilder, name: Node<'_>, annotation: Option<Node<'_>>) {
         if name.kind() == "identifier" && annotates_dynamic(annotation, self.source) {
-            if let Some(id) = b.lookup(self.text(name)) {
-                self.dynamic.push(id);
+            let text = self.text(name);
+            match b.lookup(text) {
+                Some(id) if !self.is_dynamic(id) => self.dynamic.push((id, text)),
+                _ => {}
             }
         }
     }
@@ -327,7 +347,10 @@ impl<'s> Lower<'s> {
             self.declare_pattern(b, param, BindingOrigin::Param, false, None);
         }
         match function.child_by_field_name("body") {
-            Some(body) if body.kind() == "statement_block" => self.block_body(b, body, false),
+            Some(body) if body.kind() == "statement_block" => {
+                self.declare_vars(b, body);
+                self.block_body(b, body, false);
+            }
             Some(body) => {
                 self.walk(b, body);
             }
@@ -480,9 +503,7 @@ impl<'s> Lower<'s> {
             b.push_scope(ScopeKind::Block);
         }
         let statements = named_children(block);
-        if statements.iter().any(|s| is_hoisted(s.kind())) {
-            self.declare_ahead(b, &statements);
-        }
+        self.declare_ahead(b, &statements);
         for declaration in statements.iter().filter(|s| is_hoisted(s.kind())) {
             self.function_declaration(b, *declaration);
         }
@@ -494,40 +515,113 @@ impl<'s> Lower<'s> {
         }
     }
 
-    /// Declares the names the block's own `let` / `const` / `var` statements
-    /// bind, ahead of the hoisted function declarations.
+    /// Declares the names the block's own `let` / `const` statements bind
+    /// before any statement lowers: the scope of a `let` is its whole block,
+    /// so a closure above the declaration reads it, not an outer name.
     fn declare_ahead(&mut self, b: &mut IrBuilder, statements: &[Node<'_>]) {
         for statement in statements {
-            let function_scoped = match statement.kind() {
-                "lexical_declaration" => false,
-                "variable_declaration" => true,
-                _ => continue,
-            };
+            if statement.kind() != "lexical_declaration" {
+                continue;
+            }
             for declarator in named_children(*statement) {
-                let Some(name) = declarator.child_by_field_name("name") else {
-                    continue;
-                };
-                let declared = if name.kind() == "identifier" {
-                    self.declared_type(b, self.annotation(declarator))
-                } else {
-                    None
-                };
-                let mut names = Vec::new();
-                pattern_names(name, &mut names);
-                for identifier in names {
-                    let name = self.text(identifier);
-                    if function_scoped {
-                        if b.lookup(name).is_none() {
-                            let scope = b.function_scope();
-                            b.declare_in(scope, name, BindingOrigin::Local, declared);
-                        }
-                    } else {
-                        b.declare(name, BindingOrigin::Local, declared);
-                        self.ahead.push((name, b.current_scope()));
-                    }
-                }
+                self.declare_declarator(b, declarator, false);
             }
         }
+    }
+
+    /// Declares every `var` of a function body, nested blocks included,
+    /// before the body lowers: `var` hoists to the function.
+    fn declare_vars(&mut self, b: &mut IrBuilder, body: Node<'_>) {
+        let mut stack = vec![body];
+        while let Some(node) = stack.pop() {
+            match node.kind() {
+                "variable_declaration" => {
+                    for declarator in named_children(node) {
+                        self.declare_declarator(b, declarator, true);
+                    }
+                }
+                "for_in_statement"
+                    if children_by_field(node, "kind")
+                        .iter()
+                        .any(|kind| kind.kind() == "var") =>
+                {
+                    if let Some(left) = node.child_by_field_name("left") {
+                        self.declare_names(b, left, true, None);
+                    }
+                }
+                kind if is_function_like(kind) || kind == "class_static_block" => continue,
+                _ => {}
+            }
+            stack.extend(named_children(node));
+        }
+    }
+
+    fn declare_declarator(
+        &mut self,
+        b: &mut IrBuilder,
+        declarator: Node<'_>,
+        function_scoped: bool,
+    ) {
+        let Some(name) = declarator.child_by_field_name("name") else {
+            return;
+        };
+        let annotation = self.annotation(declarator);
+        let declared = if name.kind() == "identifier" {
+            self.declared_type(b, annotation)
+        } else {
+            None
+        };
+        self.declare_names(b, name, function_scoped, declared);
+        self.note_dynamic(b, name, annotation);
+    }
+
+    /// Declares the names `pattern` binds ahead of their declaration; the
+    /// declaration then finds them.
+    fn declare_names(
+        &mut self,
+        b: &mut IrBuilder,
+        pattern: Node<'_>,
+        function_scoped: bool,
+        declared: Option<TypeId>,
+    ) {
+        let mut names = Vec::new();
+        pattern_names(pattern, &mut names);
+        for identifier in names {
+            let name = self.text(identifier);
+            if function_scoped {
+                if b.lookup(name).is_none() {
+                    let scope = b.function_scope();
+                    b.declare_in(scope, name, BindingOrigin::Local, declared);
+                }
+            } else {
+                b.declare(name, BindingOrigin::Local, declared);
+                self.ahead.push((name, b.current_scope()));
+            }
+        }
+    }
+
+    /// Lowers the function-like `node` as a closure. The per-frame lists
+    /// start empty in it; its captures of a dynamic outer binding stay dynamic.
+    fn closure(&mut self, b: &mut IrBuilder, node: Node<'_>) {
+        let inherited: Vec<&'s str> = self
+            .dynamic
+            .iter()
+            .filter(|&&(id, name)| b.lookup(name) == Some(id))
+            .map(|&(_, name)| name)
+            .chain(
+                self.inherited_dynamic
+                    .iter()
+                    .copied()
+                    .filter(|name| b.lookup(name).is_none()),
+            )
+            .collect();
+        let ahead = mem::take(&mut self.ahead);
+        let dynamic = mem::take(&mut self.dynamic);
+        let outer = mem::replace(&mut self.inherited_dynamic, inherited);
+        b.closure(node_span(&node), |inner| self.callable(inner, node));
+        self.ahead = ahead;
+        self.dynamic = dynamic;
+        self.inherited_dynamic = outer;
     }
 
     fn function_declaration(&mut self, b: &mut IrBuilder, declaration: Node<'_>) {
@@ -542,15 +636,13 @@ impl<'s> Lower<'s> {
             };
             b.assign(id, Value::Unknown);
         }
-        b.closure(node_span(&declaration), |inner| {
-            self.callable(inner, declaration)
-        });
+        self.closure(b, declaration);
     }
 
     fn walk_node(&mut self, b: &mut IrBuilder, node: Node<'_>) -> Value {
         match node.kind() {
             "identifier" => match self.resolve(b, self.text(node)) {
-                Some(id) if self.dynamic.contains(&id) => Value::Dynamic,
+                Some(id) if self.is_dynamic(id) => Value::Dynamic,
                 Some(id) => Value::Copy(id),
                 None => Value::Unknown,
             },
@@ -580,7 +672,10 @@ impl<'s> Lower<'s> {
             "new_expression" => {
                 self.children(b, node);
                 match node.child_by_field_name("constructor") {
-                    Some(class) if class.kind() == "identifier" => {
+                    // A constructor held in a parameter or a local names no class.
+                    Some(class)
+                        if class.kind() == "identifier" && b.lookup(self.text(class)).is_none() =>
+                    {
                         Value::Type(b.intern(self.text(class), TypeOrigin::Construction))
                     }
                     _ => Value::Unknown,
@@ -619,7 +714,7 @@ impl<'s> Lower<'s> {
             | "generator_function"
             | "arrow_function"
             | "method_definition" => {
-                b.closure(node_span(&node), |inner| self.callable(inner, node));
+                self.closure(b, node);
                 Value::Unknown
             }
             "binary_expression" => self.binary(b, node),
@@ -749,6 +844,24 @@ impl<'s> Lower<'s> {
             }
         });
         Value::Unknown
+    }
+
+    /// Runs `body` so that its abrupt exits (`return`, `throw`, `break`,
+    /// `continue`) also reach `finally`, when there is one.
+    fn guarded(
+        &mut self,
+        b: &mut IrBuilder,
+        finally: Option<BlockId>,
+        body: impl FnOnce(&mut Self, &mut IrBuilder),
+    ) {
+        match finally {
+            Some(finally) => {
+                b.enter_try(finally);
+                body(self, b);
+                b.leave_try();
+            }
+            None => body(self, b),
+        }
     }
 
     /// Runs `body` on a path that may be skipped, then joins.
@@ -985,6 +1098,13 @@ impl<'s> Lower<'s> {
             targets.push(exit);
         }
         b.branch(&targets);
+        // The case clauses share one block scope.
+        b.push_scope(ScopeKind::Block);
+        let statements: Vec<_> = cases
+            .iter()
+            .flat_map(|case| children_by_field(*case, "body"))
+            .collect();
+        self.declare_ahead(b, &statements);
         b.push_breakable(None, exit);
         for (index, case) in cases.into_iter().enumerate() {
             b.switch_to(blocks[index]);
@@ -992,6 +1112,7 @@ impl<'s> Lower<'s> {
             b.goto(blocks.get(index + 1).copied().unwrap_or(exit));
         }
         b.pop_breakable();
+        b.pop_scope();
         b.switch_to(exit);
         Value::Unknown
     }
@@ -1028,7 +1149,9 @@ impl<'s> Lower<'s> {
                 self.assign_pattern(b, parameter);
             }
             if let Some(body) = catch.child_by_field_name("body") {
-                self.walk(b, body);
+                self.guarded(b, finally_block, |this, b| {
+                    this.walk(b, body);
+                });
             }
             b.pop_scope();
             b.goto(join);
@@ -1248,5 +1371,206 @@ mod tests {
             stack.extend(n.named_children(&mut cursor));
         }
         assert!(found.receiver_at(value.unwrap()).is_none());
+    }
+
+    /// The TypeScript dialect under `TsLowering`'s policy
+    /// (`typescript/receiver_lower.rs`), which this module cannot name.
+    struct TsDialect;
+
+    impl Lowering for TsDialect {
+        type Cx<'a> = ();
+
+        fn policy(&self) -> LangPolicy {
+            LangPolicy {
+                declared: DeclaredTypePolicy::PinnedUnlessDynamic,
+                scope: ScopeRule::Block,
+            }
+        }
+
+        fn is_function(&self, node: Node<'_>) -> bool {
+            is_function_like(node.kind())
+        }
+
+        fn lower(&self, _cx: &(), function: Node<'_>, source: &[u8], b: &mut IrBuilder) -> Lowered {
+            lower_function(Dialect::TypeScript, function, source, b)
+        }
+    }
+
+    /// [`receivers`] of TypeScript `source`, lowered in the TypeScript dialect.
+    fn ts_receivers(source: &str) -> Vec<(String, String)> {
+        let tree = parse(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(), source);
+        let bytes = source.as_bytes();
+        let found = analyze_file(&TsDialect, &(), tree.root_node(), bytes, Path::new("t.ts"));
+        let mut out = Vec::new();
+        let mut stack = vec![tree.root_node()];
+        while let Some(n) = stack.pop() {
+            if n.kind() == "call_expression" {
+                if let Some(object) = call_receiver(n) {
+                    let method = unparenthesized(n.child_by_field_name("function").unwrap())
+                        .child_by_field_name("property")
+                        .unwrap();
+                    let state = match found.receiver_at(object) {
+                        Some(Receiver::Known(ty)) => format!("known {}", ty.text),
+                        Some(Receiver::Unknown(cause)) => format!("unknown {cause:?}"),
+                        None => "none".to_string(),
+                    };
+                    out.push((method.utf8_text(bytes).unwrap().to_string(), state));
+                }
+            }
+            let mut cursor = n.walk();
+            stack.extend(n.named_children(&mut cursor));
+        }
+        out.sort();
+        out
+    }
+
+    fn pairs(items: &[(&str, &str)]) -> Vec<(String, String)> {
+        items
+            .iter()
+            .map(|(method, state)| (method.to_string(), state.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn test_switch_statement_case_let_does_not_shadow_after_switch() {
+        let found = receivers(
+            "function f(k) { let o = new A(); switch (k) { case 1: prep(); default: let o = new B(); o.init(); } o.m(); }",
+        );
+        assert_eq!(found, pairs(&[("init", "known B"), ("m", "known A")]));
+    }
+
+    #[test]
+    fn test_switch_statement_without_default_keeps_outer_binding() {
+        let found = receivers(
+            "function f(k) { let o = new A(); switch (k) { case 1: let o = new B(); o.init(); break; } o.m(); }",
+        );
+        assert_eq!(found, pairs(&[("init", "known B"), ("m", "known A")]));
+    }
+
+    #[test]
+    fn test_walk_node_new_of_parameter_constructor_is_untyped() {
+        assert_eq!(
+            only(
+                "function mount(Component, props) { const c = new Component(props); c.render(); }"
+            ),
+            "unknown NoEvidence"
+        );
+    }
+
+    #[test]
+    fn test_walk_node_new_of_captured_local_constructor_is_untyped() {
+        assert_eq!(
+            only("function f(make) { const Klass = make(); const g = () => { const c = new Klass(); c.run(); }; }"),
+            "unknown NoEvidence"
+        );
+    }
+
+    #[test]
+    fn test_walk_node_new_of_unbound_class_name_stays_known() {
+        assert_eq!(
+            only("function f(Other) { const c = new Component(); c.render(); }"),
+            "known Component"
+        );
+    }
+
+    #[test]
+    fn test_block_body_closure_above_let_reads_the_inner_binding() {
+        assert_eq!(
+            only("function outer() { let o = new A(); const inner = function () { const g = () => o.m(); let o = new B(); g(); }; }"),
+            "unknown Conflict"
+        );
+    }
+
+    #[test]
+    fn test_callable_nested_var_is_hoisted_above_an_earlier_closure() {
+        assert_eq!(
+            only("function outer() { let o = new A(); const inner = function (c) { const g = () => o.m(); if (c) { var o = new B(); } g(); }; }"),
+            "unknown Conflict"
+        );
+    }
+
+    #[test]
+    fn test_callable_var_redeclaring_a_parameter_keeps_one_binding() {
+        assert_eq!(only("function f(o) { var o = new A(); o.m(); }"), "known A");
+    }
+
+    #[test]
+    fn test_try_statement_catch_rethrow_reaches_finally() {
+        assert_eq!(
+            only("function f() { let o = new A(); try { risky(); } catch (e) { o = new B(); throw e; } finally { o.m(); } }"),
+            "unknown Conflict"
+        );
+    }
+
+    #[test]
+    fn test_try_statement_catch_return_reaches_finally() {
+        assert_eq!(
+            only("function f() { let o = new A(); try { risky(); } catch (e) { o = new B(); return; } finally { o.m(); } }"),
+            "unknown Conflict"
+        );
+    }
+
+    #[test]
+    fn test_try_statement_catch_break_reaches_finally() {
+        assert_eq!(
+            only("function f(xs) { let o = new A(); for (const x of xs) { try { risky(); } catch (e) { o = new B(); break; } finally { o.m(); } } }"),
+            "unknown Conflict"
+        );
+    }
+
+    #[test]
+    fn test_try_statement_catch_without_finally_keeps_its_exit() {
+        assert_eq!(
+            only("function f() { let o = new A(); try { risky(); } catch (e) { o = new B(); return; } o.m(); }"),
+            "known A"
+        );
+    }
+
+    #[test]
+    fn test_lower_function_hoisted_function_local_does_not_steal_outer_let() {
+        let found = ts_receivers(
+            "function main() { start(); const server: Server = make(); server.listen(); function start() { let server = alt(); server.boot(); } }",
+        );
+        assert_eq!(
+            found,
+            pairs(&[("boot", "unknown NoEvidence"), ("listen", "known Server")])
+        );
+    }
+
+    #[test]
+    fn test_lower_function_hoisted_function_parameter_keeps_its_annotation() {
+        let found = ts_receivers(
+            "function main() { start(); const server = new Server(); server.listen(); function start(server: DevServer) { server.boot(); } }",
+        );
+        assert_eq!(
+            found,
+            pairs(&[("boot", "known DevServer"), ("listen", "known Server")])
+        );
+    }
+
+    #[test]
+    fn test_lower_function_any_callback_parameter_does_not_mark_outer_binding() {
+        let found = ts_receivers(
+            "function f(svc: Service) { items.forEach((e: any) => log(e)); const s = svc; s.run(); }",
+        );
+        assert_eq!(
+            found,
+            pairs(&[("forEach", "none"), ("run", "known Service")])
+        );
+    }
+
+    #[test]
+    fn test_lower_function_captured_any_binding_drops_the_pin() {
+        let found =
+            ts_receivers("function f(raw: any) { const g = (o: A) => { o = raw; o.m(); }; }");
+        assert_eq!(found, pairs(&[("m", "unknown NoEvidence")]));
+    }
+
+    #[test]
+    fn test_lower_function_shadowed_any_binding_is_not_dynamic_in_closure() {
+        let found = ts_receivers(
+            "function f(raw: any) { const g = (o: A, raw: B) => { o = raw; o.m(); }; }",
+        );
+        assert_eq!(found, pairs(&[("m", "known A")]));
     }
 }

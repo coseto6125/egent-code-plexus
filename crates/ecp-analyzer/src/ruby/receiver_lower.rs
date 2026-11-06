@@ -10,7 +10,7 @@
 //! declares its parameters in its own scope.
 
 use crate::framework_helpers::node_span;
-use crate::receiver::ir::{BindingId, BindingOrigin, CaptureMode, TypeOrigin, Value};
+use crate::receiver::ir::{BindingId, BindingOrigin, BlockId, CaptureMode, TypeOrigin, Value};
 use crate::receiver::lattice::UnknownCause;
 use crate::receiver::{DeclaredTypePolicy, IrBuilder, LangPolicy, Lowered, Lowering, ScopeRule};
 use tree_sitter::Node;
@@ -64,6 +64,24 @@ impl Lowering for RubyLowering {
 fn call_receiver<'t>(call: Node<'t>) -> Option<Node<'t>> {
     call.child_by_field_name("receiver")
         .filter(|receiver| receiver.kind() == "identifier")
+}
+
+/// Whether `call` may rebind the caller's locals: a bare `eval` /
+/// `binding`, or a string evaluated with any receiver (`Kernel.eval(s)`,
+/// `o.instance_eval(s)`, `C.class_eval(s)`). Ruby evaluates such a string
+/// in the caller's local scope; the block form is a closure instead.
+fn writes_caller_locals(call: Node<'_>, has_receiver: bool, method: Option<&str>) -> bool {
+    match method {
+        Some("eval" | "binding") if !has_receiver => true,
+        Some("eval" | "instance_eval" | "class_eval" | "module_eval") => call
+            .child_by_field_name("arguments")
+            .is_some_and(|arguments| {
+                named_children(arguments)
+                    .iter()
+                    .any(|argument| argument.kind() != "block_argument")
+            }),
+        _ => false,
+    }
 }
 
 /// The fast path: a function without a `x.m` call has nothing to answer.
@@ -285,6 +303,26 @@ impl<'s> Lower<'s> {
                 self.unsupported = Some("ruby pattern matching");
                 Value::Unknown
             }
+            // `value => pattern` raises unless it matches, so it binds.
+            "match_pattern" => {
+                if let Some(value) = node.child_by_field_name("value") {
+                    self.walk(b, value);
+                }
+                if let Some(pattern) = node.child_by_field_name("pattern") {
+                    self.bind_pattern(b, pattern);
+                }
+                Value::Unknown
+            }
+            // `value in pattern` binds only when it matches.
+            "test_pattern" => {
+                if let Some(value) = node.child_by_field_name("value") {
+                    self.walk(b, value);
+                }
+                if let Some(pattern) = node.child_by_field_name("pattern") {
+                    self.maybe(b, |this, b| this.bind_pattern(b, pattern));
+                }
+                Value::Unknown
+            }
             "self" => Value::Unknown,
             _ => self.children(b, node),
         }
@@ -329,6 +367,55 @@ impl<'s> Lower<'s> {
             }
             _ => {
                 self.walk(b, target);
+            }
+        }
+    }
+
+    /// Writes an unknown value to every local `pattern` binds: a bare name,
+    /// `{key:}`, `*rest`, `**rest` and `=> name`. A `^pin`, a literal or a
+    /// constant is read.
+    fn bind_pattern(&mut self, b: &mut IrBuilder, pattern: Node<'_>) {
+        match pattern.kind() {
+            "identifier" => self.assign_unknown(b, self.text(pattern)),
+            "splat_parameter" | "hash_splat_parameter" => {
+                if let Some(name) = pattern.child_by_field_name("name") {
+                    self.assign_unknown(b, self.text(name));
+                }
+            }
+            "as_pattern" => {
+                if let Some(value) = pattern.child_by_field_name("value") {
+                    self.bind_pattern(b, value);
+                }
+                if let Some(name) = pattern.child_by_field_name("name") {
+                    self.assign_unknown(b, self.text(name));
+                }
+            }
+            "keyword_pattern" => match pattern.child_by_field_name("value") {
+                Some(value) => self.bind_pattern(b, value),
+                // `{user:}` binds the local `user`.
+                None => {
+                    if let Some(key) = pattern
+                        .child_by_field_name("key")
+                        .filter(|key| key.kind() == "hash_key_symbol")
+                    {
+                        let name = self.text(key);
+                        if name.starts_with(|c: char| c.is_ascii_lowercase() || c == '_') {
+                            self.assign_unknown(b, name);
+                        }
+                    }
+                }
+            },
+            "array_pattern"
+            | "find_pattern"
+            | "hash_pattern"
+            | "alternative_pattern"
+            | "parenthesized_pattern" => {
+                for child in named_children(pattern) {
+                    self.bind_pattern(b, child);
+                }
+            }
+            _ => {
+                self.walk(b, pattern);
             }
         }
     }
@@ -379,7 +466,7 @@ impl<'s> Lower<'s> {
         if let Some(arguments) = call.child_by_field_name("arguments") {
             self.walk(b, arguments);
         }
-        if receiver.is_none() && matches!(method, Some("eval" | "binding")) {
+        if writes_caller_locals(call, receiver.is_some(), method) {
             b.havoc(None, UnknownCause::Unsupported);
         }
         if let Some(block) = call.child_by_field_name("block") {
@@ -391,6 +478,24 @@ impl<'s> Lower<'s> {
                 Value::Type(b.intern(self.text(receiver), TypeOrigin::Construction))
             }
             _ => Value::Unknown,
+        }
+    }
+
+    /// Runs `body` so that its abrupt exits (`return`, `next`, `break`, a
+    /// raise) also reach `ensure`, when there is one.
+    fn guarded(
+        &mut self,
+        b: &mut IrBuilder,
+        ensure: Option<BlockId>,
+        body: impl FnOnce(&mut Self, &mut IrBuilder),
+    ) {
+        match ensure {
+            Some(ensure) => {
+                b.enter_try(ensure);
+                body(self, b);
+                b.leave_try();
+            }
+            None => body(self, b),
         }
     }
 
@@ -570,7 +675,9 @@ impl<'s> Lower<'s> {
         }
         b.leave_try();
         if let Some(otherwise) = otherwise {
-            self.children(b, *otherwise);
+            self.guarded(b, ensure_block, |this, b| {
+                this.children(b, *otherwise);
+            });
         }
         b.goto(join);
 
@@ -591,7 +698,9 @@ impl<'s> Lower<'s> {
                 }
             }
             if let Some(body) = rescue.child_by_field_name("body") {
-                self.walk(b, body);
+                self.guarded(b, ensure_block, |this, b| {
+                    this.walk(b, body);
+                });
             }
             b.goto(join);
         }
@@ -766,6 +875,107 @@ mod tests {
         assert_eq!(
             only("def f\n  o = A.new\n  begin\n    g\n  rescue\n    retry\n  end\n  o.m\nend\n"),
             "none"
+        );
+    }
+
+    #[test]
+    fn test_walk_node_rightward_hash_pattern_rebinds_the_local() {
+        assert_eq!(
+            state_of(
+                "def show(input)\n  user = Guest.new\n  input => {user:}\n  user.permissions\nend\n",
+                "permissions"
+            ),
+            "unknown NoEvidence"
+        );
+    }
+
+    #[test]
+    fn test_walk_node_test_pattern_binds_on_the_matching_path_only() {
+        assert_eq!(
+            only("def f(input)\n  v = A.new\n  if input in [v, *rest]\n  end\n  v.m\nend\n"),
+            "unknown Conflict"
+        );
+    }
+
+    #[test]
+    fn test_bind_pattern_splat_as_and_value_bind_but_pin_reads() {
+        let source = "def g(i)\n  u = A.new\n  w = A.new\n  r = A.new\n  i => {k: ^u, n: Integer => w, **r}\n  u.pinned\n  w.aliased\n  r.rest\nend\n";
+        assert_eq!(state_of(source, "pinned"), "known A");
+        assert_eq!(state_of(source, "aliased"), "unknown NoEvidence");
+        assert_eq!(state_of(source, "rest"), "unknown NoEvidence");
+    }
+
+    #[test]
+    fn test_bind_pattern_constant_and_literal_bind_nothing() {
+        assert_eq!(
+            only("def f(i)\n  o = A.new\n  i => [Integer, 1, :sym]\n  o.m\nend\n"),
+            "known A"
+        );
+    }
+
+    #[test]
+    fn test_call_string_instance_eval_havocs_caller_locals() {
+        assert_eq!(
+            state_of(
+                "def f(settings, dsl_text)\n  store = MemoryStore.new\n  settings.instance_eval(dsl_text)\n  store.connect\nend\n",
+                "connect"
+            ),
+            "unknown Unsupported"
+        );
+    }
+
+    #[test]
+    fn test_call_string_class_eval_and_kernel_eval_havoc_caller_locals() {
+        for call in [
+            "Object.class_eval(\"o = 3\")",
+            "Kernel.eval(\"o = 3\")",
+            "M.module_eval code",
+        ] {
+            let source = format!("def f(code)\n  o = A.new\n  {call}\n  o.m\nend\n");
+            assert_eq!(only(&source), "unknown Unsupported", "{call}");
+        }
+    }
+
+    #[test]
+    fn test_call_block_instance_eval_keeps_caller_locals() {
+        for call in [
+            "settings.instance_eval { x }",
+            "settings.instance_eval(&blk)",
+        ] {
+            let source = format!("def f(settings, blk)\n  o = A.new\n  {call}\n  o.m\nend\n");
+            assert_eq!(only(&source), "known A", "{call}");
+        }
+    }
+
+    #[test]
+    fn test_begin_rescue_return_reaches_ensure() {
+        assert_eq!(
+            only("def f\n  o = A.new\n  begin\n    risky\n  rescue E => e\n    o = B.new\n    return\n  ensure\n    o.m\n  end\nend\n"),
+            "unknown Conflict"
+        );
+    }
+
+    #[test]
+    fn test_begin_rescue_next_in_block_reaches_ensure() {
+        assert_eq!(
+            only("def f(xs)\n  xs.each do |x|\n    o = A.new\n    begin\n      risky\n    rescue\n      o = B.new\n      next\n    ensure\n      o.m\n    end\n  end\nend\n"),
+            "unknown Conflict"
+        );
+    }
+
+    #[test]
+    fn test_begin_else_return_reaches_ensure() {
+        assert_eq!(
+            only("def f\n  o = A.new\n  begin\n    risky\n  rescue E\n    log\n  else\n    o = C.new\n    return\n  ensure\n    o.m\n  end\nend\n"),
+            "unknown Conflict"
+        );
+    }
+
+    #[test]
+    fn test_begin_rescue_return_without_ensure_keeps_the_type() {
+        assert_eq!(
+            only("def f\n  o = A.new\n  begin\n    risky\n  rescue E\n    o = B.new\n    return\n  end\n  o.m\nend\n"),
+            "known A"
         );
     }
 }

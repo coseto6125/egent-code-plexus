@@ -11,7 +11,7 @@
 
 use super::receiver_types::qualified_ident;
 use crate::framework_helpers::node_span;
-use crate::receiver::ir::{BindingId, BindingOrigin, CaptureMode, TypeOrigin, Value};
+use crate::receiver::ir::{BindingId, BindingOrigin, BlockId, CaptureMode, TypeOrigin, Value};
 use crate::receiver::lattice::UnknownCause;
 use crate::receiver::{DeclaredTypePolicy, IrBuilder, LangPolicy, Lowered, Lowering, ScopeRule};
 use tree_sitter::Node;
@@ -110,6 +110,20 @@ fn scan<'s>(function: Node<'_>, source: &'s [u8]) -> Scan<'s> {
     scan
 }
 
+/// The name a call's `function` names when it can only be a global
+/// function: `f(..)` or `\f(..)`, never `Ns\f(..)`.
+fn global_function_name<'s>(function: Node<'_>, source: &'s [u8]) -> Option<&'s str> {
+    let name = match function.kind() {
+        "name" => function,
+        "qualified_name" if function.named_child_count() == 1 => function.named_child(0)?,
+        _ => return None,
+    };
+    if name.kind() != "name" {
+        return None;
+    }
+    name.utf8_text(source).ok()
+}
+
 fn is_receiver_variable(node: Node<'_>, source: &[u8]) -> bool {
     node.kind() == "variable_name" && node.utf8_text(source).is_ok_and(|t| t != "$this")
 }
@@ -193,6 +207,14 @@ impl<'s> Lower<'s> {
         let id = self.write_var(b, name);
         self.frame().non_null.retain(|&p| p != id);
         b.assign(id, Value::Unknown);
+    }
+
+    /// `name` becomes a reference to storage other code writes (`global`,
+    /// `static`, `&$a[k]`): every later read of it is an escape.
+    fn escape_var(&mut self, b: &mut IrBuilder, name: &str) {
+        let id = self.write_var(b, name);
+        self.frame().non_null.retain(|&p| p != id);
+        b.havoc(Some(id), UnknownCause::Escape);
     }
 
     /// Lowers a function-like node as the function being built: its
@@ -411,16 +433,24 @@ impl<'s> Lower<'s> {
             "try_statement" => self.try_statement(b, node),
             "global_declaration" => {
                 for target in named_children(node) {
-                    self.assign_target(b, target);
+                    self.escape_target(b, target);
                 }
                 Value::Unknown
             }
+            // A recursive call of the function writes the same static.
             "static_variable_declaration" => {
                 if let Some(value) = node.child_by_field_name("value") {
                     self.walk(b, value);
                 }
                 if let Some(name) = node.child_by_field_name("name") {
-                    self.assign_unknown(b, self.text(name));
+                    self.escape_var(b, self.text(name));
+                }
+                Value::Unknown
+            }
+            // `[&$x]`: the array element and `$x` share storage.
+            "by_ref" => {
+                for target in named_children(node) {
+                    self.escape_target(b, target);
                 }
                 Value::Unknown
             }
@@ -488,13 +518,13 @@ impl<'s> Lower<'s> {
 
     fn function_call(&mut self, b: &mut IrBuilder, call: Node<'_>) -> Value {
         let function = call.child_by_field_name("function");
-        let writes_scope = function.is_some_and(|f| {
-            f.kind() == "name"
-                && matches!(
-                    self.text(f),
-                    "extract" | "eval" | "parse_str" | "mb_parse_str"
-                )
-        });
+        let writes_scope = function
+            .and_then(|f| global_function_name(f, self.source))
+            .is_some_and(|name| {
+                ["extract", "eval", "parse_str", "mb_parse_str"]
+                    .iter()
+                    .any(|scope_writer| name.eq_ignore_ascii_case(scope_writer))
+            });
         if let Some(f) = function.filter(|f| f.kind() != "name") {
             self.walk(b, f);
         }
@@ -570,15 +600,28 @@ impl<'s> Lower<'s> {
             "variable_name" if !self.is_this(target) => {
                 self.assign_unknown(b, self.text(target));
             }
-            "list_literal"
-            | "array_creation_expression"
-            | "array_element_initializer"
-            | "pair"
-            | "by_ref" => {
+            "list_literal" | "array_creation_expression" | "array_element_initializer" | "pair" => {
                 for child in named_children(target) {
                     self.assign_target(b, child);
                 }
             }
+            "by_ref" => {
+                for child in named_children(target) {
+                    self.escape_target(b, child);
+                }
+            }
+            "dynamic_variable_name" => b.havoc(None, UnknownCause::Unsupported),
+            _ => {
+                self.walk(b, target);
+            }
+        }
+    }
+
+    /// A variable `target` makes a reference (`&$v`, `global $v`): it
+    /// escapes. Any other target is read.
+    fn escape_target(&mut self, b: &mut IrBuilder, target: Node<'_>) {
+        match target.kind() {
+            "variable_name" if !self.is_this(target) => self.escape_var(b, self.text(target)),
             "dynamic_variable_name" => b.havoc(None, UnknownCause::Unsupported),
             _ => {
                 self.walk(b, target);
@@ -604,7 +647,7 @@ impl<'s> Lower<'s> {
             b.alias(target, source);
         } else {
             self.walk(b, right);
-            self.assign_unknown(b, self.text(left));
+            self.escape_var(b, self.text(left));
         }
         Value::Unknown
     }
@@ -663,6 +706,24 @@ impl<'s> Lower<'s> {
             self.walk(b, right);
         }
         Value::Unknown
+    }
+
+    /// Runs `body` so that its abrupt exits (`return`, `throw`, `break`,
+    /// `continue`) also reach `finally`, when there is one.
+    fn guarded(
+        &mut self,
+        b: &mut IrBuilder,
+        finally: Option<BlockId>,
+        body: impl FnOnce(&mut Self, &mut IrBuilder),
+    ) {
+        match finally {
+            Some(finally) => {
+                b.enter_try(finally);
+                body(self, b);
+                b.leave_try();
+            }
+            None => body(self, b),
+        }
     }
 
     /// Runs `body` on a path that may be skipped, then joins.
@@ -957,7 +1018,9 @@ impl<'s> Lower<'s> {
             b.switch_to(block);
             self.catch_variable(b, *clause);
             if let Some(body) = clause.child_by_field_name("body") {
-                self.walk(b, body);
+                self.guarded(b, finally_block, |this, b| {
+                    this.walk(b, body);
+                });
             }
             b.goto(join);
         }
@@ -1219,5 +1282,97 @@ mod tests {
             "<?php function f(A $o, $xs) { foreach ($xs as $x) { foreach ($xs as $y) { break 2; } } $o->m(); }",
         );
         assert_eq!(got, None);
+    }
+
+    #[test]
+    fn test_function_call_leading_backslash_extract_havocs_scope() {
+        let got = only(
+            "<?php namespace App; function render(array $vars) { $engine = new Engine(); \\extract($vars); return $engine->render(); }",
+        );
+        assert_eq!(got, Some(Receiver::Unknown(UnknownCause::Unsupported)));
+    }
+
+    #[test]
+    fn test_function_call_uppercase_extract_havocs_scope() {
+        let got = only("<?php function f(array $vars) { $o = new A(); EXTRACT($vars); $o->m(); }");
+        assert_eq!(got, Some(Receiver::Unknown(UnknownCause::Unsupported)));
+    }
+
+    #[test]
+    fn test_function_call_mixed_case_parse_str_havocs_scope() {
+        let got = only("<?php function f($q) { $o = new A(); \\Parse_Str($q); $o->m(); }");
+        assert_eq!(got, Some(Receiver::Unknown(UnknownCause::Unsupported)));
+    }
+
+    #[test]
+    fn test_function_call_namespaced_extract_keeps_the_type() {
+        let got =
+            only("<?php function f(array $vars) { $o = new A(); Lib\\extract($vars); $o->m(); }");
+        assert_eq!(text_of(got), "known A");
+    }
+
+    #[test]
+    fn test_reference_assignment_to_subscript_escapes() {
+        let got = only(
+            "<?php function f() { $cur = &$GLOBALS['logger']; $cur = new FileLogger(); reset_logger(); $cur->log('x'); }",
+        );
+        assert_eq!(got, Some(Receiver::Unknown(UnknownCause::Escape)));
+    }
+
+    #[test]
+    fn test_walk_node_global_declaration_escapes() {
+        let got = only(
+            "<?php function f() { global $logger; $logger = new FileLogger(); reset_logger(); $logger->log('x'); }",
+        );
+        assert_eq!(got, Some(Receiver::Unknown(UnknownCause::Escape)));
+    }
+
+    #[test]
+    fn test_walk_node_static_variable_escapes() {
+        let got = only("<?php function f() { static $c; $c = new A(); f(); $c->m(); }");
+        assert_eq!(got, Some(Receiver::Unknown(UnknownCause::Escape)));
+    }
+
+    #[test]
+    fn test_foreach_statement_by_ref_value_escapes() {
+        let got =
+            only("<?php function f($xs) { foreach ($xs as $k => &$v) { $v = new A(); $v->m(); } }");
+        assert_eq!(got, Some(Receiver::Unknown(UnknownCause::Escape)));
+    }
+
+    #[test]
+    fn test_assign_target_by_ref_list_element_escapes() {
+        let got = only("<?php function f($arr) { [&$a, $b] = $arr; $a = new A(); $a->m(); }");
+        assert_eq!(got, Some(Receiver::Unknown(UnknownCause::Escape)));
+    }
+
+    #[test]
+    fn test_walk_node_by_ref_array_element_escapes() {
+        let got = only("<?php function f() { $q = new A(); $z = [&$q]; $z[0] = 1; $q->m(); }");
+        assert_eq!(got, Some(Receiver::Unknown(UnknownCause::Escape)));
+    }
+
+    #[test]
+    fn test_try_statement_catch_rethrow_reaches_finally() {
+        let got = only(
+            "<?php function f() { $o = new A(); try { risky(); } catch (E $e) { $o = new B(); throw $e; } finally { $o->m(); } }",
+        );
+        assert_eq!(got, Some(Receiver::Unknown(UnknownCause::Conflict)));
+    }
+
+    #[test]
+    fn test_try_statement_catch_return_reaches_finally() {
+        let got = only(
+            "<?php function f() { $o = new A(); try { risky(); } catch (E $e) { $o = new B(); return; } finally { $o->m(); } }",
+        );
+        assert_eq!(got, Some(Receiver::Unknown(UnknownCause::Conflict)));
+    }
+
+    #[test]
+    fn test_try_statement_catch_return_without_finally_keeps_the_type() {
+        let got = only(
+            "<?php function f() { $o = new A(); try { risky(); } catch (E $e) { $o = new B(); return; } $o->m(); }",
+        );
+        assert_eq!(text_of(got), "known A");
     }
 }
