@@ -815,18 +815,19 @@ impl<'r, 'a> NameTierFacts for IndexTiers<'r, 'a, '_> {
                 heritage,
                 form: SiteForm::of(name, call),
                 name,
+                imports,
             },
         );
         let candidates = || gate.admitted(table.global_field_candidates(name, target, free_only));
         let field = c_family::is_c_family(self.language)
             .then(|| table.c_family_field(caller, self.source, candidates))
             .flatten();
-        match field {
+        gate.settle(match field {
             Some(field) => {
                 name_tiers::global_tier(self, name, imports, target, call, || field.iter().copied())
             }
             None => name_tiers::global_tier(self, name, imports, target, call, candidates),
-        }
+        })
     }
 
     fn canonical_c_declaration(&self, id: NodeId) -> NodeId {

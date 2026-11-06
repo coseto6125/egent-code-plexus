@@ -3087,6 +3087,7 @@ impl<'v, 'a> NameTierFacts for OverlayTiers<'v, 'a, '_> {
                 heritage,
                 form,
                 name,
+                imports,
             },
         );
         // Read up to three times by the ladder (the pick, the nearest copy, the
@@ -3103,14 +3104,16 @@ impl<'v, 'a> NameTierFacts for OverlayTiers<'v, 'a, '_> {
                     .filter(admits),
             )
         };
-        let hit = match c_family_field(facts, self.caller, self.source(), candidates, |id| {
-            facts.c_callable(id)
-        }) {
-            Some(field) => {
-                name_tiers::global_tier(self, name, imports, target, call, || field.iter().copied())
-            }
-            None => name_tiers::global_tier(self, name, imports, target, call, candidates),
-        };
+        let hit = gate.settle(
+            match c_family_field(facts, self.caller, self.source(), candidates, |id| {
+                facts.c_callable(id)
+            }) {
+                Some(field) => name_tiers::global_tier(self, name, imports, target, call, || {
+                    field.iter().copied()
+                }),
+                None => name_tiers::global_tier(self, name, imports, target, call, candidates),
+            },
+        );
         debug_assert!(hit
             .edge()
             .is_none_or(|(target, _)| !self.replaced.contains_key(&target)));

@@ -199,6 +199,7 @@ pub fn same_file<F: ResolveFacts>(
                 heritage,
                 form,
                 name,
+                imports: &[],
             },
         )
     });
@@ -231,12 +232,13 @@ pub fn same_file<F: ResolveFacts>(
     };
     // A C# explicit interface implementation is no member a bare name
     // reaches: a later tier takes the call to an inherited one.
-    match hit.filter(|&id| {
+    let resolution = match hit.filter(|&id| {
         (!free_only || facts.kind(id) != NodeKind::Method) && !facts.hidden_member(id) && admits(id)
     }) {
         Some(id) => Resolution::bound(id, Tier::SameFile),
         None => Resolution::Unknown,
-    }
+    };
+    gate.map_or(resolution, |gate| gate.settle(resolution))
 }
 
 /// Tier 2.75: a bare `name` in a type with declared `bases`. Each base, in

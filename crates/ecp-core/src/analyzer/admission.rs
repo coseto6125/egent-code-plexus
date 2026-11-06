@@ -26,8 +26,9 @@
 use std::cell::OnceCell;
 
 use crate::analyzer::ladder::{split_qualifier, CallPick};
+use crate::analyzer::outcome::Resolution;
 use crate::analyzer::same_file_pick::{is_free, member_call_admits, PickFacts};
-use crate::analyzer::types::owner_key;
+use crate::analyzer::types::{owner_key, RawImport};
 use crate::file_category::{FileMeta, Language};
 use crate::graph::NodeKind;
 
@@ -69,6 +70,9 @@ pub struct Site<'c> {
     /// The name the site looks up: a constructor of the type named so is a
     /// construction, not a member call.
     pub name: &'c str,
+    /// The caller file's imports: a static import (`import static p.K.m`,
+    /// `import static p.K.*`) makes `K`'s member reachable by a bare call.
+    pub imports: &'c [RawImport],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,6 +119,15 @@ pub fn bare_call_reaches_members(language: Language) -> bool {
     )
 }
 
+/// Whether an Owner-rule rejection in `language` only demotes the hit to the
+/// tagged untyped-member guess instead of removing the candidate. Kotlin
+/// scope functions (`with(a) { save() }`, `a.apply { save() }`) and Ruby
+/// blocks run with another implicit receiver, which no parser types, so a
+/// bare call there may reach an unrelated type's member.
+pub fn owner_rule_is_soft(language: Language) -> bool {
+    matches!(language, Language::Kotlin | Language::Ruby)
+}
+
 /// How deep the gate follows the lexical nesting of types. Deeper nesting
 /// counts as unrelated, which can only drop an edge, never invent one.
 const MAX_NESTING: usize = 8;
@@ -126,17 +139,32 @@ pub struct Gate<'f, F: PickFacts + ?Sized> {
     facts: &'f F,
     site: Site<'f>,
     owner_rule: bool,
+    soft_owner: bool,
     related: OnceCell<Vec<u32>>,
 }
 
 impl<'f, F: PickFacts + ?Sized> Gate<'f, F> {
     pub fn new(facts: &'f F, site: Site<'f>) -> Self {
+        let owner_rule =
+            site.form == SiteForm::Bare && bare_call_reaches_members(site.caller.language);
+        let soft_owner = owner_rule && owner_rule_is_soft(site.caller.language);
         Self {
             facts,
             site,
-            owner_rule: site.form == SiteForm::Bare
-                && bare_call_reaches_members(site.caller.language),
+            owner_rule: owner_rule && !soft_owner,
+            soft_owner,
             related: OnceCell::new(),
+        }
+    }
+
+    /// The tier's verdict after the soft Owner rule: a bound member of an
+    /// unrelated type becomes the tagged untyped-member guess.
+    pub fn settle(&self, resolution: Resolution) -> Resolution {
+        match resolution {
+            Resolution::Bound(hit) if self.soft_owner && !self.owner_reachable(hit.id) => {
+                resolution.named_only()
+            }
+            other => other,
         }
     }
 
@@ -174,11 +202,13 @@ impl<'f, F: PickFacts + ?Sized> Gate<'f, F> {
     }
 
     /// R21 ahead of uniqueness: a method or a type's function, never a free
-    /// function, a constructor or the caller's own type's member by name
-    /// alone; in Python also another module's function.
+    /// function or a constructor; in Python also another module's function.
+    /// A member of the caller's own type still counts here: an untyped
+    /// receiver may hold that type, so it keeps another type's namesake
+    /// ambiguous. The call's post-filter refuses it as the bound target.
     fn member_form_admits(&self, id: u32) -> bool {
         let facts = self.facts;
-        member_call_admits(facts, id, self.site.caller_owner)
+        member_call_admits(facts, id, None)
             || (self.site.caller.language == Language::Python
                 && is_free(facts, id)
                 && facts.file_of(id) != Some(self.site.caller_file))
@@ -213,6 +243,19 @@ impl<'f, F: PickFacts + ?Sized> Gate<'f, F> {
         if facts
             .file_of(id)
             .is_some_and(|file| facts.is_namespace_owner(file, owner))
+            || site.imports.iter().any(|import| {
+                let named = import.imported_name == site.name;
+                // A plain `import p.K.*` brings K's nested types, not its
+                // members; only the static form (`alias "static:*"`) does.
+                let star = import.imported_name == "*" && import.alias.as_deref() != Some("*");
+                // The source names the type, or the type and the member.
+                let source = import.source.as_str();
+                let class = source
+                    .strip_suffix(site.name)
+                    .and_then(|rest| rest.strip_suffix(['.', ':']))
+                    .map_or(source, |rest| rest.trim_end_matches(':'));
+                (named || star) && class.rsplit(['.', ':']).next() == Some(owner)
+            })
         {
             return true;
         }
@@ -382,6 +425,7 @@ mod tests {
             heritage,
             form,
             name: "m",
+            imports: &[],
         }
     }
 
@@ -585,14 +629,53 @@ mod tests {
         assert_eq!(admit(&facts, at, 1, meta("use.py")), Err(Reject::Form));
     }
 
+    /// Stands for: an untyped receiver may hold the caller's own type, so its
+    /// member counts toward uniqueness; the call's post-filter refuses it as
+    /// the bound target.
     #[test]
-    fn test_admit_untyped_member_own_type_member_rejects_form() {
+    fn test_admit_untyped_member_own_type_member_counts_for_uniqueness() {
         let facts = Decls {
             decls: vec![("K", C, None, "k.js"), ("m", M, Some("K"), "k.js")],
             ..Decls::default()
         };
         let at = site("k.js", Some("K"), &[], SiteForm::UntypedMember);
-        assert_eq!(admit(&facts, at, 1, meta("k.js")), Err(Reject::Form));
+        assert_eq!(admit(&facts, at, 1, meta("k.js")), Ok(()));
+    }
+
+    #[test]
+    fn test_admit_bare_call_static_import_member_admits_owner() {
+        let facts = Decls {
+            decls: vec![
+                ("Helper", C, None, "Helper.java"),
+                ("m", M, Some("Helper"), "Helper.java"),
+            ],
+            ..Decls::default()
+        };
+        let imports = [RawImport {
+            source: "pkg.Helper".into(),
+            imported_name: "m".into(),
+            alias: Some("m".into()),
+            binding_kind: None,
+        }];
+        let at = Site {
+            imports: &imports,
+            ..site("App.java", Some("App"), &[], SiteForm::Bare)
+        };
+        assert_eq!(admit(&facts, at, 1, meta("Helper.java")), Ok(()));
+        let other = [RawImport {
+            source: "ext.Other".into(),
+            imported_name: "m".into(),
+            alias: Some("m".into()),
+            binding_kind: None,
+        }];
+        let at = Site {
+            imports: &other,
+            ..site("App.java", Some("App"), &[], SiteForm::Bare)
+        };
+        assert_eq!(
+            admit(&facts, at, 1, meta("Helper.java")),
+            Err(Reject::Owner)
+        );
     }
 
     // ---- order and stream ----
