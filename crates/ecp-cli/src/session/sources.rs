@@ -182,7 +182,7 @@ fn stream(text: impl Read, len: u64, mut sink: impl FnMut(&[u8])) -> bool {
 /// length are read again from the handle, so a path swapped for a FIFO or a
 /// larger file after the `stat` is judged as what was opened; the open does
 /// not block, so a FIFO put in its place is refused, not waited on.
-fn open_admitted(path: &Path, cap: impl FnOnce() -> SizeCap) -> Option<(fs::File, u64)> {
+pub(crate) fn open_admitted(path: &Path, cap: impl FnOnce() -> SizeCap) -> Option<(fs::File, u64)> {
     let stat_len = admitted_len(path, cap)?;
     let mut options = fs::OpenOptions::new();
     options.read(true);

@@ -7,7 +7,7 @@
 
 use crate::common;
 
-use common::{run_git, write};
+use common::{commit_all, run_git, write};
 use ecp_cli::commands::impact::{
     build_payload, Direction, ImpactArgs, DEFAULT_CONFIDENCE_THRESHOLD,
 };
@@ -702,4 +702,125 @@ fn test_blind_spot_warning_both_is_the_union() {
         "{payload}"
     );
     assert_eq!(warning["total"], 2);
+}
+
+// ── review fixes: the text scan's own accuracy ──────────────────────────────
+
+/// One 0-caller definition `name` in `file`, spanning `lines` lines.
+fn lone_def(repo: &Path, name: &str, file: &str, text: &str, lines: u32) -> GraphFixture {
+    write(repo, file, text);
+    git_track_all(repo);
+    let mut fx = GraphFixture::new();
+    let def = fx.func(file, name);
+    fx.span(def, (0, 0, lines - 1, 40));
+    fx
+}
+
+fn scan_of(fx: GraphFixture, repo: &Path, name: &str, file: &str) -> Value {
+    let (_g, engine) = engine_from(fx);
+    build_payload(&args(name, file, repo), &engine).expect("impact")["unexplained_refs"].clone()
+}
+
+/// Fails before the fix: a conflicted path is listed once per index stage,
+/// so one reference counted three times.
+#[test]
+fn test_unexplained_refs_merge_conflict_counts_a_reference_once() {
+    let repo = tempfile::tempdir().unwrap();
+    let dir = repo.path();
+    write(dir, "src/lib.py", "def get():\n    return 1\n");
+    write(dir, "src/conf.py", "x = 1\na\nb\nc\nd\ny = [get]\n");
+    run_git(dir, &["init", "-q"]);
+    commit_all(dir, "base");
+    run_git(dir, &["checkout", "-qb", "other"]);
+    write(dir, "src/conf.py", "x = 2\na\nb\nc\nd\ny = [get]\n");
+    commit_all(dir, "other");
+    run_git(dir, &["checkout", "-q", "-"]);
+    write(dir, "src/conf.py", "x = 3\na\nb\nc\nd\ny = [get]\n");
+    commit_all(dir, "main");
+    let merge = std::process::Command::new("git")
+        .args(["merge", "other"])
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(!merge.status.success(), "the merge must conflict");
+    let mut fx = GraphFixture::new();
+    let def = fx.func("src/lib.py", "get");
+    fx.span(def, (0, 0, 1, 12));
+    let scan = scan_of(fx, dir, "get", "lib.py");
+    assert_eq!(scan["total"], 1, "{scan}");
+    assert_eq!(scan["files"], 1, "{scan}");
+}
+
+/// Fails before the fix: the annotation line held the first match, so the
+/// real declaration below it was reported as an unexplained `bare` call.
+#[test]
+fn test_unexplained_refs_csharp_attribute_holding_the_name_is_explained() {
+    let repo = tempfile::tempdir().unwrap();
+    let text = "[HttpGet(\"logout\")]\npublic IActionResult logout() {\n    return Ok();\n}\n";
+    let fx = lone_def(repo.path(), "logout", "src/Ctl.cs", text, 4);
+    let scan = scan_of(fx, repo.path(), "logout", "Ctl.cs");
+    assert_eq!(scan["total"], 0, "{scan}");
+}
+
+#[test]
+fn test_unexplained_refs_java_annotation_holding_the_name_is_explained() {
+    let repo = tempfile::tempdir().unwrap();
+    let text = "@GetMapping(\"/login\")\npublic String login() {\n    return \"\";\n}\n";
+    let fx = lone_def(repo.path(), "login", "src/Ctl.java", text, 4);
+    let scan = scan_of(fx, repo.path(), "login", "Ctl.java");
+    assert_eq!(scan["total"], 0, "{scan}");
+}
+
+/// Fails before the fix: explaining the declaration's line dropped the
+/// second occurrence on it.
+#[test]
+fn test_unexplained_refs_second_occurrence_on_the_declaration_line_listed() {
+    let repo = tempfile::tempdir().unwrap();
+    let text = "function target() {} queue.push(\"target\");\n";
+    let fx = lone_def(repo.path(), "target", "src/a.js", text, 1);
+    let scan = scan_of(fx, repo.path(), "target", "a.js");
+    assert_eq!(scan["total"], 1, "{scan}");
+    assert_eq!(scan["sites"][0]["line"], 1, "{scan}");
+}
+
+/// Fails before the fix: an unreadable tracked file was skipped and the
+/// answer read as a clean zero.
+#[cfg(unix)]
+#[test]
+fn test_unexplained_refs_unreadable_file_counted_in_unread() {
+    use std::os::unix::fs::PermissionsExt;
+    let repo = tempfile::tempdir().unwrap();
+    let (fx, _) = one_def(repo.path(), &[("src/secret.py", "x = [get]\n")]);
+    let secret = repo.path().join("src/secret.py");
+    std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read(&secret).is_ok() {
+        return; // root ignores the mode
+    }
+    let scan = scan_of(fx, repo.path(), "get", "lib.py");
+    assert_eq!(scan["unread"], 1, "{scan}");
+    assert_eq!(scan["total"], 0, "{scan}");
+}
+
+#[test]
+fn test_unexplained_refs_all_readable_has_no_unread_field() {
+    let repo = tempfile::tempdir().unwrap();
+    let (fx, _) = one_def(repo.path(), &[]);
+    let scan = scan_of(fx, repo.path(), "get", "lib.py");
+    assert!(scan.get("unread").is_none(), "{scan}");
+}
+
+/// Fails before the fix: a registry name that is no directory scanned ".".
+#[test]
+fn test_unexplained_refs_unknown_registry_name_is_an_error_not_the_cwd() {
+    let repo = tempfile::tempdir().unwrap();
+    let (fx, _) = one_def(repo.path(), &[]);
+    let (_g, engine) = engine_from(fx);
+    let mut a = args("get", "lib.py", repo.path());
+    a.repo = Some("no-such-repo__deadbeef".to_string());
+    let scan = build_payload(&a, &engine).expect("impact")["unexplained_refs"].clone();
+    assert_eq!(
+        scan["error"], "work tree for --repo no-such-repo__deadbeef unknown",
+        "{scan}"
+    );
+    assert_eq!(scan["total"], 0, "{scan}");
 }

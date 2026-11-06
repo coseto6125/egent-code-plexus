@@ -9,6 +9,8 @@
 //! consulted here only to drop the occurrences it already explains.
 
 use crate::git::safe_exec;
+use crate::session::sources::open_admitted;
+use ecp_core::contracts::routing::SizeCap;
 use ecp_core::file_category::determine_category;
 use ecp_core::graph::{FileCategory, NodeKind, RelType};
 use ecp_core::session::MergedGraph;
@@ -18,7 +20,10 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 /// The non-test direct caller count at or below which the scan runs by
 /// default. The impact answers judged wrong or incomplete had 0 to 2
@@ -49,6 +54,11 @@ const SKIPPED_SUFFIXES: [&str; 8] = [
 ];
 const SKIPPED_NAMES: [&str; 2] = ["package-lock.json", "pnpm-lock.yaml"];
 
+/// `git grep` had no size cap, so the scan reads a file of any length.
+fn no_size_cap() -> SizeCap {
+    SizeCap::resolve(None, Some(u64::MAX))
+}
+
 /// The bytes `git grep -I` reads for a NUL to call a file binary.
 const BINARY_PROBE_BYTES: usize = 8000;
 
@@ -62,7 +72,10 @@ pub(super) fn is_vendored(path: &str) -> bool {
 }
 
 struct Hit {
-    path: String,
+    /// Shared by every hit of one file.
+    path: Arc<str>,
+    /// Whether `path` is a source file, decided once per file.
+    source: bool,
     line: u32,
     form: &'static str,
     /// Whole-word occurrences of the name on this line.
@@ -81,13 +94,26 @@ struct Site<'g> {
 pub(super) struct UnexplainedRefs<'g> {
     sites: Vec<Site<'g>>,
     error: Option<String>,
+    /// Tracked files the scan could not read: their text is not in `sites`.
+    unread: usize,
 }
 
 impl<'g> UnexplainedRefs<'g> {
-    fn failed(reason: String) -> Self {
+    pub(super) fn failed(reason: String) -> Self {
         Self {
             sites: Vec::new(),
             error: Some(reason),
+            unread: 0,
+        }
+    }
+
+    /// Why a zero `total` proves nothing: the scan failed, or it left
+    /// tracked files unread and found nothing in the rest.
+    pub(super) fn inconclusive(&self) -> Option<String> {
+        match (&self.error, self.total(), self.unread) {
+            (Some(reason), ..) => Some(reason.clone()),
+            (None, 0, n @ 1..) => Some(format!("{n} tracked file(s) could not be read")),
+            _ => None,
         }
     }
 
@@ -96,13 +122,9 @@ impl<'g> UnexplainedRefs<'g> {
         self.sites.iter().map(|s| s.hit.count).sum()
     }
 
-    pub(super) fn error(&self) -> Option<&str> {
-        self.error.as_deref()
-    }
-
     /// The files that hold a site, the ones past the site cap included.
     pub(super) fn files(&self) -> BTreeSet<&str> {
-        self.sites.iter().map(|s| s.hit.path.as_str()).collect()
+        self.sites.iter().map(|s| &*s.hit.path).collect()
     }
 
     /// The `unexplained_refs` payload object. A site whose line holds
@@ -114,7 +136,7 @@ impl<'g> UnexplainedRefs<'g> {
             .take(MAX_SITES)
             .map(|s| {
                 let mut site = json!({
-                    "path": s.hit.path,
+                    "path": &*s.hit.path,
                     "line": s.hit.line,
                     "form": s.hit.form,
                     "enclosing": s.enclosing,
@@ -135,32 +157,40 @@ impl<'g> UnexplainedRefs<'g> {
         if let Some(reason) = &self.error {
             out["error"] = json!(reason);
         }
+        if self.unread > 0 {
+            out["unread"] = self.unread.into();
+        }
         out
     }
 }
 
 /// Scan the work tree that holds `repo` for `name`: the bare name, never the
 /// `Owner.Method` form. A `git` that cannot run or fails gives an answer
-/// with `error` set, never an `Err`: the impact answer stands without it.
+/// with `error` set, never an `Err`: the impact answer stands without it. A
+/// tracked file the scan cannot read is counted in `unread`, not skipped
+/// silently.
 pub(super) fn scan<'g>(merged: MergedGraph<'g>, name: &str, repo: &Path) -> UnexplainedRefs<'g> {
     if name.trim().is_empty() {
         return UnexplainedRefs::failed("empty symbol name".to_string());
     }
-    let hits = match tracked_files(repo) {
-        Ok((top, files)) => search(&top, &files, name.as_bytes()),
+    let (hits, unread) = match tracked_files(repo) {
+        Ok(tracked) => {
+            let (hits, unread) = search(&tracked.top, &tracked.files, name.as_bytes());
+            (hits, unread + tracked.unlisted)
+        }
         Err(reason) => return UnexplainedRefs::failed(reason),
     };
     let mut sites = unexplained(merged, &same_name_defs(merged, name), hits);
     // The capped list shows production code before test fixtures that
     // repeat the name.
-    sites.sort_by_cached_key(|s| {
-        (
-            determine_category(&s.hit.path) != FileCategory::Source,
-            s.hit.path.clone(),
-            s.hit.line,
-        )
+    sites.sort_unstable_by(|a, b| {
+        (!a.hit.source, &a.hit.path, a.hit.line).cmp(&(!b.hit.source, &b.hit.path, b.hit.line))
     });
-    UnexplainedRefs { sites, error: None }
+    UnexplainedRefs {
+        sites,
+        error: None,
+        unread,
+    }
 }
 
 /// Every on-disk definition named `name`, of every kind, in merged space:
@@ -204,21 +234,48 @@ fn is_skipped(path: &str) -> bool {
         || parts.any(|dir| VENDORED_DIRS.contains(&dir) || BUILD_DIRS.contains(&dir))
 }
 
+/// The tracked files the scan reads, and what it could not list.
+struct Tracked {
+    top: PathBuf,
+    files: Vec<String>,
+    /// Listed paths that are not valid UTF-8: they cannot be read as `files`.
+    unlisted: usize,
+}
+
 /// The top of the work tree that holds `repo`, and every tracked file from
 /// that top, so a subdirectory `--repo` still searches every file the graph
 /// covers. No language filter: a template, a view or a frontend file of
 /// another language is the gap.
-fn tracked_files(repo: &Path) -> Result<(PathBuf, Vec<String>), String> {
-    let top = git(repo, &["rev-parse", "--show-toplevel"])?;
-    let top = PathBuf::from(String::from_utf8_lossy(&top).trim_end_matches(['\n', '\r']));
+fn tracked_files(repo: &Path) -> Result<Tracked, String> {
+    // The cached layout avoids a `git rev-parse` spawn; the spawn stays for
+    // a layout the cache does not model.
+    let top = match crate::git_cache::git_layout(repo) {
+        Some((top, ..)) => top,
+        None => {
+            let out = git(repo, &["rev-parse", "--show-toplevel"])?;
+            let top = String::from_utf8(out)
+                .map_err(|_| "work tree path is not valid UTF-8".to_string())?;
+            PathBuf::from(top.trim_end_matches(['\n', '\r']))
+        }
+    };
     let listed = git(&top, &["ls-files", "-z"])?;
-    let files = listed
-        .split(|&b| b == 0)
-        .filter_map(|path| std::str::from_utf8(path).ok())
-        .filter(|path| !path.is_empty() && !is_skipped(path))
-        .map(str::to_string)
-        .collect();
-    Ok((top, files))
+    let mut unlisted = 0;
+    let mut files: Vec<String> = Vec::new();
+    for path in listed.split(|&b| b == 0).filter(|p| !p.is_empty()) {
+        match std::str::from_utf8(path) {
+            Ok(path) if !is_skipped(path) => files.push(path.to_string()),
+            Ok(_) => {}
+            Err(_) if is_skipped(&String::from_utf8_lossy(path)) => {}
+            Err(_) => unlisted += 1,
+        }
+    }
+    // A conflicted path is listed once per index stage.
+    files.dedup();
+    Ok(Tracked {
+        top,
+        files,
+        unlisted,
+    })
 }
 
 fn git(dir: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
@@ -238,28 +295,49 @@ fn git(dir: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
     }
 }
 
-/// Every line of `files` under `top` with a whole-word occurrence of `name`.
+/// Every line of `files` under `top` with a whole-word occurrence of `name`,
+/// and the number of files that could not be read.
 /// In-process rather than `git grep`: on a 15k-file tree `git grep` took
 /// 300-460 ms per query against 32-34 ms for one parallel pass (vscode).
-fn search(top: &Path, files: &[String], name: &[u8]) -> Vec<Hit> {
+fn search(top: &Path, files: &[String], name: &[u8]) -> (Vec<Hit>, usize) {
     let finder = Finder::new(name);
-    files
+    let unread = AtomicUsize::new(0);
+    let hits = files
         .par_iter()
-        .flat_map_iter(|rel| search_file(&top.join(rel), rel, &finder, name))
-        .collect()
+        .flat_map_iter(|rel| {
+            search_file(&top.join(rel), rel, &finder, name).unwrap_or_else(|| {
+                unread.fetch_add(1, Ordering::Relaxed);
+                Vec::new()
+            })
+        })
+        .collect();
+    (hits, unread.into_inner())
 }
 
-/// The hits of one file. A path that is gone, no regular file (a submodule,
-/// a symlink) or binary by `git grep -I`'s test gives none.
-fn search_file(path: &Path, rel: &str, finder: &Finder, name: &[u8]) -> Vec<Hit> {
-    let regular = fs::symlink_metadata(path).is_ok_and(|meta| meta.is_file());
-    let Some(text) = regular.then(|| fs::read(path).ok()).flatten() else {
-        return Vec::new();
-    };
-    if memchr::memchr(0, &text[..text.len().min(BINARY_PROBE_BYTES)]).is_some() {
-        return Vec::new();
+/// The hits of one file; `None` when the file exists as a regular file but
+/// cannot be read. A path that is gone, no regular file (a submodule, a
+/// symlink) or binary by `git grep -I`'s test gives no hits.
+fn search_file(path: &Path, rel: &str, finder: &Finder, name: &[u8]) -> Option<Vec<Hit>> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_file() => {}
+        Ok(_) => return Some(Vec::new()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Some(Vec::new()),
+        Err(_) => return None,
     }
+    // Opened without blocking, with the type checked on the open handle: a
+    // path swapped for a FIFO since the `lstat` is refused, not waited on.
+    let (mut file, len) = open_admitted(path, no_size_cap)?;
+    let mut text = Vec::with_capacity(len as usize);
+    (&mut file)
+        .take(BINARY_PROBE_BYTES as u64)
+        .read_to_end(&mut text)
+        .ok()?;
+    if memchr::memchr(0, &text).is_some() {
+        return Some(Vec::new());
+    }
+    file.read_to_end(&mut text).ok()?;
     let mut hits = Vec::new();
+    let mut shared: Option<(Arc<str>, bool)> = None;
     let (mut line, mut counted, mut line_end) = (1u32, 0usize, 0usize);
     for at in finder.find_iter(&text) {
         if at < line_end {
@@ -270,15 +348,22 @@ fn search_file(path: &Path, rel: &str, finder: &Finder, name: &[u8]) -> Vec<Hit>
         let start = memchr::memrchr(b'\n', &text[..at]).map_or(0, |i| i + 1);
         line_end = memchr::memchr(b'\n', &text[at..]).map_or(text.len(), |i| at + i);
         if let Some((form, count)) = occurrences(&text[start..line_end], name) {
+            let (path, source) = shared.get_or_insert_with(|| {
+                (
+                    Arc::from(rel),
+                    determine_category(rel) == FileCategory::Source,
+                )
+            });
             hits.push(Hit {
-                path: rel.to_string(),
+                path: Arc::clone(path),
+                source: *source,
                 line,
                 form,
                 count,
             });
         }
     }
-    hits
+    Some(hits)
 }
 
 fn is_ident_char(c: char) -> bool {
@@ -371,18 +456,29 @@ fn explainers<'g>(merged: MergedGraph<'g>, defs: &[u32]) -> Explainers<'g> {
 }
 
 /// Drop the occurrences the graph already explains:
-/// - a definition's declaration;
+/// - a definition's declaration, one occurrence: the first `bare` match in a
+///   callable's span, with every match before it (an annotation or decorator
+///   that holds the name), or the first match of any other definition;
 /// - an occurrence inside a callable that holds an edge to a definition
 ///   (the innermost named callable, with the lambdas inside it);
 /// - an occurrence inside the span of a value declaration or a type that
 ///   holds such an edge, outside every named callable declared within it;
 /// - every occurrence in the file of a File / Module node that holds one;
-/// - the import statement of a file whose import the graph holds.
+/// - the import statement of a file whose import the graph holds, one
+///   occurrence.
+///
+/// A declaration and an import statement explain one occurrence each, so a
+/// second occurrence on the same line stays; an edge explains a whole span.
 fn unexplained<'g>(merged: MergedGraph<'g>, defs: &[u32], hits: Vec<Hit>) -> Vec<Site<'g>> {
     if hits.is_empty() {
         return Vec::new();
     }
-    let hit_paths: FxHashSet<&str> = hits.iter().map(|h| h.path.as_str()).collect();
+    // Hits of a file are in line order.
+    let mut by_path: FxHashMap<&str, Vec<&Hit>> = FxHashMap::default();
+    for hit in &hits {
+        by_path.entry(&hit.path).or_default().push(hit);
+    }
+    let hit_paths: FxHashSet<&str> = by_path.keys().copied().collect();
     let scopes = scopes_in(merged, &hit_paths);
     let explainers = explainers(merged, defs);
 
@@ -406,35 +502,54 @@ fn unexplained<'g>(merged: MergedGraph<'g>, defs: &[u32], hits: Vec<Hit>) -> Vec
         }
     }
 
-    // A definition's first occurrence inside its span is its declaration: a
-    // span can start on a decorator or annotation line.
-    let first_in = |path: &str, keep: &dyn Fn(&Hit) -> bool| {
-        hits.iter()
-            .filter(|&h| h.path == path && keep(h))
-            .map(|h| h.line)
-            .min()
+    let mut spent: FxHashMap<(&str, u32), u32> = FxHashMap::default();
+    let mut spend = |path: &'g str, line: u32, n: u32| {
+        let slot = spent.entry((path, line)).or_default();
+        *slot = slot.saturating_add(n);
     };
-    let mut explained: FxHashSet<(&str, u32)> = FxHashSet::default();
     for node in defs.iter().filter_map(|&d| merged.node(d)) {
         let Some(path) = node.file_path(&merged) else {
             continue;
         };
-        let span = node.start_line()..=node.end_line();
-        explained.insert((path, node.start_line()));
-        explained
-            .extend(first_in(path, &|h: &Hit| span.contains(&h.line)).map(|line| (path, line)));
+        let file_hits = by_path.get(path).map_or(&[][..], Vec::as_slice);
+        let from = file_hits.partition_point(|h| h.line < node.start_line());
+        let within = || {
+            file_hits[from..]
+                .iter()
+                .take_while(|h| h.line <= node.end_line())
+        };
+        let declaration = match node.kind().is_callable() {
+            true => within()
+                .find(|h| h.form == "bare")
+                .or_else(|| within().next()),
+            false => within().next(),
+        };
+        if let Some(declaration) = declaration {
+            for before in within().take_while(|h| h.line < declaration.line) {
+                spend(path, before.line, u32::MAX);
+            }
+            spend(path, declaration.line, 1);
+        }
     }
     // The graph keeps an import edge, not its line: the first occurrence
     // outside every callable of an importing file is the import statement.
     for &path in &explainers.importing_files {
-        let top_level = |h: &Hit| containing(&scopes, path, h.line).is_empty();
-        explained.extend(first_in(path, &top_level).map(|line| (path, line)));
+        let top_level = by_path.get(path).and_then(|v| {
+            v.iter()
+                .find(|h| containing(&scopes, path, h.line).is_empty())
+        });
+        if let Some(hit) = top_level {
+            spend(path, hit.line, 1);
+        }
     }
 
     hits.into_iter()
-        .filter_map(|hit| {
-            let path = hit.path.as_str();
-            if whole_files.contains(path) || explained.contains(&(path, hit.line)) {
+        .filter_map(|mut hit| {
+            let path = &*hit.path;
+            let remaining = hit
+                .count
+                .saturating_sub(spent.get(&(path, hit.line)).copied().unwrap_or(0));
+            if whole_files.contains(path) || remaining == 0 {
                 return None;
             }
             let around = containing(&scopes, path, hit.line);
@@ -460,6 +575,7 @@ fn unexplained<'g>(merged: MergedGraph<'g>, defs: &[u32], hits: Vec<Hit>) -> Vec
                 return None;
             }
             let enclosing = named.map(|n| n.name);
+            hit.count = remaining;
             Some(Site { hit, enclosing })
         })
         .collect()
@@ -610,6 +726,7 @@ mod tests {
         let path = dir.path().join("f");
         fs::write(&path, text).unwrap();
         search_file(&path, "f", &Finder::new(name), name)
+            .unwrap()
             .iter()
             .map(|h| (h.line, h.form, h.count))
             .collect()
@@ -642,8 +759,68 @@ mod tests {
     fn test_search_file_directory_and_missing_path_give_none() {
         let dir = tempfile::tempdir().unwrap();
         let finder = Finder::new(b"get");
-        assert!(search_file(dir.path(), "d", &finder, b"get").is_empty());
-        assert!(search_file(&dir.path().join("gone"), "gone", &finder, b"get").is_empty());
+        assert!(search_file(dir.path(), "d", &finder, b"get")
+            .unwrap()
+            .is_empty());
+        assert!(
+            search_file(&dir.path().join("gone"), "gone", &finder, b"get")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn test_search_file_fifo_path_gives_no_hits_without_blocking() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("pipe");
+        let made = std::process::Command::new("mkfifo").arg(&fifo).status();
+        if !made.is_ok_and(|s| s.success()) {
+            return;
+        }
+        // A FIFO is no regular file: `symlink_metadata` skips it before any open.
+        assert!(search_file(&fifo, "pipe", &Finder::new(b"get"), b"get")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_search_file_unreadable_regular_file_is_none() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secret");
+        fs::write(&path, b"get()\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::read(&path).is_ok() {
+            return; // root ignores the mode
+        }
+        assert!(search_file(&path, "secret", &Finder::new(b"get"), b"get").is_none());
+    }
+
+    #[test]
+    fn test_tracked_files_conflicted_path_listed_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let run = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(["-c", "user.name=t", "-c", "user.email=t@t", "-C"])
+                .arg(dir.path())
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        run(&["init", "-q", "-b", "main"]);
+        fs::write(dir.path().join("a.js"), "get()\n").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-qm", "base"]);
+        run(&["checkout", "-qb", "other"]);
+        fs::write(dir.path().join("a.js"), "get(1)\n").unwrap();
+        run(&["commit", "-qam", "other"]);
+        run(&["checkout", "-q", "main"]);
+        fs::write(dir.path().join("a.js"), "get(2)\n").unwrap();
+        run(&["commit", "-qam", "main"]);
+        assert!(!run(&["merge", "other"]).status.success());
+        let tracked = tracked_files(dir.path()).unwrap();
+        assert_eq!(tracked.files, vec!["a.js".to_string()]);
     }
 
     #[test]

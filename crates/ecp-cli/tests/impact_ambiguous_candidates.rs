@@ -152,6 +152,25 @@ fn test_impact_ambiguous_seven_candidates_capped_at_five_with_more() {
     assert_eq!(json["more_command"], "ecp find get --all", "{json}");
 }
 
+/// Fails before the fix: the command lacked `--repo`, so it ran in the cwd's repo.
+#[test]
+fn test_impact_ambiguous_more_command_carries_repo() {
+    let fixture = candidates(&[
+        ("src/d0.py", 0),
+        ("src/d1.py", 1),
+        ("src/d2.py", 2),
+        ("src/d3.py", 3),
+        ("src/d4.py", 4),
+        ("src/d5.py", 5),
+    ]);
+    let out = fixture.run(&["get", "--format", "json", "--repo", "myrepo"]);
+    let json = json_of(&out);
+    assert_eq!(
+        json["more_command"], "ecp find get --all --repo myrepo",
+        "{json}"
+    );
+}
+
 #[test]
 fn test_impact_ambiguous_vendored_candidates_dropped_and_counted_in_more() {
     let fixture = candidates(&[

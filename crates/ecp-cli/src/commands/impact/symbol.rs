@@ -14,12 +14,13 @@ use crate::engine::Engine;
 use crate::read_context::{ambiguity_candidates, resolve_target, shell_word, target_request};
 use ecp_core::contracts::identity::{Ambiguity, TargetRequest, TargetResolution};
 use ecp_core::graph::RelType;
+use ecp_core::registry::RegistryFile;
 use ecp_core::session::MergedGraph;
 use ecp_core::EcpError;
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Candidates an ambiguous target lists, most-called first.
 const MAX_CANDIDATES: usize = 5;
@@ -201,14 +202,9 @@ pub(super) fn impact_by_name(
         && scan_runs(args, same_name_defs, || {
             direct_callers(merged, start_idx as u32).len()
         }))
-    .then(|| {
-        // `--repo` may be a registry name, not a path: the overlay's worktree
-        // top is the work tree this graph answers for.
-        let repo = engine
-            .worktree_root()
-            .or_else(|| args.repo.as_deref().map(Path::new).filter(|p| p.is_dir()))
-            .unwrap_or(Path::new("."));
-        unexplained::scan(merged, bare_name, repo)
+    .then(|| match scan_repo(engine, args.repo.as_deref()) {
+        Ok(repo) => unexplained::scan(merged, bare_name, &repo),
+        Err(reason) => UnexplainedRefs::failed(reason),
     });
 
     // Blind spots scoped to this answer's evidence: an upstream walk counts
@@ -277,7 +273,7 @@ pub(super) fn impact_by_name(
     // say so instead of reading as complete, and cite what the scan found.
     let ambiguity_caveat = (same_name_defs >= 2 && upstream).then(|| {
         let action = match &scan {
-            Some(refs) => match (refs.error(), refs.total()) {
+            Some(refs) => match (refs.inconclusive(), refs.total()) {
                 (Some(reason), _) => format!(
                     "The text scan for references the graph does not explain failed \
                      ({reason})."
@@ -314,12 +310,42 @@ pub(super) fn impact_by_name(
             hidden_heuristic_edges: hidden_heuristic_total,
             hidden_test_callers: hidden_test_total,
             payload_caveat: ambiguity_caveat,
-            unexplained_refs: scan.as_ref().map(|refs| match refs.error() {
-                Some(reason) => Err(reason.to_string()),
-                None => Ok(refs.total()),
-            }),
+            unexplained_refs: scan
+                .as_ref()
+                .map(|refs| refs.inconclusive().map_or_else(|| Ok(refs.total()), Err)),
         },
     ))
+}
+
+/// The work tree the text scan reads. `--repo` may be a registry name, not a
+/// path: the overlay's worktree top is the work tree this graph answers for,
+/// and a name without an overlay resolves through the registry. A name the
+/// registry does not know is an error: scanning the cwd would read another
+/// repo.
+fn scan_repo(engine: &Engine, repo_arg: Option<&str>) -> Result<PathBuf, String> {
+    if let Some(root) = engine.worktree_root() {
+        return Ok(root.to_path_buf());
+    }
+    match repo_arg {
+        None => Ok(PathBuf::from(".")),
+        Some(repo) if Path::new(repo).is_dir() => Ok(PathBuf::from(repo)),
+        Some(name) => {
+            registered_work_tree(name).ok_or_else(|| format!("work tree for --repo {name} unknown"))
+        }
+    }
+}
+
+fn registered_work_tree(name: &str) -> Option<PathBuf> {
+    let registry =
+        RegistryFile::read_or_empty(&ecp_core::registry::resolve_home_ecp().join("registry.json"))
+            .ok()?;
+    let alias = registry
+        .repos
+        .values()
+        .find(|r| r.dir_name == name || r.aliases.iter().any(|a| a == name))?;
+    Some(crate::git_cache::worktree_root_for_repo(Path::new(
+        &alias.common_dir,
+    )))
 }
 
 /// Whether the `unexplained_refs` text scan runs on an upstream walk. With
@@ -407,42 +433,44 @@ pub(super) fn ambiguous_candidates(
     merged: MergedGraph<'_>,
     ambiguity: &Ambiguity,
     name: &str,
+    repo: Option<&str>,
 ) -> Map<String, Value> {
     let selectors = ambiguity_candidates(ambiguity);
     let selectors = selectors.as_array().map(Vec::as_slice).unwrap_or_default();
     let all_vendored = ambiguity.candidates().iter().all(|c| is_vendored(&c.file));
-    let mut rows: Vec<(usize, Value)> = ambiguity
+    // Count first: the callers and the JSON are built for the shown rows only.
+    let mut ranked: Vec<(usize, &_, &Value)> = ambiguity
         .candidates()
         .iter()
         .zip(selectors)
         .filter(|(c, _)| all_vendored || !is_vendored(&c.file))
-        .map(|(c, selector)| {
-            let callers = direct_callers(merged, c.node);
-            let row = json!({
+        .map(|(c, selector)| (direct_callers(merged, c.node).len(), c, selector))
+        .collect();
+    ranked.sort_by_key(|row| std::cmp::Reverse(row.0));
+    ranked.truncate(MAX_CANDIDATES);
+    let rows: Vec<Value> = ranked
+        .into_iter()
+        .map(|(count, c, selector)| {
+            json!({
                 "target": selector["target"],
                 "file": c.file,
                 "line": c.line,
                 "kind": selector["kind"],
-                "callers": callers.len(),
-                "top_callers": top_callers(merged, &callers),
-            });
-            (callers.len(), row)
+                "callers": count,
+                "top_callers": top_callers(merged, &direct_callers(merged, c.node)),
+            })
         })
         .collect();
-    rows.sort_by_key(|row| std::cmp::Reverse(row.0));
-    rows.truncate(MAX_CANDIDATES);
     let more = ambiguity.total() - rows.len();
     let mut fields = Map::new();
-    fields.insert(
-        "candidates".to_string(),
-        rows.into_iter().map(|(_, row)| row).collect(),
-    );
+    fields.insert("candidates".to_string(), rows.into());
     if more > 0 {
+        let mut command = format!("ecp find {} --all", shell_word(name));
+        if let Some(repo) = repo {
+            let _ = write!(command, " --repo {}", shell_word(repo));
+        }
         fields.insert("more".to_string(), json!(more));
-        fields.insert(
-            "more_command".to_string(),
-            json!(format!("ecp find {} --all", shell_word(name))),
-        );
+        fields.insert("more_command".to_string(), json!(command));
     }
     fields
 }
