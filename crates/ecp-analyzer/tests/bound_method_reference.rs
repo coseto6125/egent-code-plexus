@@ -979,18 +979,18 @@ fn test_bound_method_reference_python_read_before_rebinding_keeps_type() {
     }
 }
 
-/// Stands for: two annotations of one name with different classes leave the
-/// receiver untyped. Byte order cannot tell which branch ran, so neither class
-/// is a safe target.
+/// Stands for: the annotation that reaches the use on every path types the
+/// receiver: a later annotation replaces an earlier one, and a branch that
+/// re-annotates does not reach a use in the other branch.
 #[test]
-fn test_bound_method_reference_python_annotations_of_two_classes_return_no_edge() {
-    for body in [
-        "local: Other = Other()\n    local = loose\n    local: Cls = Cls()\n    return list(map(local.m, xs))",
-        "local: Cls = Cls()\n    local = loose\n    local: Other = Other()\n    return list(map(local.m, xs))",
-        "local: Cls = Cls()\n    if loose:\n        local: Other = Other()\n    else:\n        return list(map(local.m, xs))",
+fn test_bound_method_reference_python_annotation_reaching_the_use_binds_its_class() {
+    for (body, file) in [
+        ("local: Other = Other()\n    local = loose\n    local: Cls = Cls()\n    return list(map(local.m, xs))", "cls.py"),
+        ("local: Cls = Cls()\n    local = loose\n    local: Other = Other()\n    return list(map(local.m, xs))", "other.py"),
+        ("local: Cls = Cls()\n    if loose:\n        local: Other = Other()\n    else:\n        return list(map(local.m, xs))", "cls.py"),
     ] {
         let g = python_graph(body);
-        assert_eq!(function_refs(&g, "run"), none(), "{body}");
+        assert_one_cross_file(&function_refs(&g, "run"), file, "m");
     }
 }
 

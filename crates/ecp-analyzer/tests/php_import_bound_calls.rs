@@ -273,10 +273,11 @@ fn test_resolve_call_fully_qualified_new_ignores_use_keeps_global() {
     );
 }
 
-/// `$date->format()` is a method call: `use function` never names it, so it
-/// neither binds the namespaced function nor suppresses the call.
+/// Stands for: `use function format` names a free function, never a member;
+/// the untyped `$date->format()` binds the one project `format` method as
+/// the tagged guess.
 #[test]
-fn test_resolve_call_untyped_member_ignores_use_function_returns_no_edge() {
+fn test_resolve_call_untyped_member_ignores_use_function_binds_tagged_guess() {
     let graph = php_graph(&[
         (
             "src/App/Support/helpers.php",
@@ -291,7 +292,7 @@ fn test_resolve_call_untyped_member_ignores_use_function_returns_no_edge() {
             "<?php use function App\\Support\\format; function go($date) { $date->format(); }",
         ),
     ]);
-    assert_call_targets(&graph, "go", &[]);
+    assert_call_targets(&graph, "go", &[("src/Date.php", "Date", "format", 0.55)]);
 }
 
 /// Stands for: an external `use function select` does not suppress

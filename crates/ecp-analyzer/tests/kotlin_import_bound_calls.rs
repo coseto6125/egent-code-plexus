@@ -124,10 +124,11 @@ fn test_resolve_call_external_wildcard_import_keeps_global() {
     assert_call_targets(&graph, "go", &[(UTIL.0, "", "helper", global())]);
 }
 
-/// A package wildcard imports top-level declarations, never the member of a
-/// class in that package.
+/// Stands for: a package wildcard imports top-level declarations, never a
+/// class member; a bare call may still run under a scope function's
+/// receiver, so the unique member binds as the tagged guess.
 #[test]
-fn test_resolve_call_wildcard_import_class_member_keeps_global() {
+fn test_resolve_call_wildcard_import_class_member_binds_tagged_guess() {
     let graph = kotlin_graph(&[
         (
             "src/main/kotlin/util/Adapter.kt",
@@ -142,7 +143,7 @@ fn test_resolve_call_wildcard_import_class_member_keeps_global() {
             "src/main/kotlin/util/Adapter.kt",
             "Adapter",
             "refresh",
-            global(),
+            0.55,
         )],
     );
 }
@@ -400,10 +401,11 @@ fn test_resolve_call_typed_receiver_of_imported_class_returns_type_heritage() {
     );
 }
 
-/// A star-imported package named like a constructor property: the call on
-/// the property resolves by its member name, as before the import tier.
+/// Stands for: a star-imported package named like a constructor property:
+/// the call on the property resolves by its member name, as the tagged
+/// guess while Kotlin types no constructor property.
 #[test]
-fn test_resolve_call_wildcard_package_named_receiver_keeps_global() {
+fn test_resolve_call_wildcard_package_named_receiver_binds_tagged_guess() {
     let graph = kotlin_graph(&[
         (
             "src/main/kotlin/com/app/repository/UserRepository.kt",
@@ -421,7 +423,7 @@ fn test_resolve_call_wildcard_package_named_receiver_keeps_global() {
             "src/main/kotlin/com/app/repository/UserRepository.kt",
             "UserRepository",
             "fetchUsers",
-            global(),
+            0.55,
         )],
     );
 }

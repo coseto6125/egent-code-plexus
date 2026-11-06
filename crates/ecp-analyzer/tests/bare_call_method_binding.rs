@@ -1110,11 +1110,17 @@ fn assert_own_method(provider: &dyn LanguageProvider, f: &ImplicitThis<'_>) {
     );
 }
 
-/// Documents the Global tier as it stands for an implicit-`this` language:
-/// the unique method namesake of an unrelated class still binds. The
-/// contract is "this rule leaves implicit-`this` languages alone"; tightening
-/// it (admit only the enclosing type, its outer types and its bases) flips
-/// this assertion on purpose.
+/// Stands for: in Java, C#, Swift, Dart and C++ a bare call reaches only the
+/// enclosing type, its outer types and its bases, so an unrelated class's
+/// unique namesake binds nothing (the admission Owner rule).
+fn assert_unrelated_method_binds_nothing(provider: &dyn LanguageProvider, f: &ImplicitThis<'_>) {
+    let graph = single(provider, &[f.unrelated, f.app]);
+    assert_eq!(targets(&graph, f.caller_app), vec![]);
+}
+
+/// Stands for: in Kotlin and Ruby a bare call may run under another implicit
+/// receiver (a scope function, a block), so an unrelated class's unique
+/// namesake still binds, as the tagged guess.
 fn assert_unrelated_method_kept(provider: &dyn LanguageProvider, f: &ImplicitThis<'_>) {
     let graph = single(provider, &[f.unrelated, f.app]);
     assert_eq!(
@@ -1243,8 +1249,8 @@ fn test_resolve_call_java_bare_call_own_method_binds_own_method() {
 }
 
 #[test]
-fn test_resolve_call_java_bare_call_unrelated_method_keeps_global_bind() {
-    assert_unrelated_method_kept(&JavaProvider::new().unwrap(), &JAVA);
+fn test_resolve_call_java_bare_call_unrelated_method_binds_nothing() {
+    assert_unrelated_method_binds_nothing(&JavaProvider::new().unwrap(), &JAVA);
 }
 
 #[test]
@@ -1253,7 +1259,7 @@ fn test_resolve_call_kotlin_bare_call_own_method_binds_own_method() {
 }
 
 #[test]
-fn test_resolve_call_kotlin_bare_call_unrelated_method_keeps_global_bind() {
+fn test_resolve_call_kotlin_bare_call_unrelated_method_keeps_tagged_guess() {
     assert_unrelated_method_kept(&KotlinProvider::new().unwrap(), &KOTLIN);
 }
 
@@ -1263,8 +1269,8 @@ fn test_resolve_call_csharp_bare_call_own_method_binds_own_method() {
 }
 
 #[test]
-fn test_resolve_call_csharp_bare_call_unrelated_method_keeps_global_bind() {
-    assert_unrelated_method_kept(&CSharpProvider::new().unwrap(), &CSHARP);
+fn test_resolve_call_csharp_bare_call_unrelated_method_binds_nothing() {
+    assert_unrelated_method_binds_nothing(&CSharpProvider::new().unwrap(), &CSHARP);
 }
 
 #[test]
@@ -1273,8 +1279,8 @@ fn test_resolve_call_swift_bare_call_own_method_binds_own_method() {
 }
 
 #[test]
-fn test_resolve_call_swift_bare_call_unrelated_method_keeps_global_bind() {
-    assert_unrelated_method_kept(&SwiftProvider::new().unwrap(), &SWIFT);
+fn test_resolve_call_swift_bare_call_unrelated_method_binds_nothing() {
+    assert_unrelated_method_binds_nothing(&SwiftProvider::new().unwrap(), &SWIFT);
 }
 
 #[test]
@@ -1283,8 +1289,8 @@ fn test_resolve_call_dart_bare_call_own_method_binds_own_method() {
 }
 
 #[test]
-fn test_resolve_call_dart_bare_call_unrelated_method_keeps_global_bind() {
-    assert_unrelated_method_kept(&DartProvider::new().unwrap(), &DART);
+fn test_resolve_call_dart_bare_call_unrelated_method_binds_nothing() {
+    assert_unrelated_method_binds_nothing(&DartProvider::new().unwrap(), &DART);
 }
 
 #[test]
@@ -1293,8 +1299,8 @@ fn test_resolve_call_cpp_bare_call_own_method_binds_own_method() {
 }
 
 #[test]
-fn test_resolve_call_cpp_bare_call_unrelated_method_keeps_global_bind() {
-    assert_unrelated_method_kept(&CppProvider::new().unwrap(), &CPP);
+fn test_resolve_call_cpp_bare_call_unrelated_method_binds_nothing() {
+    assert_unrelated_method_binds_nothing(&CppProvider::new().unwrap(), &CPP);
 }
 
 #[test]
@@ -1303,6 +1309,6 @@ fn test_resolve_call_ruby_bare_call_own_method_binds_own_method() {
 }
 
 #[test]
-fn test_resolve_call_ruby_bare_call_unrelated_method_keeps_global_bind() {
+fn test_resolve_call_ruby_bare_call_unrelated_method_keeps_tagged_guess() {
     assert_unrelated_method_kept(&RubyProvider::new().unwrap(), &RUBY);
 }

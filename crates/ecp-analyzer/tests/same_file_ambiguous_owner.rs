@@ -11,7 +11,10 @@
 //!   implementations first → the interface or trait declaration, which a
 //!   call through any of them reaches.
 //! - one owner: only `A` declares `save` → `A.save`, when the call syntax
-//!   permits a member. TS / JS / Go use an explicit receiver.
+//!   permits a member. TS / JS / Go use an explicit receiver. A caller
+//!   outside `A`'s hierarchy reaches it only in Kotlin and Ruby (implicit
+//!   receivers of scope functions and blocks, as the tagged guess); in C++,
+//!   C#, Dart and Swift it binds nothing.
 //!
 //! Skipped cases: C has no members, so it has only the free-function and
 //! one-owner fixtures. Go and Rust declare methods outside the type body,
@@ -601,12 +604,11 @@ fn test_resolve_call_kotlin_one_owner_binds_its_save() {
 }
 
 #[test]
-fn test_resolve_call_csharp_one_owner_binds_its_save() {
-    assert_run_binds(
+fn test_resolve_call_csharp_one_owner_unrelated_caller_binds_nothing() {
+    assert_run_binds_no_save(
         &csharp(),
         "U.cs",
         "class A { public void save() {} }\nclass D {\n  void run() { save(); }\n}\n",
-        "A",
     );
 }
 
@@ -652,12 +654,11 @@ fn test_resolve_call_ruby_one_owner_binds_its_save() {
 }
 
 #[test]
-fn test_resolve_call_swift_one_owner_binds_its_save() {
-    assert_run_binds(
+fn test_resolve_call_swift_one_owner_unrelated_caller_binds_nothing() {
+    assert_run_binds_no_save(
         &swift(),
         "U.swift",
         "class A { func save() {} }\nfunc run() { save() }\n",
-        "A",
     );
 }
 
@@ -673,21 +674,19 @@ fn test_resolve_call_c_one_free_fn_binds_it() {
 }
 
 #[test]
-fn test_resolve_call_cpp_one_owner_binds_its_save() {
-    assert_run_binds(
+fn test_resolve_call_cpp_one_owner_unrelated_caller_binds_nothing() {
+    assert_run_binds_no_save(
         &cpp(),
         "u.cpp",
         "class A { public: void save() {} };\nvoid run() { save(); }\n",
-        "A",
     );
 }
 
 #[test]
-fn test_resolve_call_dart_one_owner_binds_its_save() {
-    assert_run_binds(
+fn test_resolve_call_dart_one_owner_unrelated_caller_binds_nothing() {
+    assert_run_binds_no_save(
         &dart(),
         "u.dart",
         "class A { void save() {} }\nvoid run() { save(); }\n",
-        "A",
     );
 }

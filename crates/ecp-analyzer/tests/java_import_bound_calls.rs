@@ -61,8 +61,10 @@ fn test_resolve_call_static_import_returns_import_scoped() {
     );
 }
 
+/// Stands for: `import static pkg.Empty.helper` names `Empty`'s member; an
+/// unrelated `Helper.helper` is not what the bare call reaches.
 #[test]
-fn test_resolve_call_static_import_missing_member_keeps_global() {
+fn test_resolve_call_static_import_missing_member_binds_nothing() {
     let graph = java_graph(&[
         HELPER,
         (
@@ -74,7 +76,7 @@ fn test_resolve_call_static_import_missing_member_keeps_global() {
             "package pkg; class Empty {}",
         ),
     ]);
-    assert_call_targets(&graph, "go", &[(HELPER.0, "Helper", "helper", global())]);
+    assert_call_targets(&graph, "go", &[]);
 }
 
 #[test]
@@ -105,8 +107,10 @@ fn test_resolve_call_external_static_import_returns_no_edge() {
     assert_call_targets(&graph, "go", &[]);
 }
 
+/// Stands for: `import static external.Other.helper` names an external
+/// member, so the bare call reaches no project `Helper.helper`.
 #[test]
-fn test_resolve_call_external_import_with_indexed_root_keeps_global() {
+fn test_resolve_call_external_import_with_indexed_root_binds_nothing() {
     let graph = java_graph(&[
         HELPER,
         (
@@ -115,12 +119,13 @@ fn test_resolve_call_external_import_with_indexed_root_keeps_global() {
         ),
         ("external/marker.java", ""),
     ]);
-    assert_call_targets(&graph, "go", &[(HELPER.0, "Helper", "helper", global())]);
+    assert_call_targets(&graph, "go", &[]);
 }
 
-/// Wildcards never suppress: the external star import leaves the global tier.
+/// Stands for: an external static star import brings no project type's
+/// members, so the bare call reaches no unrelated `Helper.helper`.
 #[test]
-fn test_resolve_call_external_wildcard_import_keeps_global() {
+fn test_resolve_call_external_wildcard_import_binds_nothing() {
     let graph = java_graph(&[
         HELPER,
         (
@@ -128,7 +133,7 @@ fn test_resolve_call_external_wildcard_import_keeps_global() {
             "import static external.Other.*; class App { void go() { helper(); } }",
         ),
     ]);
-    assert_call_targets(&graph, "go", &[(HELPER.0, "Helper", "helper", global())]);
+    assert_call_targets(&graph, "go", &[]);
 }
 
 /// Two source roots place `pkg.Helper`: the import is ambiguous, so the
@@ -293,11 +298,11 @@ fn test_resolve_call_static_wildcard_import_owner_declared_second_binds_named_cl
     );
 }
 
-/// `Util` declares no `run`. Java allows a static import of an inherited
-/// static member, so the import tier leaves the call to the general tiers,
-/// which find the repo's only `run`; the import tier never binds `Other.run`.
+/// Stands for: `Util` declares no `run` and extends nothing, so the static
+/// import names no member a project type declares, and the unrelated
+/// `Other.run` is not what the bare call reaches.
 #[test]
-fn test_resolve_call_static_import_member_not_declared_by_class_keeps_global() {
+fn test_resolve_call_static_import_member_not_declared_by_class_binds_nothing() {
     let graph = java_graph(&[
         (
             "r/Util.java",
@@ -308,11 +313,7 @@ fn test_resolve_call_static_import_member_not_declared_by_class_keeps_global() {
             "package q;\nimport static r.Util.run;\nclass C5 { void go5() { run(); } }\n",
         ),
     ]);
-    assert_call_lines(
-        &graph,
-        "go5",
-        &[("r/Util.java", "Other", "run", 2, global())],
-    );
+    assert_call_lines(&graph, "go5", &[]);
 }
 
 /// Both `Util.run` overloads are nodes: the import binds the named class
