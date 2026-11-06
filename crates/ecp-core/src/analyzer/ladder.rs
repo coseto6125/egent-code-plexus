@@ -278,11 +278,16 @@ fn rust_path_spells<D: ResolveFacts>(
     let Some(path) = holder_path(decls, id) else {
         return true;
     };
-    // A `self` / `super` anchor names the caller's module, which the
-    // holders cannot check: the segments inside it are all a path spells.
-    // `crate` stays, and no holder is named `crate`.
-    let spelled: Vec<&str> = site
-        .qualifier
+    // `site.qualifier` is only the last segment ([`split_qualifier`]); the
+    // path is the callee before its member. A `self` / `super` anchor names
+    // the caller's module, which the holders cannot check: the segments
+    // inside it are all a path spells. `crate` stays, and no holder is
+    // named `crate`.
+    let path_text = site
+        .callee
+        .rsplit_once("::")
+        .map_or(site.qualifier, |(q, _)| q);
+    let spelled: Vec<&str> = path_text
         .rsplit("::")
         .map(|seg| seg.split('<').next().unwrap_or(seg))
         .take_while(|seg| !matches!(*seg, "self" | "super"))
