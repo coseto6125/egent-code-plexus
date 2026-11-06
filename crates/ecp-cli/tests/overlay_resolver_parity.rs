@@ -2659,10 +2659,10 @@ fn test_overlay_kotlin_super_member_outside_imported_file_matches_reindex() {
 }
 
 // `import com.app.repository.*` binds no receiver, and a package wildcard
-// imports no class member: the call resolves by its member name, and the
-// soft Owner rule demotes the unrelated `UserRepository` to the tagged guess
-// (0.55). Was: 0.7, and before that the receiver became
-// `repository.fetchUsers`, which nothing resolves.
+// imports no class member; the `val repository` constructor property types
+// the receiver, so the call binds `UserRepository.fetchUsers` (0.85). Was:
+// the bare member name at 0.7 and then 0.55, and before that the receiver
+// became `repository.fetchUsers`, which nothing resolves.
 #[test]
 fn test_overlay_kotlin_wildcard_package_named_receiver_matches_reindex() {
     let vm = |body: &str| {
@@ -2685,7 +2685,7 @@ fn test_overlay_kotlin_wildcard_package_named_receiver_matches_reindex() {
             "src/main/kotlin/com/app/repository/UserRepository.kt".into(),
             "fetchUsers".into(),
             "UserRepository".into(),
-            55,
+            85,
         )],
     );
 }
