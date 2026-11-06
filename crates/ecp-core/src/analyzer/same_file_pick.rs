@@ -128,6 +128,13 @@ pub trait PickFacts {
 /// the same in `mod b` each own their `m`; `None` otherwise (a block whose
 /// type no row of its scope declares, a Go receiver method in another
 /// file, which keep the `owner_class` string path).
+///
+/// The column skips a function body, so a body-local `struct Foo` and a
+/// module-level one share a container: the type must lie inside a body
+/// exactly when the block does ([`PickFacts::is_body_local`]). The
+/// module-level `Foo` may be a redefinition of a body-local first, in no
+/// name table, so each candidate's later declarations
+/// ([`PickFacts::later_overloads`]) count too.
 pub fn declaring_type<F: PickFacts + ?Sized>(facts: &F, id: u32) -> Option<u32> {
     let container = facts.container(id)?;
     match facts.kind(container) {
@@ -135,11 +142,19 @@ pub fn declaring_type<F: PickFacts + ?Sized>(facts: &F, id: u32) -> Option<u32> 
         NodeKind::Impl => {
             let (owner, file) = (facts.owner(id)?, facts.file_of(id)?);
             let scope = facts.container(container);
-            facts
-                .pick_candidates(file, owner)
-                .iter()
-                .copied()
-                .find(|&ty| facts.kind(ty).is_type() && facts.container(ty) == scope)
+            let in_body = facts.is_body_local(container);
+            let fits = |ty: u32| {
+                facts.kind(ty).is_type()
+                    && facts.container(ty) == scope
+                    && facts.is_body_local(ty) == in_body
+            };
+            let candidates = facts.pick_candidates(file, owner);
+            candidates.iter().copied().find_map(|first| {
+                let later = facts.later_overloads(first);
+                std::iter::once(first)
+                    .chain(later.iter().copied())
+                    .find(|&ty| fits(ty))
+            })
         }
         _ => None,
     }
@@ -716,6 +731,70 @@ mod tests {
         assert_eq!(declaring_type(&facts, 3), None);
         assert_eq!(declaring_type(&facts, 5), None);
         assert_eq!(declaring_type(&facts, 6), None);
+    }
+
+    /// Stands for: a body-local `struct Foo` (the name-table first) and the
+    /// module-level `Foo` (its later redefinition) share a container, as the
+    /// column skips the function; the module-level block's `new` belongs to
+    /// the module-level `Foo`, the body-local block's to the body-local one.
+    #[test]
+    fn test_declaring_type_body_local_twin_type_binds_block_of_own_side() {
+        struct Twins(Decls);
+        impl PickFacts for Twins {
+            fn pick_candidates(&self, file: &str, name: &str) -> Cow<'_, [u32]> {
+                let mut ids = self.0.pick_candidates(file, name).into_owned();
+                ids.retain(|&id| id != 4);
+                Cow::Owned(ids)
+            }
+            fn kind(&self, id: u32) -> NodeKind {
+                self.0.kind(id)
+            }
+            fn owner(&self, id: u32) -> Option<&str> {
+                self.0.owner(id)
+            }
+            fn impl_member(&self, id: u32) -> Option<ImplMember<'_>> {
+                self.0.impl_member(id)
+            }
+            fn is_namespace_owner(&self, file: &str, owner: &str) -> bool {
+                self.0.is_namespace_owner(file, owner)
+            }
+            fn file_of(&self, id: u32) -> Option<&str> {
+                self.0.file_of(id)
+            }
+            fn types_named(&self, owner: &str) -> Vec<u32> {
+                self.0.types_named(owner)
+            }
+            fn is_lexically_scoped(&self, _id: u32) -> bool {
+                false
+            }
+            fn is_body_local(&self, id: u32) -> bool {
+                (1..=3).contains(&id)
+            }
+            fn later_overloads(&self, first: u32) -> Cow<'_, [u32]> {
+                Cow::Borrowed(if first == 1 { &[4] } else { &[] })
+            }
+            fn container(&self, id: u32) -> Option<u32> {
+                self.0.container(id)
+            }
+            fn ancestors(&self, ty: u32) -> Vec<u32> {
+                self.0.ancestors(ty)
+            }
+        }
+        let facts = Twins(Decls {
+            decls: vec![
+                ("setup", NodeKind::Function, None, None),
+                ("Foo", S, None, None),
+                ("Foo", IMPL, None, None),
+                ("new", M, Some("Foo"), None),
+                ("Foo", S, None, None),
+                ("Foo", IMPL, None, None),
+                ("new", M, Some("Foo"), None),
+            ],
+            containers: vec![None, None, None, Some(2), None, None, Some(5)],
+            ..Decls::default()
+        });
+        assert_eq!(declaring_type(&facts, 6), Some(4));
+        assert_eq!(declaring_type(&facts, 3), Some(1));
     }
 
     /// Dependency down: a side that records no container (the default)

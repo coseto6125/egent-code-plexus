@@ -141,12 +141,17 @@ pub fn module_item<D: PickFacts + ?Sized>(decls: &D, id: u32) -> Option<u32> {
 /// Whether a later declaration of `id`'s uid shares its container
 /// (`#[cfg(unix)] mod sys` beside `#[cfg(windows)] mod sys`): no path tells
 /// the two apart.
+///
+/// The container column skips function bodies, so a body-local `struct Foo`
+/// and the module-level `struct Foo` share the container `None`. A path never
+/// names a body-local item, so a twin must sit on the same side of a body.
 fn has_cfg_twin<D: PickFacts + ?Sized>(decls: &D, id: u32) -> bool {
-    let container = decls.container(id);
-    decls
-        .later_overloads(id)
-        .iter()
-        .any(|&later| decls.kind(later) == decls.kind(id) && decls.container(later) == container)
+    let (container, in_body) = (decls.container(id), decls.is_body_local(id));
+    decls.later_overloads(id).iter().any(|&later| {
+        decls.kind(later) == decls.kind(id)
+            && decls.container(later) == container
+            && decls.is_body_local(later) == in_body
+    })
 }
 
 /// What a path segment names among a file's modules and types.
@@ -157,9 +162,42 @@ enum Child {
     Ambiguous,
 }
 
-/// The module or type ([`NodeKind::is_qualifier`]) named `name` that `file`
-/// declares directly inside `parent` (`None`: at file level), outside every
-/// function body: one step of a path walked parent -> child on
+/// `file`'s modules and types ([`NodeKind::is_qualifier`]) named `name`
+/// outside every function body, each name-table first followed by its later
+/// declarations ([`PickFacts::later_overloads`]): a module-level
+/// `struct Foo` after a body-local one is a redefinition of the body-local
+/// first, in no name table ([`past_body_local`]), and a `#[cfg]` twin is a
+/// later declaration of its first.
+fn qualifier_rows<D: ResolveFacts>(decls: &D, file: &str, name: &str) -> Vec<u32> {
+    let mut rows = Vec::new();
+    for (first, kind) in decls.call_decls(file, name) {
+        if !kind.is_qualifier() {
+            continue;
+        }
+        let later = decls.later_overloads(first);
+        rows.extend(
+            std::iter::once(first)
+                .chain(later.iter().copied())
+                .filter(|&id| decls.kind(id).is_qualifier() && !decls.is_body_local(id)),
+        );
+    }
+    rows
+}
+
+/// The one id `rows` holds: `Missing` for none, `Ambiguous` for two (twins
+/// no path tells apart).
+fn one_of(rows: impl IntoIterator<Item = u32>) -> Child {
+    let mut rows = rows.into_iter();
+    match (rows.next(), rows.next()) {
+        (None, _) => Child::Missing,
+        (Some(id), None) => Child::One(id),
+        _ => Child::Ambiguous,
+    }
+}
+
+/// The module or type named `name` that `file` declares directly inside
+/// `parent` (`None`: at file level), outside every function body
+/// ([`qualifier_rows`]): one step of a path walked parent -> child on
 /// [`PickFacts::container`], so `outer::a` and `a` stay apart.
 fn qualifier_child<D: ResolveFacts>(
     decls: &D,
@@ -167,17 +205,11 @@ fn qualifier_child<D: ResolveFacts>(
     parent: Option<u32>,
     name: &str,
 ) -> Child {
-    let mut found = None;
-    for (id, kind) in decls.call_decls(file, name) {
-        if !kind.is_qualifier() || decls.is_body_local(id) || decls.container(id) != parent {
-            continue;
-        }
-        if found.is_some() || has_cfg_twin(decls, id) {
-            return Child::Ambiguous;
-        }
-        found = Some(id);
-    }
-    found.map_or(Child::Missing, Child::One)
+    one_of(
+        qualifier_rows(decls, file, name)
+            .into_iter()
+            .filter(|&id| decls.container(id) == parent),
+    )
 }
 
 /// The item a module-tree path places in `file`: its [`qualifier_child`] at
@@ -185,17 +217,7 @@ fn qualifier_child<D: ResolveFacts>(
 /// file, which a `pub use` of an inline `mod`'s item names.
 fn path_item<D: ResolveFacts>(decls: &D, file: &str, name: &str) -> Child {
     match qualifier_child(decls, file, None, name) {
-        Child::Missing => {
-            let mut ids = decls
-                .call_decls(file, name)
-                .filter(|&(id, kind)| kind.is_qualifier() && !decls.is_body_local(id))
-                .map(|(id, _)| id);
-            match (ids.next(), ids.next()) {
-                (None, _) => Child::Missing,
-                (Some(id), None) if !has_cfg_twin(decls, id) => Child::One(id),
-                _ => Child::Ambiguous,
-            }
-        }
+        Child::Missing => one_of(qualifier_rows(decls, file, name)),
         found => found,
     }
 }
@@ -2899,6 +2921,10 @@ mod tests {
         /// Per id, its container; empty records none, as a side without
         /// the column.
         containers: Vec<Option<u32>>,
+        /// Ids inside a function body ([`PickFacts::is_body_local`]).
+        body_local: Vec<u32>,
+        /// `(first, later declarations)`: a later one is in no name table.
+        later: Vec<(u32, Vec<u32>)>,
     }
 
     impl Fake {
@@ -2915,6 +2941,8 @@ mod tests {
                 supertypes: Vec::new(),
                 probes: RefCell::default(),
                 containers: Vec::new(),
+                body_local: Vec::new(),
+                later: Vec::new(),
             }
         }
 
@@ -2922,9 +2950,10 @@ mod tests {
             0..self.decls.len() as u32
         }
 
-        /// `file`'s declarations of `name`, scoped ones included.
+        /// `file`'s declarations of `name`, scoped ones included and later
+        /// declarations left out, as a name table holds them.
         fn in_file(&self, file: &str, name: &str) -> Vec<u32> {
-            match self.layout {
+            let mut ids = match self.layout {
                 Layout::Index => self
                     .by_file
                     .iter()
@@ -2937,7 +2966,9 @@ mod tests {
                         f == file && n == name
                     })
                     .collect(),
-            }
+            };
+            ids.retain(|id| !self.later.iter().any(|(_, later)| later.contains(id)));
+            ids
         }
 
         fn meta(&self, id: u32) -> FileMeta {
@@ -2991,6 +3022,17 @@ mod tests {
         }
         fn container(&self, id: u32) -> Option<u32> {
             self.containers.get(id as usize).copied().flatten()
+        }
+        fn is_body_local(&self, id: u32) -> bool {
+            self.body_local.contains(&id) || self.is_lexically_scoped(id)
+        }
+        fn later_overloads(&self, first: u32) -> Cow<'_, [u32]> {
+            self.later
+                .iter()
+                .find(|(f, _)| *f == first)
+                .map_or(Cow::Borrowed(&[]), |(_, later)| {
+                    Cow::Borrowed(later.as_slice())
+                })
         }
     }
 
@@ -3128,6 +3170,67 @@ mod tests {
             site(TWIN_LIB, "crate::a::b::wrong", None),
             3
         ));
+    }
+
+    const TWIN_M: &str = "src/m.rs";
+
+    /// `fn setup() { struct Foo; }` before the module-level `struct Foo` and
+    /// its `impl Foo { fn new }`. The container column skips the body, so
+    /// both `Foo`s sit at file level, and the module-level one is a later
+    /// declaration of the body-local first.
+    fn body_local_first_foo() -> Fake {
+        let decls: [Decl; 5] = [
+            (TWIN_M, "setup", NodeKind::Function, None),
+            (TWIN_M, "Foo", NodeKind::Struct, None),
+            (TWIN_M, "Foo", NodeKind::Struct, None),
+            (TWIN_M, "Foo", NodeKind::Impl, None),
+            (TWIN_M, "new", NodeKind::Method, Some("Foo")),
+        ];
+        let mut fake = Fake::new(Layout::Index, &decls);
+        fake.containers = vec![None, None, None, None, Some(3)];
+        fake.body_local = vec![1];
+        fake.later = vec![(1, vec![2])];
+        fake
+    }
+
+    /// Stands for the module-level twin of a body-local type: a path step
+    /// sees the module-level `Foo` past the body-local first, `new`'s holder
+    /// is that `Foo`, and the body-local `Foo` is no `#[cfg]` twin of it, so
+    /// `crate::m::Foo::new()` spells `new`.
+    #[test]
+    fn test_path_walk_body_local_first_type_binds_module_level_later() {
+        let fake = body_local_first_foo();
+        assert!(matches!(
+            qualifier_child(&fake, TWIN_M, None, "Foo"),
+            Child::One(2)
+        ));
+        assert!(matches!(path_item(&fake, TWIN_M, "Foo"), Child::One(2)));
+        assert!(!has_cfg_twin(&fake, 1));
+        let path = holder_path(&fake, 4).expect("a readable path");
+        assert_eq!((path.holder, path.twin), (Some(2), false));
+        assert!(rust_path_spells(
+            &fake,
+            TWIN_M,
+            site(TWIN_M, "crate::m::Foo::new", None),
+            4
+        ));
+    }
+
+    /// The other order: a body-local `Foo` after the module-level first is no
+    /// `#[cfg]` twin; two module-level `Foo`s of one container are.
+    #[test]
+    fn test_has_cfg_twin_body_local_later_is_no_twin_module_level_later_is() {
+        let decls: [Decl; 2] = [
+            (TWIN_M, "Foo", NodeKind::Struct, None),
+            (TWIN_M, "Foo", NodeKind::Struct, None),
+        ];
+        let mut fake = Fake::new(Layout::Index, &decls);
+        fake.containers = vec![None, None];
+        fake.later = vec![(0, vec![1])];
+        assert!(has_cfg_twin(&fake, 0));
+        fake.body_local = vec![1];
+        assert!(!has_cfg_twin(&fake, 0));
+        assert!(matches!(path_item(&fake, TWIN_M, "Foo"), Child::One(0)));
     }
 
     impl TypeFacts for Fake {
