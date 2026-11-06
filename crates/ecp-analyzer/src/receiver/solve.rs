@@ -422,7 +422,9 @@ fn solve_function(
 ) -> Result<(), OverBudget> {
     let width = plan.tracked.len();
     let blocks = ir.blocks.len();
-    if blocks > MAX_BLOCKS || width > MAX_TRACKED_CELLS {
+    // With no tracked cell the pass is one replay, linear in the blocks, so
+    // only a tracked state pays the blocks x cells budget.
+    if width > MAX_TRACKED_CELLS || (width > 0 && blocks > MAX_BLOCKS) {
         return Err(OverBudget);
     }
     let run = Run { ir, plan, policy };

@@ -629,13 +629,19 @@ fn receiver_of<'t>(function: Node<'t>, source: &[u8]) -> Option<Node<'t>> {
 /// after `extra_blocks` empty blocks.
 struct ChainLowering {
     extra_blocks: usize,
+    /// Declares `obj` with this type under a `Pinned` policy.
+    pinned: Option<&'static str>,
 }
 
 impl Lowering for ChainLowering {
     type Cx<'a> = ();
 
     fn policy(&self) -> LangPolicy {
-        DUCK
+        if self.pinned.is_some() {
+            PINNED
+        } else {
+            DUCK
+        }
     }
 
     fn is_function(&self, node: Node<'_>) -> bool {
@@ -652,7 +658,8 @@ impl Lowering for ChainLowering {
         let Some(receiver) = receiver_of(function, source) else {
             return Lowered::NoUses;
         };
-        let obj = b.declare("obj", BindingOrigin::Param, None);
+        let declared = self.pinned.map(|ty| b.intern(ty, TypeOrigin::Annotation));
+        let obj = b.declare("obj", BindingOrigin::Param, declared);
         for _ in 0..self.extra_blocks {
             let next = b.new_block();
             b.goto(next);
@@ -676,6 +683,7 @@ fn test_solve_over_budget_returns_budget_and_blind_spot() {
 
     let over = ChainLowering {
         extra_blocks: MAX_BLOCKS + 1,
+        pinned: None,
     };
     let receivers = analyze_file(&over, &(), tree.root_node(), source.as_bytes(), file);
     assert_eq!(
@@ -704,7 +712,10 @@ fn test_solve_over_budget_returns_budget_and_blind_spot() {
     assert!(spot.hint.contains("`run`"), "{}", spot.hint);
     assert!(!spot.is_test);
 
-    let within = ChainLowering { extra_blocks: 0 };
+    let within = ChainLowering {
+        extra_blocks: 0,
+        pinned: None,
+    };
     let receivers = analyze_file(&within, &(), tree.root_node(), source.as_bytes(), file);
     assert_eq!(
         receivers.receiver_at(receiver),
@@ -714,11 +725,50 @@ fn test_solve_over_budget_returns_budget_and_blind_spot() {
 }
 
 #[test]
+fn test_solve_pinned_uses_over_block_budget_keep_declared_type() {
+    // A pinned use needs no tracked cell, so the replay is linear in the
+    // blocks; a huge generated method keeps its typed receivers.
+    let source = "def run(obj):\n    return obj.m()\n";
+    let tree = parse_python(source);
+    let function = tree
+        .root_node()
+        .named_child(0)
+        .expect("function_definition");
+    let receiver = receiver_of(function, source.as_bytes()).expect("obj receiver");
+    let lowering = ChainLowering {
+        extra_blocks: MAX_BLOCKS + 1,
+        pinned: Some("A"),
+    };
+    let receivers = analyze_file(
+        &lowering,
+        &(),
+        tree.root_node(),
+        source.as_bytes(),
+        Path::new("pkg/run.py"),
+    );
+    assert_eq!(
+        receivers.receiver_at(receiver),
+        Some(&Receiver::Known(TypeRef {
+            text: "A".into(),
+            origin: TypeOrigin::Annotation,
+        }))
+    );
+    assert!(
+        receivers.blind_spots.is_empty(),
+        "{:?}",
+        receivers.blind_spots
+    );
+}
+
+#[test]
 fn test_analyze_file_function_without_uses_records_nothing() {
     let source = "def run(x):\n    return 1\n";
     let tree = parse_python(source);
     let receivers = analyze_file(
-        &ChainLowering { extra_blocks: 0 },
+        &ChainLowering {
+            extra_blocks: 0,
+            pinned: None,
+        },
         &(),
         tree.root_node(),
         source.as_bytes(),

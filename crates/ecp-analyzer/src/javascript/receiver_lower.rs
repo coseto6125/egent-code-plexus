@@ -1242,7 +1242,7 @@ mod tests {
         let mut value = None;
         while let Some(n) = stack.pop() {
             if n.kind() == "arguments" {
-                value = n.named_child(0).and_then(member_receiver);
+                value = value.or_else(|| n.named_child(0).and_then(member_receiver));
             }
             let mut cursor = n.walk();
             stack.extend(n.named_children(&mut cursor));

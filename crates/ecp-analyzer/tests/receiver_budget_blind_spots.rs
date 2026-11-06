@@ -1,6 +1,14 @@
 //! A function whose receiver analysis exceeds the solver budget surfaces a
 //! `receiver-budget` blind spot, quoting the real file path, in every language
 //! that lowers locals into the receiver core.
+//!
+//! Under a `Pinned` policy (Java, C#, Kotlin, C++, Swift, Go) a local whose
+//! type is fixed at its declaration is answered without tracking, so it never
+//! costs budget. Those fixtures declare locals the solver must track: an
+//! inferred constructor result in Kotlin, C++ and Swift, and a call result in
+//! C# and Go, where `var` and `:=` fix the constructed type. Java tracks no
+//! state at all (every local is pinned or opaque), so a long method keeps its
+//! typed receivers and emits no spot.
 
 use ecp_analyzer::c_sharp::parser::CSharpProvider;
 use ecp_analyzer::cpp::parser::CppProvider;
@@ -30,6 +38,8 @@ fn lines(count: usize, line: impl Fn(usize) -> String) -> String {
 
 struct Case {
     path: &'static str,
+    /// Whether the language's solver tracks any local of the fixture.
+    tracks: bool,
     source: fn(usize) -> String,
     parse: fn(&Path, &[u8]) -> Vec<(String, std::path::PathBuf)>,
 }
@@ -80,34 +90,35 @@ fn java(n: usize) -> String {
 }
 
 fn csharp(n: usize) -> String {
-    let body = lines(n, |i| format!("    A a{i} = new A();\n    a{i}.M();"));
+    let body = lines(n, |i| format!("    var a{i} = Make();\n    a{i}.M();"));
     format!("class A {{ public void M() {{}} }}\nclass T {{\n  void F() {{\n{body}  }}\n}}\n")
 }
 
 fn kotlin(n: usize) -> String {
-    let body = lines(n, |i| format!("    val a{i}: A = A()\n    a{i}.m()"));
+    let body = lines(n, |i| format!("    val a{i} = A()\n    a{i}.m()"));
     format!("class A {{ fun m() {{}} }}\n\nfun f() {{\n{body}}}\n")
 }
 
 fn cpp(n: usize) -> String {
-    let body = lines(n, |i| format!("    A a{i};\n    a{i}.m();"));
+    let body = lines(n, |i| format!("    auto a{i} = A();\n    a{i}.m();"));
     format!("struct A {{ void m() {{}} }};\n\nvoid f() {{\n{body}}}\n")
 }
 
 fn swift(n: usize) -> String {
-    let body = lines(n, |i| format!("    let a{i}: A = A()\n    a{i}.m()"));
+    let body = lines(n, |i| format!("    let a{i} = A()\n    a{i}.m()"));
     format!("class A {{ func m() {{}} }}\n\nfunc f() {{\n{body}}}\n")
 }
 
 fn go(n: usize) -> String {
-    let body = lines(n, |i| format!("\tvar a{i} A\n\ta{i}.M()"));
+    let body = lines(n, |i| format!("\ta{i} := make()\n\ta{i}.M()"));
     format!("package p\n\ntype A struct{{}}\n\nfunc (A) M() {{}}\n\nfunc f() {{\n{body}}}\n")
 }
 
 macro_rules! case {
-    ($path:literal, $source:ident, $provider:expr) => {
+    ($path:literal, $source:ident, $provider:expr, $tracks:expr) => {
         Case {
             path: $path,
+            tracks: $tracks,
             source: $source,
             parse: |path, source| budget_spots(&$provider.expect("provider"), path, source),
         }
@@ -117,32 +128,40 @@ macro_rules! case {
 #[test]
 fn test_parse_file_function_over_receiver_budget_emits_blind_spot_across_languages() {
     let cases = [
-        case!("src/budget.py", python, PythonProvider::new()),
-        case!("src/budget.php", php, PhpProvider::new()),
-        case!("src/budget.rb", ruby, RubyProvider::new()),
-        case!("src/budget.js", javascript, JavaScriptProvider::new()),
-        case!("src/budget.ts", typescript, TypeScriptProvider::new()),
-        case!("src/Budget.java", java, JavaProvider::new()),
-        case!("src/Budget.cs", csharp, CSharpProvider::new()),
-        case!("src/Budget.kt", kotlin, KotlinProvider::new()),
-        case!("src/budget.cpp", cpp, CppProvider::new()),
-        case!("src/Budget.swift", swift, SwiftProvider::new()),
-        case!("src/budget.go", go, GoProvider::new()),
+        case!("src/budget.py", python, PythonProvider::new(), true),
+        case!("src/budget.php", php, PhpProvider::new(), true),
+        case!("src/budget.rb", ruby, RubyProvider::new(), true),
+        case!("src/budget.js", javascript, JavaScriptProvider::new(), true),
+        case!("src/budget.ts", typescript, TypeScriptProvider::new(), true),
+        case!("src/Budget.java", java, JavaProvider::new(), false),
+        case!("src/Budget.cs", csharp, CSharpProvider::new(), true),
+        case!("src/Budget.kt", kotlin, KotlinProvider::new(), true),
+        case!("src/budget.cpp", cpp, CppProvider::new(), true),
+        case!("src/Budget.swift", swift, SwiftProvider::new(), true),
+        case!("src/budget.go", go, GoProvider::new(), true),
     ];
+    let mut failures = Vec::new();
     for case in cases {
         let path = Path::new(case.path);
         let over = (case.parse)(path, (case.source)(OVER_BUDGET_LOCALS).as_bytes());
-        assert_eq!(
-            over,
-            vec![(RECEIVER_BUDGET_KIND.to_owned(), path.to_path_buf())],
-            "{}: {OVER_BUDGET_LOCALS} typed locals must emit exactly one receiver-budget spot",
-            case.path
-        );
+        let want = if case.tracks {
+            vec![(RECEIVER_BUDGET_KIND.to_owned(), path.to_path_buf())]
+        } else {
+            Vec::new()
+        };
+        if over != want {
+            failures.push(format!(
+                "{}: {OVER_BUDGET_LOCALS} locals must emit {want:?}, got {over:?}",
+                case.path
+            ));
+        }
         let under = (case.parse)(path, (case.source)(UNDER_BUDGET_LOCALS).as_bytes());
-        assert!(
-            under.is_empty(),
-            "{}: {UNDER_BUDGET_LOCALS} typed locals must emit none, got {under:?}",
-            case.path
-        );
+        if !under.is_empty() {
+            failures.push(format!(
+                "{}: {UNDER_BUDGET_LOCALS} locals must emit none, got {under:?}",
+                case.path
+            ));
+        }
     }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
