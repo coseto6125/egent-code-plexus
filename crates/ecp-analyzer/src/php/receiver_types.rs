@@ -288,8 +288,11 @@ fn local_function_name(name: &str, namespace: Option<&str>) -> String {
 /// an undeclared, reassigned, uncaptured, primitive, union or `self` /
 /// `static` / `parent` type.
 fn parameter_class(node: Node<'_>, var: &str, source: &[u8]) -> Option<String> {
+    let mut scopes = Vec::new();
+    let mut by_ref_from = None;
     let mut current = node.parent();
-    while let Some(n) = current {
+    let declared = loop {
+        let n = current?;
         current = n.parent();
         if !matches!(
             n.kind(),
@@ -308,36 +311,52 @@ fn parameter_class(node: Node<'_>, var: &str, source: &[u8]) -> Option<String> {
                 .and_then(|v| v.utf8_text(source).ok())
                 == Some(var)
         });
-        if assigns_variable(n, var, source, node) {
+        scopes.push(n);
+        if let Some(declared) = declared {
+            break declared;
+        }
+        // `fn` captures by value and a `use` list names what a `function`
+        // closure captures; a named function or method sees no outer
+        // variable.
+        let crosses = match n.kind() {
+            "arrow_function" => true,
+            "anonymous_function" => captures_variable(n, var, source),
+            _ => false,
+        };
+        if !crosses {
             return None;
         }
-        let Some(declared) = declared else {
-            // `fn` captures by value and a `use` list names what a `function`
-            // closure captures; a named function or method sees no outer
-            // variable.
-            let crosses = match n.kind() {
-                "arrow_function" => true,
-                "anonymous_function" => captures_variable(n, var, source),
-                _ => false,
-            };
-            if crosses {
-                continue;
-            }
-            return None;
-        };
-        let ty = declared.child_by_field_name("type")?;
-        let ty = if ty.kind() == "optional_type" {
-            ty.named_child(0)?
-        } else {
-            ty
-        };
-        if ty.kind() != "named_type" {
-            return None;
+        if by_ref_from.is_none() && captures_by_ref(n, var, source) {
+            by_ref_from = Some(scopes.len() - 1);
         }
-        let class = qualified_ident(ty.named_child(0)?.utf8_text(source).ok()?)?;
-        return (!matches!(class, "self" | "static" | "parent")).then(|| class.to_string());
+    };
+    let ty = declared.child_by_field_name("type")?;
+    let nullable = ty.kind() == "optional_type"
+        || declared
+            .child_by_field_name("default_value")
+            .is_some_and(|d| d.kind() == "null");
+    let ty = if ty.kind() == "optional_type" {
+        ty.named_child(0)?
+    } else {
+        ty
+    };
+    if ty.kind() != "named_type" {
+        return None;
     }
-    None
+    let class = qualified_ident(ty.named_child(0)?.utf8_text(source).ok()?)?;
+    if matches!(class, "self" | "static" | "parent") {
+        return None;
+    }
+    // A closure that captures `var` by reference runs when it is called, not
+    // where it is written, so from it outwards a write anywhere counts.
+    let reassigned = scopes.iter().enumerate().any(|(i, &scope)| {
+        let scan = WriteScan {
+            coalesce_writes: nullable,
+            anywhere: by_ref_from.is_some_and(|from| i >= from),
+        };
+        assigns_variable(scope, var, source, node, scan)
+    });
+    (!reassigned).then(|| class.to_string())
 }
 
 fn any_named_child<'t>(node: Node<'t>, pred: impl FnMut(Node<'t>) -> bool) -> bool {
@@ -359,6 +378,15 @@ fn use_clause(closure: Node<'_>) -> Option<Node<'_>> {
 fn captures_variable(closure: Node<'_>, var: &str, source: &[u8]) -> bool {
     use_clause(closure)
         .is_some_and(|clause| any_named_child(clause, |c| names_variable(c, var, source)))
+}
+
+/// Whether the `use (..)` list of a closure names `var` by reference: `&$o`.
+fn captures_by_ref(closure: Node<'_>, var: &str, source: &[u8]) -> bool {
+    use_clause(closure).is_some_and(|clause| {
+        any_named_child(clause, |c| {
+            c.kind() == "by_ref" && names_variable(c, var, source)
+        })
+    })
 }
 
 /// Whether `target` is, or destructures into, the variable `var`:
@@ -392,24 +420,42 @@ fn enclosing_loop_range(at: Node<'_>, function: Node<'_>) -> Option<(usize, usiz
     outermost
 }
 
+/// How `assigns_variable` judges a write.
+#[derive(Clone, Copy)]
+struct WriteScan {
+    /// `??=` gives a null parameter a new value, so it counts unless the
+    /// declared type excludes null.
+    coalesce_writes: bool,
+    /// A write counts wherever it sits, not only before the use.
+    anywhere: bool,
+}
+
 /// Whether the body of `function` gives `var` a new value before `at` runs:
 /// an assignment, an update, a `foreach` target, a `catch` name, `global`,
 /// `static`, `unset`, or a closure that captures it by reference. A write
-/// after `at` does not count, unless a loop around `at` repeats it. `??=`
-/// keeps a non-null value of the declared type, so it does not count. The
-/// body of a nested function, closure or class is its own scope.
-fn assigns_variable(function: Node<'_>, var: &str, source: &[u8], at: Node<'_>) -> bool {
+/// after `at` does not count, unless a loop around `at` repeats it or
+/// `scan.anywhere` is set. A `catch` binds where its variable is written, so
+/// it counts for a use inside its own body. The body of a nested function,
+/// closure or class is its own scope.
+fn assigns_variable(
+    function: Node<'_>,
+    var: &str,
+    source: &[u8],
+    at: Node<'_>,
+    scan: WriteScan,
+) -> bool {
     let Some(body) = function.child_by_field_name("body") else {
         return false;
     };
     let looped = enclosing_loop_range(at, function);
     let before_use = |n: Node<'_>| {
-        n.end_byte() <= at.start_byte()
+        scan.anywhere
+            || n.end_byte() <= at.start_byte()
             || looped.is_some_and(|(start, end)| start <= n.start_byte() && n.end_byte() <= end)
     };
     let mut stack = vec![body];
     while let Some(n) = stack.pop() {
-        let assigned = match n.kind() {
+        let write = match n.kind() {
             "function_definition"
             | "method_declaration"
             | "class_declaration"
@@ -417,38 +463,37 @@ fn assigns_variable(function: Node<'_>, var: &str, source: &[u8], at: Node<'_>) 
                 continue;
             }
             "anonymous_function" => {
-                let by_ref = use_clause(n).is_some_and(|clause| {
-                    any_named_child(clause, |c| {
-                        c.kind() == "by_ref" && names_variable(c, var, source)
-                    })
-                });
-                if by_ref && before_use(n) {
+                if captures_by_ref(n, var, source) && before_use(n) {
                     return true;
                 }
                 continue;
             }
             "assignment_expression" | "reference_assignment_expression" => n
                 .child_by_field_name("left")
-                .is_some_and(|left| names_variable(left, var, source)),
+                .is_some_and(|left| names_variable(left, var, source))
+                .then_some(n),
             "augmented_assignment_expression" => {
-                let left = n.child_by_field_name("left");
-                let right = n.child_by_field_name("right");
-                let coalesces = left.zip(right).is_some_and(|(l, r)| {
-                    source[l.end_byte()..r.start_byte()].trim_ascii() == b"??="
-                });
-                !coalesces && left.is_some_and(|l| names_variable(l, var, source))
+                let coalesces = n
+                    .child_by_field_name("operator")
+                    .is_some_and(|o| o.kind() == "??=");
+                ((scan.coalesce_writes || !coalesces)
+                    && n.child_by_field_name("left")
+                        .is_some_and(|l| names_variable(l, var, source)))
+                .then_some(n)
             }
             "update_expression" => n
                 .child_by_field_name("argument")
-                .is_some_and(|argument| names_variable(argument, var, source)),
+                .is_some_and(|argument| names_variable(argument, var, source))
+                .then_some(n),
             "catch_clause" => n
                 .child_by_field_name("name")
-                .is_some_and(|name| names_variable(name, var, source)),
+                .filter(|name| names_variable(*name, var, source)),
             "static_variable_declaration" => n
                 .child_by_field_name("name")
-                .is_some_and(|name| names_variable(name, var, source)),
+                .is_some_and(|name| names_variable(name, var, source))
+                .then_some(n),
             "global_declaration" | "unset_statement" => {
-                any_named_child(n, |c| names_variable(c, var, source))
+                any_named_child(n, |c| names_variable(c, var, source)).then_some(n)
             }
             // The iterated expression is the first child, the body the field.
             "foreach_statement" => {
@@ -459,11 +504,11 @@ fn assigns_variable(function: Node<'_>, var: &str, source: &[u8], at: Node<'_>) 
                     .skip(1)
                     .filter(|c| Some(*c) != body)
                     .any(|c| names_variable(c, var, source));
-                found
+                found.then_some(n)
             }
-            _ => false,
+            _ => None,
         };
-        if assigned && before_use(n) {
+        if write.is_some_and(before_use) {
             return true;
         }
         let mut cursor = n.walk();

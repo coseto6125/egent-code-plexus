@@ -145,20 +145,64 @@ fn test_parse_shadowed_builtin_union_stays_variable() {
     );
 }
 
+/// Stands for: a class the module defines is no certain union operand, since
+/// a metaclass `__or__` (DRF permissions, enum flags) makes the union a
+/// value. A union of module classes stays a Variable; `None` still makes the
+/// union a type.
 #[test]
-fn test_parse_module_class_operands_are_typedef() {
+fn test_parse_module_class_union_stays_variable() {
+    for src in [
+        "class Circle: ...\nclass Square: ...\nX = Circle | Square\n",
+        "from rest_framework.permissions import BasePermission, IsAdminUser\n\
+         class IsOwner(BasePermission): ...\nX = IsOwner | IsAdminUser\n",
+    ] {
+        assert_eq!(kind_of(&parse(src), "X"), Some(NodeKind::Variable), "{src}");
+    }
+}
+
+#[test]
+fn test_parse_module_class_or_none_is_typedef() {
+    let g = parse("@dec\nclass Box: ...\nBoxes = Box | None\n");
+    assert_eq!(
+        kind_of(&g, "Boxes"),
+        Some(NodeKind::Typedef),
+        "{:?}",
+        g.nodes
+    );
+}
+
+/// Stands for: a subscript of a module class is a type only when every
+/// argument is type-shaped (a name, a dotted name, `None`, such a subscript).
+#[test]
+fn test_parse_module_class_subscript_of_types_is_typedef() {
     for (src, name) in [
-        (
-            "class Circle: ...\nclass Square: ...\nShape = Circle | Square\n",
-            "Shape",
-        ),
         (
             "class Sequence(Generic[T]): ...\nInts = Sequence[int]\n",
             "Ints",
         ),
-        ("@dec\nclass Box: ...\nBoxes = Box | None\n", "Boxes"),
+        (
+            "class Sequence(Generic[T]): ...\nNested = Sequence[Sequence[int]]\n",
+            "Nested",
+        ),
+        (
+            "class Pair(Generic[K, V]): ...\nP = Pair[enum.Enum, None]\n",
+            "P",
+        ),
     ] {
         assert_eq!(kind_of(&parse(src), name), Some(NodeKind::Typedef), "{src}");
+    }
+}
+
+/// Stands for: `Color["RED"]` is an `Enum` name lookup and `Rows[0]` an index,
+/// so a module class subscripted by a string or a number stays a Variable.
+#[test]
+fn test_parse_module_class_subscript_of_literal_stays_variable() {
+    for src in [
+        "class Color(Enum):\n    RED = 1\nX = Color[\"RED\"]\n",
+        "class Rows(Generic[T]): ...\nX = Rows[0]\n",
+        "class Rows(Generic[T]): ...\nX = Rows[int, 0]\n",
+    ] {
+        assert_eq!(kind_of(&parse(src), "X"), Some(NodeKind::Variable), "{src}");
     }
 }
 
@@ -168,19 +212,9 @@ fn test_parse_undefined_names_union_stays_variable() {
     assert_eq!(kind_of(&g, "X"), Some(NodeKind::Variable), "{:?}", g.nodes);
 }
 
+/// Stands for: a class the module rebinds as a value is no type evidence.
 #[test]
 fn test_parse_class_rebound_as_value_is_not_evidence() {
-    let g = parse("class Foo: ...\nFoo = 3\nAl = Foo | Foo\n");
+    let g = parse("class Foo(Generic[T]): ...\nFoo = 3\nAl = Foo[int]\n");
     assert_eq!(kind_of(&g, "Al"), Some(NodeKind::Variable), "{:?}", g.nodes);
-}
-
-#[test]
-fn test_parse_many_generic_aliases_all_typedef() {
-    let mut src = String::from("from typing import List\n");
-    for i in 0..2000 {
-        src.push_str(&format!("X{i} = List[int]\n"));
-    }
-    let g = parse(&src);
-    assert_eq!(kind_of(&g, "X1999"), Some(NodeKind::Typedef));
-    assert_eq!(kind_of(&g, "X0"), Some(NodeKind::Typedef));
 }

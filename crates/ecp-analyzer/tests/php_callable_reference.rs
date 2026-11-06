@@ -359,7 +359,7 @@ fn test_string_callable_array_map_named_callback_argument_references_method() {
 }
 
 // Stands for: only a write that runs before the use replaces the declared
-// type; `??=` keeps a non-null value of it.
+// type; `??=` cannot replace a parameter whose type excludes null.
 #[test]
 fn test_array_callable_parameter_assigned_after_use_references_method() {
     assert_eq!(
@@ -396,6 +396,108 @@ fn test_array_callable_parameter_assigned_later_in_enclosing_loop_references_not
 fn test_array_callable_parameter_assigned_after_loop_references_method() {
     assert_eq!(
         references("while ($a) { array_map([$o, 'cb_ptr'], $a); } $o = $a;"),
+        one("cb_ptr")
+    );
+}
+
+#[test]
+fn test_array_callable_parameter_coalesce_with_comment_references_method() {
+    assert_eq!(
+        references("$o /* default */ ??= $a; array_map([$o, 'cb_ptr'], $a);"),
+        one("cb_ptr")
+    );
+}
+
+// Stands for: a null parameter takes the `??=` value, so `??=` replaces a
+// `?T` parameter and a parameter that defaults to `null`.
+#[test]
+fn test_array_callable_nullable_parameter_coalesce_assigned_references_nothing() {
+    let got = edges(
+        "?Cb $o, array $a",
+        "$o ??= $a; array_map([$o, 'cb_ptr'], $a);",
+        RelType::References,
+        FUNCTION_REFERENCE,
+    );
+    assert_eq!(got, Vec::<String>::new());
+}
+
+#[test]
+fn test_array_callable_null_default_parameter_coalesce_assigned_references_nothing() {
+    let got = edges(
+        "Cb $o = null, array $a = []",
+        "$o ??= $a; array_map([$o, 'cb_ptr'], $a);",
+        RelType::References,
+        FUNCTION_REFERENCE,
+    );
+    assert_eq!(got, Vec::<String>::new());
+}
+
+#[test]
+fn test_array_callable_null_default_parameter_without_write_references_method() {
+    let got = edges(
+        "Cb $o = null, array $a = []",
+        "array_map([$o, 'cb_ptr'], $a);",
+        RelType::References,
+        FUNCTION_REFERENCE,
+    );
+    assert_eq!(got, one("cb_ptr"));
+}
+
+// Stands for: a `catch` gives its variable a new value before the catch body
+// runs, and only there.
+#[test]
+fn test_array_callable_catch_rebinding_parameter_in_catch_body_references_nothing() {
+    assert_eq!(
+        references("try { g(); } catch (\\Exception $o) { array_map([$o, 'cb_ptr'], $a); }"),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn test_array_callable_catch_rebinding_parameter_use_in_try_references_method() {
+    assert_eq!(
+        references("try { array_map([$o, 'cb_ptr'], $a); } catch (\\Exception $o) {}"),
+        one("cb_ptr")
+    );
+}
+
+#[test]
+fn test_array_callable_catch_without_variable_references_method() {
+    assert_eq!(
+        references("try { g(); } catch (\\Exception) { array_map([$o, 'cb_ptr'], $a); }"),
+        one("cb_ptr")
+    );
+}
+
+// Stands for: a closure that captures by reference reads the variable when it
+// is called, so a write anywhere in the enclosing function can reach the use.
+// A capture by value copies the variable where the closure is written.
+#[test]
+fn test_array_callable_by_ref_closure_parameter_assigned_after_closure_references_nothing() {
+    assert_eq!(
+        references(
+            "$f = function () use (&$o, $a) { return array_map([$o, 'cb_ptr'], $a); }; $o = $a; return $f();"
+        ),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn test_array_callable_by_ref_closure_parameter_never_assigned_references_method() {
+    assert_eq!(
+        references(
+            "$f = function () use (&$o, $a) { return array_map([$o, 'cb_ptr'], $a); }; return $f();"
+        ),
+        one("cb_ptr")
+    );
+}
+
+#[test]
+fn test_array_callable_by_value_closure_parameter_assigned_after_closure_references_method() {
+    assert_eq!(
+        references(
+            "$f = function () use ($o, $a) { return array_map([$o, 'cb_ptr'], $a); }; $o = $a; return $f();"
+        ),
         one("cb_ptr")
     );
 }

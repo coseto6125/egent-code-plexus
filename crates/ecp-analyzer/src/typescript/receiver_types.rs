@@ -238,13 +238,18 @@ fn insert_pattern_names(pattern: Node<'_>, source: &[u8], out: &mut HashSet<Stri
     }
 }
 
-/// The declaration a statement opens for the names it scopes to itself:
-/// `for (const x of xs)` and `catch (x)`.
+/// The names a statement rebinds for its own body: `for (const x of xs)`,
+/// `catch (x)`, and `for (x of xs)`, which assigns each element to an
+/// existing `x`.
 fn statement_declaration(n: Node<'_>) -> Option<Node<'_>> {
     match n.kind() {
-        "for_in_statement" => n
-            .child_by_field_name("kind")
-            .and(n.child_by_field_name("left")),
+        "for_in_statement" => {
+            let left = n.child_by_field_name("left")?;
+            // Without `const` / `let` / `var` the left side is an assignment
+            // target: `for (o.p of xs)` writes no name.
+            let declares = n.child_by_field_name("kind").is_some();
+            (declares || left.kind() == "identifier").then_some(left)
+        }
         "catch_clause" => n.child_by_field_name("parameter"),
         _ => None,
     }
@@ -760,13 +765,13 @@ fn this_class<'f>(member: Node<'_>, facts: &'f ThisFacts) -> Option<&'f str> {
 /// `obj.m` in value position (`xs.forEach(obj.m)`, `const f = this.m`,
 /// `xs.forEach(this.m.bind(this))`) where `obj` is `this` or, given `locals`,
 /// a parameter or local annotated with a class `T`: the method `T.m` (for
-/// `this`, the class [`this_class`] finds by its nearest-method rule), typed as
-/// the call `obj.m()` is. The name
-/// scan drops `obj.m`, as `obj` is a local, and records no `this.m`. A
-/// callee (parenthesized or not), the object of a longer member expression
-/// (`.bind` aside), an assignment target, a data member read through `this`,
-/// a `this` that is no class's, and a receiver of no known type name nothing; a field `obj.n` is
-/// no callable, so Pass 2 binds no edge to it. `parent` is `member`'s parent.
+/// `this`, the class [`this_class`] finds by its nearest-method rule), typed
+/// as the call `obj.m()` is. The name scan drops `obj.m`, as `obj` is a
+/// local, and records no `this.m`. A callee (parenthesized or not), the
+/// object of a longer member expression (`.bind` aside), an assignment
+/// target, a data member read through `this`, a `this` that is no class's,
+/// and a receiver of no known type name nothing; a field `obj.n` is no
+/// callable, so Pass 2 binds no edge to it. `parent` is `member`'s parent.
 pub(crate) fn bound_method_value(
     member: Node<'_>,
     parent: Option<Node<'_>>,
@@ -808,18 +813,16 @@ pub(crate) fn bound_method_value(
     if !value {
         return None;
     }
-    let ty = match object.kind() {
-        "this" => {
-            let facts = this_facts.get_or_init(|| ThisFacts::new(nodes));
-            if facts.data_members.contains(property) {
-                return None;
-            }
-            this_class(member, facts)?.to_string()
+    let ty = if object.kind() == "this" {
+        let facts = this_facts.get_or_init(|| ThisFacts::new(nodes));
+        if facts.data_members.contains(property) {
+            return None;
         }
-        // The guard above admits only `this` and an identifier.
-        _ => locals?
+        this_class(member, facts)?.to_string()
+    } else {
+        locals?
             .lookup_visible(start_pos(member), object.utf8_text(source).ok()?)?
-            .to_string(),
+            .to_string()
     };
     Some(format!("{ty}.{property}"))
 }

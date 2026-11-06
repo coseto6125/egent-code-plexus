@@ -451,8 +451,11 @@ impl LiteralKeyFacts {
     }
 }
 
-/// True when `parent` is a call/invocation whose `function` field is `callee`.
-fn is_function_of_call(callee: Node<'_>, parent: Option<Node<'_>>) -> bool {
+/// True when `parent` is a call/invocation whose `function` field is
+/// `access`, the direct callee: such nodes are method calls handled by
+/// `extract_calls`, not data-field reads. A parenthesized callee
+/// `(self.f)(x)` is not direct: it still reads the field `f`.
+fn is_direct_callee(access: Node<'_>, parent: Option<Node<'_>>) -> bool {
     let Some(parent) = parent else {
         return false;
     };
@@ -463,14 +466,7 @@ fn is_function_of_call(callee: Node<'_>, parent: Option<Node<'_>>) -> bool {
             | "function_call_expression"
             | "invocation_expression"
             | "call"
-    ) && parent.child_by_field_name("function").map(|f| f.id()) == Some(callee.id())
-}
-
-/// True when `access` is the direct callee of a call: such nodes are method
-/// calls handled by `extract_calls`, not data-field reads. A parenthesized
-/// callee `(self.f)(x)` is not direct: it still reads the field `f`.
-fn is_direct_callee(access: Node<'_>, parent: Option<Node<'_>>) -> bool {
-    is_function_of_call(access, parent)
+    ) && parent.child_by_field_name("function").map(|f| f.id()) == Some(access.id())
 }
 
 /// [`is_direct_callee`] seen through parentheses (`(a.m)()`): the method-value
@@ -482,7 +478,7 @@ pub(crate) fn is_call_callee(access: Node<'_>, parent: Option<Node<'_>>) -> bool
         outer = wrapper;
         parent = wrapper.parent();
     }
-    is_function_of_call(outer, parent)
+    is_direct_callee(outer, parent)
 }
 
 /// `node` with the parentheses around it removed: the callee `(a.m)` of

@@ -911,7 +911,7 @@ fn test_bound_method_reference_typescript_inner_function_without_own_binding_kee
 
 /// Stands for: a lambda parameter, a comprehension variable, a `for` target
 /// and a `with ... as` name each declare `obj` anew, so the outer `obj: Cls`
-/// does not type the receiver. HEAD binds `Cls.m` for each.
+/// does not type the receiver.
 #[test]
 fn test_bound_method_reference_python_lambda_parameter_shadows_outer_type_returns_no_edge() {
     let g = python_graph("f = lambda obj: list(map(obj.m, xs))");
@@ -950,9 +950,89 @@ fn test_bound_method_reference_python_lambda_and_comprehension_of_other_name_kee
     assert_one_cross_file(&function_refs(&g, "run"), "cls.py", "m");
 }
 
+/// Stands for: a lambda default and the first iterable of a comprehension run
+/// in the enclosing scope, so the outer `obj: Cls` types `obj.m` there even
+/// when the lambda or comprehension binds `obj`.
+#[test]
+fn test_bound_method_reference_python_lambda_default_reads_outer_type() {
+    let g = python_graph("return lambda obj=obj.m: obj(1)");
+    assert_one_cross_file(&function_refs(&g, "run"), "cls.py", "m");
+}
+
+#[test]
+fn test_bound_method_reference_python_comprehension_first_iterable_reads_outer_type() {
+    let g = python_graph("return [obj for obj in map(obj.m, xs)]");
+    assert_one_cross_file(&function_refs(&g, "run"), "cls.py", "m");
+}
+
+/// Stands for: a comprehension variable is visible in the conditions and in
+/// every later `for` clause.
+#[test]
+fn test_bound_method_reference_python_comprehension_condition_returns_no_edge() {
+    let g = python_graph("return [1 for obj in loose if map(obj.m, xs)]");
+    assert_eq!(function_refs(&g, "run"), none());
+}
+
+#[test]
+fn test_bound_method_reference_python_comprehension_later_iterable_returns_no_edge() {
+    let g = python_graph("return [1 for obj in loose for y in map(obj.m, xs)]");
+    assert_eq!(function_refs(&g, "run"), none());
+}
+
+/// Stands for: a `nonlocal` name is the outer variable, so a write to it in
+/// the inner function makes no new local, and the outer `obj: Cls` types
+/// `obj.m`.
+#[test]
+fn test_bound_method_reference_python_nonlocal_name_keeps_outer_type() {
+    let g = python_graph(
+        "def inner():\n        nonlocal obj\n        for obj in loose:\n            pass\n        return list(map(obj.m, xs))\n    return inner",
+    );
+    assert_one_cross_file(&function_refs(&g, "inner"), "cls.py", "m");
+}
+
+/// Stands for: a `global` name is a module binding, never the enclosing
+/// function's `obj: Cls`.
+#[test]
+fn test_bound_method_reference_python_global_name_returns_no_edge() {
+    let g = python_graph(
+        "def inner():\n        global obj\n        return list(map(obj.m, xs))\n    return inner",
+    );
+    assert_eq!(function_refs(&g, "inner"), none());
+}
+
+/// Stands for: a `case` capture binds a new local: a bare name, a keyword
+/// pattern's value, a star pattern and an `as` name.
+#[test]
+fn test_bound_method_reference_python_case_captures_return_no_edge() {
+    for pattern in [
+        "[obj]",
+        "Cls(x=obj)",
+        "[_, *obj]",
+        "Cls() as obj",
+        "{'k': obj}",
+    ] {
+        let g = python_graph(&format!(
+            "def inner():\n        match loose:\n            case {pattern}:\n                return list(map(obj.m, xs))\n    return inner"
+        ));
+        assert_eq!(function_refs(&g, "inner"), none(), "case {pattern}");
+    }
+}
+
+/// Stands for: a dotted value pattern and a keyword pattern's keyword name
+/// bind nothing, so the outer `obj: Cls` types `obj.m`.
+#[test]
+fn test_bound_method_reference_python_case_value_patterns_keep_outer_type() {
+    for pattern in ["Cls.m", "Cls(obj=1)"] {
+        let g = python_graph(&format!(
+            "def inner():\n        match loose:\n            case {pattern}:\n                return list(map(obj.m, xs))\n    return inner"
+        ));
+        assert_one_cross_file(&function_refs(&g, "inner"), "cls.py", "m");
+    }
+}
+
 /// Stands for: a destructuring default `{ y = obj }` and a computed key
 /// `{ [obj]: v }` read `obj`, they do not declare it, so the outer
-/// `obj: Cls` still types `obj.m`. HEAD loses the edge.
+/// `obj: Cls` still types `obj.m`.
 #[test]
 fn test_bound_method_reference_typescript_destructuring_default_keeps_outer_type() {
     let g = ts_graph("function inner({ y = obj }: any) {\n    return xs.forEach(obj.m);\n  }");
@@ -974,7 +1054,6 @@ fn test_bound_method_reference_typescript_destructuring_default_left_name_return
 }
 
 /// Stands for: `for (const obj of ...)` and `catch (obj)` declare `obj` anew.
-/// HEAD binds `Cls.m` for both.
 #[test]
 fn test_bound_method_reference_typescript_for_of_variable_shadows_outer_type_returns_no_edge() {
     let g = ts_graph("for (const obj of loose) {\n    xs.forEach(obj.m);\n  }");
@@ -991,6 +1070,23 @@ fn test_bound_method_reference_typescript_catch_parameter_shadows_outer_type_ret
 #[test]
 fn test_bound_method_reference_typescript_for_of_other_variable_keeps_outer_type() {
     let g = ts_graph("for (const z of loose) {\n    xs.forEach(obj.m);\n  }");
+    assert_one_cross_file(&function_refs(&g, "run"), "cls.ts", "m");
+}
+
+/// Stands for: `for (obj of ...)` and `for (obj in ...)` assign each element to
+/// `obj`, so inside the loop the outer `obj: Cls` does not type `obj.m`. A
+/// member target `for (h.obj of ...)` writes no name.
+#[test]
+fn test_bound_method_reference_typescript_for_of_assignment_target_returns_no_edge() {
+    for head in ["for (obj of loose)", "for (obj in loose)"] {
+        let g = ts_graph(&format!("{head} {{\n    xs.forEach(obj.m);\n  }}"));
+        assert_eq!(function_refs(&g, "run"), none(), "{head}");
+    }
+}
+
+#[test]
+fn test_bound_method_reference_typescript_for_of_member_target_keeps_outer_type() {
+    let g = ts_graph("for (loose.obj of xs) {\n    xs.forEach(obj.m);\n  }");
     assert_one_cross_file(&function_refs(&g, "run"), "cls.ts", "m");
 }
 

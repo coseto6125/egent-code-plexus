@@ -165,11 +165,20 @@ func readTimeout(c Config) int { return c.Timeout }
     assert_reads_field(&build(&p, "a.go", src), "Timeout");
 }
 
-/// Stands for: a parenthesized callee `(s.f)(1)` calls a field's value, so it
-/// reads the field `f`. (C++ `(o->fp)(1)` has no test: a function-pointer
-/// member `int (*fp)(int)` yields no Property node to read.)
+// ---- Parenthesized field call ----
+//
+// Stands for: a parenthesized callee `(s.f)(1)` calls a field's value, so it
+// reads the field `f`; only a direct callee `s.f(1)` is a method call. Rust's
+// case is `test_field_reads_walk_rust_parenthesized_field_call_reads_field` in
+// `reads_field_rust.rs`. Languages without a case:
+//   - Java: a functional-interface field is called through its method
+//     (`s.f.accept(1)`); `(s.f)(1)` does not parse as a call.
+//   - Ruby: `s.f` is itself a method call, so no field is read.
+//   - C: a function-pointer member `void (*f)(int)` yields no Property node.
+//   - C++: a function-pointer member `void (*fp)(int)` yields no Property node.
+
 #[test]
-fn go_parenthesized_field_call_reads_field() {
+fn test_field_reads_walk_go_parenthesized_field_call_reads_field() {
     let p = ecp_analyzer::go::parser::GoProvider::new().unwrap();
     let src = r#"
 package main
@@ -177,6 +186,89 @@ type S struct { f func(int) }
 func fire(s S) { (s.f)(1) }
 "#;
     assert_reads_field(&build(&p, "a.go", src), "f");
+}
+
+#[test]
+fn test_field_reads_walk_typescript_parenthesized_field_call_reads_field() {
+    let p = ecp_analyzer::typescript::parser::TypeScriptProvider::new().unwrap();
+    let src = r#"
+class S { f: (x: number) => void = (x) => {}; }
+function fire(s: S) { (s.f)(1); }
+"#;
+    assert_reads_field(&build(&p, "a.ts", src), "f");
+}
+
+#[test]
+fn test_field_reads_walk_javascript_parenthesized_field_call_reads_field() {
+    let p = ecp_analyzer::javascript::parser::JavaScriptProvider::new().unwrap();
+    let src = r#"
+class S { f = (x) => {}; }
+function fire(s) { (s.f)(1); }
+"#;
+    assert_reads_field(&build(&p, "a.js", src), "f");
+}
+
+#[test]
+fn test_field_reads_walk_python_parenthesized_field_call_reads_field() {
+    let p = ecp_analyzer::python::parser::PythonProvider::new().unwrap();
+    let src = r#"
+class S:
+    f: object = None
+
+def fire(s):
+    (s.f)(1)
+"#;
+    assert_reads_field(&build(&p, "a.py", src), "f");
+}
+
+#[test]
+fn test_field_reads_walk_kotlin_parenthesized_field_call_reads_field() {
+    let p = ecp_analyzer::kotlin::parser::KotlinProvider::new().unwrap();
+    let src = r#"
+class S { val f: (Int) -> Unit = {} }
+fun fire(s: S) { (s.f)(1) }
+"#;
+    assert_reads_field(&build(&p, "a.kt", src), "f");
+}
+
+#[test]
+fn test_field_reads_walk_csharp_parenthesized_field_call_reads_field() {
+    let p = ecp_analyzer::c_sharp::parser::CSharpProvider::new().unwrap();
+    let src = r#"
+class S { public System.Action<int> F; }
+class R { void Fire(S s) { (s.F)(1); } }
+"#;
+    assert_reads_field(&build(&p, "A.cs", src), "F");
+}
+
+#[test]
+fn test_field_reads_walk_php_parenthesized_field_call_reads_field() {
+    let p = ecp_analyzer::php::parser::PhpProvider::new().unwrap();
+    let src = r#"<?php
+class S { public $f; }
+function fire(S $s) { ($s->f)(1); }
+"#;
+    assert_reads_field(&build(&p, "a.php", src), "f");
+}
+
+#[test]
+fn test_field_reads_walk_swift_parenthesized_field_call_reads_field() {
+    let p = ecp_analyzer::swift::parser::SwiftProvider::new().unwrap();
+    let src = r#"
+class S { var f: (Int) -> Void = { _ in } }
+func fire(s: S) { (s.f)(1) }
+"#;
+    assert_reads_field(&build(&p, "a.swift", src), "f");
+}
+
+#[test]
+fn test_field_reads_walk_dart_parenthesized_field_call_reads_field() {
+    let p = ecp_analyzer::dart::parser::DartProvider::new().unwrap();
+    let src = r#"
+class S { void Function(int) f = (x) {}; }
+void fire(S s) { (s.f)(1); }
+"#;
+    assert_reads_field(&build(&p, "a.dart", src), "f");
 }
 
 #[test]

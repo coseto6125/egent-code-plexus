@@ -72,7 +72,7 @@ fn read_timeout(c: &Config) -> u32 {
     );
 }
 
-/// A method call `c.compute()` is a Calls edge, not a ReadsField — `is_call_callee`
+/// A method call `c.compute()` is a Calls edge, not a ReadsField — `is_direct_callee`
 /// must exclude the callee, and even if it slipped through, the resolver's
 /// is_property filter has no Property named `compute` to land on. Either way
 /// no ReadsField edge to a method should appear.
@@ -101,7 +101,7 @@ fn driver(c: &Config) -> u32 {
 /// Stands for: a parenthesized callee `(self.callback)(x)` calls a field's
 /// value, so it reads the field `callback`; a method call `self.m(x)` does not.
 #[test]
-fn rust_parenthesized_field_call_emits_reads_field_edge() {
+fn test_field_reads_walk_rust_parenthesized_field_call_reads_field() {
     let src = r#"
 pub struct Hook { pub callback: fn(u32) }
 impl Hook {

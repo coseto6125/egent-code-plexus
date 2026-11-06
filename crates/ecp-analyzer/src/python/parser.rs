@@ -787,7 +787,8 @@ const ALIAS_GENERICS: &[&str] = &[
     "type",
 ];
 
-/// Builtin type names that make a `|` union certainly a type.
+/// Builtin type names that make a `|` union certainly a type, unless the
+/// module rebinds them.
 const ALIAS_BUILTINS: &[&str] = &[
     "int",
     "str",
@@ -807,10 +808,14 @@ const ALIAS_BUILTINS: &[&str] = &[
 
 /// A bare module-level `X = <type expression>` is an alias only on evidence:
 /// the right side is a subscript of a generic the module does not rebind, or
-/// a `|` union of names, dotted names and subscripts with at least one certain
-/// operand (`None`, a builtin type, such a subscript). A call, literal, or
-/// `Qt.A | Qt.B` / `Read | Write` flag mask has no certain operand and stays a
-/// value. The caller guards that the assignment carries no annotation.
+/// of a class the module defines whose arguments are all type-shaped, or a
+/// `|` union of names, dotted names and subscripts with at least one certain
+/// operand (`None`, a builtin type the module does not rebind, such a
+/// subscript). A class the module defines is no certain union operand: a
+/// metaclass `__or__` makes `IsOwner | IsAdmin` a value, and `Color["RED"]`
+/// is an `Enum` lookup. A call, literal, or `Qt.A | Qt.B` / `Read | Write`
+/// flag mask has no certain operand and stays a value. The caller guards that
+/// the assignment carries no annotation.
 fn is_bare_type_alias(assignment: Node, source: &[u8], names: &ModuleNames) -> bool {
     assignment.kind() == "assignment"
         && assignment.child_by_field_name("right").is_some_and(|r| {
@@ -835,8 +840,8 @@ fn is_type_shape(n: Node, source: &[u8], names: &ModuleNames, certain: &mut bool
                 })
                 .is_some_and(|(name, bare)| {
                     if bare {
-                        names.is_class(name)
-                            || (ALIAS_GENERICS.contains(&name) && !names.values.contains(name))
+                        names.names_known_type(name, ALIAS_GENERICS)
+                            || (names.is_class(name) && has_type_arguments(n))
                     } else {
                         ALIAS_GENERICS.contains(&name)
                     }
@@ -864,9 +869,7 @@ fn is_type_shape(n: Node, source: &[u8], names: &ModuleNames, certain: &mut bool
 fn is_union_operand(n: Node, source: &[u8], names: &ModuleNames, certain: &mut bool) -> bool {
     match n.kind() {
         "identifier" => {
-            let name = node_text(n, source);
-            *certain |= names.is_class(name)
-                || (ALIAS_BUILTINS.contains(&name) && !names.values.contains(name));
+            *certain |= names.names_known_type(node_text(n, source), ALIAS_BUILTINS);
             true
         }
         "none" => {
@@ -878,13 +881,29 @@ fn is_union_operand(n: Node, source: &[u8], names: &ModuleNames, certain: &mut b
     }
 }
 
+/// Whether every argument of the subscript `n` is shaped like a type: a name,
+/// a dotted name, `None` or such a subscript. A string or number argument
+/// (`Color["RED"]`, `Rows[0]`) is a value lookup.
+fn has_type_arguments(n: Node) -> bool {
+    let mut cursor = n.walk();
+    let all = n
+        .children_by_field_name("subscript", &mut cursor)
+        .all(|a| match a.kind() {
+            "identifier" | "attribute" | "none" => true,
+            "subscript" => has_type_arguments(a),
+            _ => false,
+        });
+    all
+}
+
 /// The names a module binds at its top level, read once per file. A class
-/// definition is type evidence; an assignment or a function definition is a
-/// value binding (`List = [42]` makes a later `List[0]` a value read). It does
-/// not see imports (an imported `Optional` stays a generic), bindings inside
-/// `if` / `try` / `with`, or tuple and annotated targets.
+/// definition is type evidence; an assignment (annotated or not) or a function
+/// definition is a value binding (`List = [42]` makes a later `List[0]` a
+/// value read). It does not see imports (an imported `Optional` stays a
+/// generic), bindings inside `if` / `try` / `with`, tuple targets, or a bare
+/// annotation without a value (`x: int`).
 #[derive(Default)]
-pub struct ModuleNames {
+struct ModuleNames {
     values: rustc_hash::FxHashSet<String>,
     classes: rustc_hash::FxHashSet<String>,
 }
@@ -928,6 +947,12 @@ impl ModuleNames {
     /// A class the module defines and never rebinds as a value.
     fn is_class(&self, name: &str) -> bool {
         self.classes.contains(name) && !self.values.contains(name)
+    }
+
+    /// Whether `name` is one of the `known` type names and the module does not
+    /// rebind it as a value.
+    fn names_known_type(&self, name: &str, known: &[&str]) -> bool {
+        known.contains(&name) && !self.values.contains(name)
     }
 }
 

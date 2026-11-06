@@ -46,22 +46,30 @@ pub struct LocalTypes {
     /// A `from` binding may be an object; only a module import proves that
     /// its receiver names a namespace for import-scoped resolution.
     imported: HashMap<String, ImportedBinding>,
-    shadows: Vec<FunctionBindings>,
+    shadows: Vec<ScopeBindings>,
 }
 
 /// The names one scope binds (a function, lambda or comprehension): a
-/// parameter or comprehension variable at 0, an assignment, `for` target or
-/// `with ... as` name at its byte offset.
+/// parameter or comprehension variable at 0, an assignment, `for` target,
+/// `with ... as` name or `case` capture at its byte offset.
 #[derive(Debug)]
-struct FunctionBindings {
+struct ScopeBindings {
     bytes: (usize, usize),
+    /// Bytes inside `bytes` that the enclosing scope evaluates: the first
+    /// iterable of a comprehension.
+    outside: Option<(usize, usize)>,
     start: Pos,
     names: HashMap<String, usize>,
+    /// Names a `global` statement declares: they name module bindings, so an
+    /// enclosing function's variable of that name is not visible.
+    globals: HashSet<String>,
 }
 
-impl FunctionBindings {
+impl ScopeBindings {
     fn encloses(&self, node: Node<'_>) -> bool {
-        self.bytes.0 <= node.start_byte() && node.end_byte() <= self.bytes.1
+        let within =
+            |(start, end): (usize, usize)| start <= node.start_byte() && node.end_byte() <= end;
+        within(self.bytes) && !self.outside.is_some_and(within)
     }
 }
 
@@ -97,13 +105,15 @@ impl LocalTypes {
     /// [`LocalTypes::lookup`] for a receiver in a value position: the type
     /// stands only when no scope nearer than the one that typed `var` rebinds
     /// the name (`def inner(x): return x.m` inside `def outer(x: A)`, or a
-    /// lambda, comprehension, `for` or `with ... as` that binds it).
+    /// lambda, comprehension, `for`, `with ... as`, `case` capture or
+    /// `global` that binds it).
     fn lookup_visible(&self, receiver: Node<'_>, var: &str) -> Option<&str> {
         let (typed_start, ty) = self.nearest_typed(start_pos(receiver), var)?;
-        let rebound_nearer = self
-            .shadows
-            .iter()
-            .any(|f| f.encloses(receiver) && f.start > typed_start && f.names.contains_key(var));
+        let rebound_nearer = self.shadows.iter().any(|f| {
+            f.encloses(receiver)
+                && f.start > typed_start
+                && (f.names.contains_key(var) || f.globals.contains(var))
+        });
         (!rebound_nearer).then_some(ty)
     }
 
@@ -153,6 +163,8 @@ pub fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
             let fn_span = node_range(n);
             let mut map: HashMap<String, String> = HashMap::new();
             let mut names = HashMap::new();
+            let mut globals = HashSet::new();
+            let mut nonlocals = HashSet::new();
 
             if let Some(params) = n.child_by_field_name("parameters") {
                 collect_typed_params(params, source, &mut map);
@@ -179,13 +191,8 @@ pub fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
                 collect_typed_assignments(body, source, &mut map);
                 let mut pending = vec![body];
                 while let Some(node) = pending.pop() {
-                    if matches!(
-                        node.kind(),
-                        "function_definition" | "class_definition" | "lambda"
-                    ) {
-                        continue;
-                    }
                     let target = match node.kind() {
+                        "function_definition" | "class_definition" | "lambda" => continue,
                         "assignment"
                         | "augmented_assignment"
                         | "named_expression"
@@ -193,6 +200,35 @@ pub fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
                             .child_by_field_name("left")
                             .or_else(|| node.child_by_field_name("name")),
                         "as_pattern" => node.child_by_field_name("alias"),
+                        "case_clause" => {
+                            let mut cursor = node.walk();
+                            for pattern in node
+                                .named_children(&mut cursor)
+                                .filter(|c| c.kind() == "case_pattern")
+                            {
+                                collect_case_captures(
+                                    pattern,
+                                    source,
+                                    node.start_byte(),
+                                    &mut names,
+                                );
+                            }
+                            None
+                        }
+                        "global_statement" | "nonlocal_statement" => {
+                            let declared = if node.kind() == "global_statement" {
+                                &mut globals
+                            } else {
+                                &mut nonlocals
+                            };
+                            let mut cursor = node.walk();
+                            declared.extend(
+                                node.named_children(&mut cursor)
+                                    .filter_map(|c| c.utf8_text(source).ok())
+                                    .map(str::to_string),
+                            );
+                            None
+                        }
                         _ => None,
                     };
                     if let Some(target) = target {
@@ -202,15 +238,20 @@ pub fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
                     pending.extend(node.named_children(&mut cursor));
                 }
             }
+            // A `global` or `nonlocal` name is a binding of another scope, not
+            // a new local of this function.
+            names.retain(|name, _| !globals.contains(name) && !nonlocals.contains(name));
 
             if !map.is_empty() {
                 scopes.push((fn_span, map));
             }
-            if !names.is_empty() {
-                shadows.push(FunctionBindings {
+            if !names.is_empty() || !globals.is_empty() {
+                shadows.push(ScopeBindings {
                     bytes: (n.start_byte(), n.end_byte()),
+                    outside: None,
                     start: fn_span.0,
                     names,
+                    globals,
                 });
             }
         }
@@ -227,11 +268,18 @@ pub fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
 }
 
 /// The names a lambda (its parameters) or a comprehension (its `for`
-/// variables) binds, visible across the whole expression.
-fn inline_scope_bindings(n: Node<'_>, source: &[u8]) -> Option<FunctionBindings> {
+/// variables) binds. A lambda parameter is visible in the lambda body only:
+/// a default runs in the enclosing scope. A comprehension variable is
+/// visible in the element, the conditions and every `for` clause but the
+/// first iterable, which the enclosing scope evaluates.
+fn inline_scope_bindings(n: Node<'_>, source: &[u8]) -> Option<ScopeBindings> {
     let mut names = HashMap::new();
+    let mut bytes = (n.start_byte(), n.end_byte());
+    let mut outside = None;
     match n.kind() {
         "lambda" => {
+            let body = n.child_by_field_name("body")?;
+            bytes = (body.start_byte(), body.end_byte());
             let params = n.child_by_field_name("parameters")?;
             let mut cursor = params.walk();
             for parameter in params.named_children(&mut cursor) {
@@ -258,15 +306,66 @@ fn inline_scope_bindings(n: Node<'_>, source: &[u8]) -> Option<FunctionBindings>
                 if let Some(left) = clause.child_by_field_name("left") {
                     collect_shadow_names(left, source, 0, &mut names);
                 }
+                if outside.is_none() {
+                    let mut iterables = clause.walk();
+                    let mut right = clause.children_by_field_name("right", &mut iterables);
+                    outside = right.next().map(|first| {
+                        (first.start_byte(), right.last().unwrap_or(first).end_byte())
+                    });
+                }
             }
         }
         _ => return None,
     }
-    (!names.is_empty()).then(|| FunctionBindings {
-        bytes: (n.start_byte(), n.end_byte()),
+    (!names.is_empty()).then(|| ScopeBindings {
+        bytes,
+        outside,
         start: node_range(n).0,
         names,
+        globals: HashSet::new(),
     })
+}
+
+/// The names a `case` pattern captures: a bare name, `*rest` / `**rest`, and
+/// the name after `as`. A dotted name is a value pattern; neither the class of
+/// a class pattern nor the keyword of a keyword pattern binds.
+fn collect_case_captures(
+    pattern: Node<'_>,
+    source: &[u8],
+    position: usize,
+    names: &mut HashMap<String, usize>,
+) {
+    let skip = usize::from(matches!(
+        pattern.kind(),
+        "class_pattern" | "keyword_pattern"
+    ));
+    match pattern.kind() {
+        "dotted_name" if pattern.named_child_count() == 1 => {
+            if let Some(name) = pattern.named_child(0) {
+                collect_shadow_names(name, source, position, names);
+            }
+        }
+        "identifier" => collect_shadow_names(pattern, source, position, names),
+        "case_pattern" | "as_pattern" | "list_pattern" | "tuple_pattern" | "union_pattern"
+        | "splat_pattern" | "class_pattern" | "keyword_pattern" => {
+            let mut cursor = pattern.walk();
+            for child in pattern.named_children(&mut cursor).skip(skip) {
+                collect_case_captures(child, source, position, names);
+            }
+        }
+        // A key is a literal or a value pattern; only values and `**rest`
+        // capture.
+        "dict_pattern" => {
+            let mut cursor = pattern.walk();
+            for child in pattern
+                .named_children(&mut cursor)
+                .filter(|c| matches!(c.kind(), "case_pattern" | "splat_pattern"))
+            {
+                collect_case_captures(child, source, position, names);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn collect_shadow_names(
