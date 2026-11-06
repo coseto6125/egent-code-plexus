@@ -3,6 +3,12 @@
   (visibility_modifier)? @export
   name: (type_identifier) @struct_item.name) @struct
 
+;; Unions — a C-layout `union U { .. }` is a type declaration like a struct, so
+;; a path through its `impl` block binds to it and not to an `Impl` stand-in.
+(union_item
+  (visibility_modifier)? @export
+  name: (type_identifier) @struct_item.name) @struct
+
 ;; Enums
 (enum_item
   (visibility_modifier)? @export
@@ -115,6 +121,15 @@
 ;; Struct fields (named-field structs only; tuple structs have no field_identifier)
 (struct_item
   (visibility_modifier)? @export
+  body: (field_declaration_list
+    (field_declaration
+      (visibility_modifier)? @export
+      name: (field_identifier) @property.name
+      type: (_) @type) @property))
+
+;; Union fields: a union is a `Struct` node (above), and its fields are its
+;; data members as a struct's are.
+(union_item
   body: (field_declaration_list
     (field_declaration
       (visibility_modifier)? @export

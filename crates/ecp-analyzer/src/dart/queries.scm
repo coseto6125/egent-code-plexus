@@ -181,17 +181,19 @@
   name: (identifier) @param.name) @param
 
 ;; Top-level variable declarations — `double pi = 3.14;` / `var x = 0;`.
+;; The whole `(type)` is captured: its first child alone is the wrapper of
+;; `List<Item>`, and the type arguments are a sibling child.
 ;; Note: tree-sitter-dart mis-parses `typedef Foo = ...` as
 ;; top_level_variable_declaration; the Rust layer skips those (type == "typedef").
 (top_level_variable_declaration
-  (type (_) @var.type)?
+  (type)? @var.type
   (initialized_identifier_list
     (initialized_identifier name: (identifier) @var.name))) @var
 
 ;; Top-level `final` / `const` declarations — `final String k = 'v';`.
 ;; tree-sitter-dart uses static_final_declaration_list for these.
 (top_level_variable_declaration
-  type: (type (_) @var.type)?
+  type: (type)? @var.type
   (static_final_declaration_list
     (static_final_declaration name: (identifier) @var.name))) @var
 

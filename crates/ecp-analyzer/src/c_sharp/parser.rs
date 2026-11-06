@@ -10,6 +10,7 @@ use crate::framework_confidence;
 use crate::framework_helpers::{
     collect_dotnet_transactional_scopes, detect_ast_framework_patterns, FrameworkPatternSpec,
 };
+use crate::function_meta::declared_type_params;
 use crate::parse_budget::{parse_with_budget, ParseBudget};
 use ecp_core::analyzer::parse_prof::Pass;
 use ecp_core::analyzer::provider::LanguageProvider;
@@ -72,6 +73,18 @@ fn generic_arity(decl: tree_sitter::Node<'_>) -> u32 {
     list.named_children(&mut cursor)
         .filter(|param| param.kind() == "type_parameter")
         .count() as u32
+}
+
+/// The type-parameter marker of a generic class, struct, interface or
+/// record: its own `type_parameter_list`. A delegate stays a callable and
+/// carries none.
+fn type_params_decorator(decl: Node<'_>, source: &[u8]) -> Option<String> {
+    let mut cursor = decl.walk();
+    let list = decl
+        .children(&mut cursor)
+        .find(|child| child.kind() == "type_parameter_list")?;
+    let names = declared_type_params(&list, source);
+    (!names.is_empty()).then(|| RawNode::type_params_marker(names.iter().map(String::as_str)))
 }
 
 /// Whether a type declaration carries the `partial` modifier.
@@ -700,6 +713,9 @@ impl ParseSpec for CSharpSpec {
                     };
                     // The parts of one `partial` type merge by this
                     // scope (`c_sharp::partial`).
+                    if k.declares_type() {
+                        decorators.extend(type_params_decorator(root, source));
+                    }
                     if k.declares_type() && is_partial(root, source) {
                         decorators.push(RawNode::partial_marker(&declaring_scope(root, source)));
                     }
@@ -758,6 +774,8 @@ impl ParseSpec for CSharpSpec {
                     cx.tree.root_node(),
                     cx.source,
                     &mut cx.nodes,
+                    cx.path,
+                    &mut cx.blind_spots,
                 );
                 cx.path_literals = raw_path_literals;
                 cx.sql_refs = raw_sql_refs;
@@ -775,5 +793,58 @@ impl ParseSpec for CSharpSpec {
         category: FileCategory,
     ) -> Vec<RawFunctionMeta> {
         crate::function_meta::csharp::extract(root, source, nodes, category)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(src: &str) -> Vec<RawNode> {
+        CSharpProvider::new()
+            .expect("provider")
+            .parse_file(Path::new("t.cs"), src.as_bytes())
+            .expect("parse")
+            .nodes
+    }
+
+    fn params(src: &str, name: &str) -> Vec<String> {
+        let nodes = parse(src);
+        nodes
+            .iter()
+            .find(|n| n.name == name)
+            .map(|n| n.declared_type_params().map(str::to_string).collect())
+            .unwrap_or_else(|| panic!("no node {name}: {nodes:?}"))
+    }
+
+    #[test]
+    fn test_type_params_marker_csharp_generic_declarations_round_trip() {
+        assert_eq!(params("class Box<T> {}", "Box"), ["T"]);
+        assert_eq!(params("struct Pair<K, V> {}", "Pair"), ["K", "V"]);
+        assert_eq!(params("interface IRepo<out E> {}", "IRepo"), ["E"]);
+        assert_eq!(params("record Wrap<T>(T Value);", "Wrap"), ["T"]);
+    }
+
+    #[test]
+    fn test_type_params_marker_csharp_plain_declaration_has_none() {
+        assert!(params("class Plain {}", "Plain").is_empty());
+        assert!(params("class Plain : Base<int> {}", "Plain").is_empty());
+        assert!(params("class Box<T> { class Inner {} }", "Inner").is_empty());
+    }
+
+    #[test]
+    fn test_type_params_marker_csharp_delegate_and_method_have_none() {
+        for n in parse("delegate R Func<T, R>(T a);\nclass C<T> { void Put<U>(U x) {} }")
+            .iter()
+            .filter(|n| matches!(n.kind, NodeKind::Function | NodeKind::Method))
+        {
+            assert!(
+                !n.decorators
+                    .iter()
+                    .any(|d| RawNode::is_type_params_marker(d)),
+                "{}",
+                n.name
+            );
+        }
     }
 }

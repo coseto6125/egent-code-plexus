@@ -16,179 +16,26 @@
 use super::path_literals::{
     build_raw_path_literal, enclosing_symbol_and_owner_pub, strip_java_string_value,
 };
+use super::receiver_lower::JavaLowering;
 use crate::calls::{
-    attach_to_enclosing, construction_call, node_range, range_width, reference_function,
-    span_holds, span_width, start_pos, Pos, PosRange,
+    attach_to_enclosing, construction_call, reference_function, span_holds, span_width, start_pos,
+    Pos,
 };
-use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
+use crate::receiver::{analyze_file, FileReceivers, Receiver};
+use ecp_core::analyzer::types::{BlindSpot, CallSite, RawNode, RawPathLiteral, RawSqlRef};
 use ecp_core::graph::NodeKind;
-use std::collections::HashMap;
+use rustc_hash::FxHashSet;
+use std::cell::RefCell;
+use std::path::Path;
 use tree_sitter::Node;
-
-/// Map of variable name → declared type within a single method scope.
-#[derive(Debug, Default)]
-struct LocalTypes {
-    /// `(scope_start_row, scope_end_row)` → `{var_name → type_name}`
-    scopes: Vec<(PosRange, HashMap<String, String>)>,
-}
-
-impl LocalTypes {
-    /// Find the innermost scope containing `pos` that has `var`.
-    fn lookup(&self, pos: Pos, var: &str) -> Option<&str> {
-        let mut best: Option<&str> = None;
-        let mut best_width = (u32::MAX, i64::MAX);
-        for ((start, end), map) in &self.scopes {
-            if *start <= pos && pos <= *end {
-                if let Some(t) = map.get(var) {
-                    let w = range_width((*start, *end));
-                    if w < best_width {
-                        best_width = w;
-                        best = Some(t.as_str());
-                    }
-                }
-            }
-        }
-        best
-    }
-}
-
-/// Walk every method/constructor declaration, collecting typed parameters and
-/// local variable declarations.
-///
-/// Java local variable: `local_variable_declaration` with a `type_identifier`
-/// (or `generic_type` etc.) type child and a `variable_declarator` with an
-/// `identifier` name child.
-///
-/// Java typed param: `formal_parameters` → `formal_parameter` with `type` and
-/// `name` fields.
-fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
-    let mut scopes: Vec<(PosRange, HashMap<String, String>)> = Vec::new();
-    let mut stack: Vec<Node<'_>> = vec![root];
-    while let Some(n) = stack.pop() {
-        match n.kind() {
-            "method_declaration" | "constructor_declaration" => {
-                let scope_span = node_range(n);
-                let mut map: HashMap<String, String> = HashMap::new();
-                // Collect typed parameters.
-                if let Some(params) = n.child_by_field_name("parameters") {
-                    collect_formal_params(params, source, &mut map);
-                }
-                // Collect local variable declarations inside the body.
-                if let Some(body) = n.child_by_field_name("body") {
-                    collect_local_vars(body, source, &mut map);
-                }
-                if !map.is_empty() {
-                    scopes.push((scope_span, map));
-                }
-                // Don't descend into nested method bodies — they form
-                // their own scopes (anonymous class methods, lambdas).
-                continue;
-            }
-            _ => {}
-        }
-        let mut c = n.walk();
-        for child in n.children(&mut c) {
-            stack.push(child);
-        }
-    }
-    LocalTypes { scopes }
-}
-
-fn collect_formal_params(params: Node<'_>, source: &[u8], out: &mut HashMap<String, String>) {
-    let mut c = params.walk();
-    for p in params.children(&mut c) {
-        if p.kind() != "formal_parameter" {
-            continue;
-        }
-        let Some(ty) = p.child_by_field_name("type") else {
-            continue;
-        };
-        let Some(name) = p.child_by_field_name("name") else {
-            continue;
-        };
-        if let Some((var, ty_s)) = simple_id_and_type(name, ty, source) {
-            out.insert(var, ty_s);
-        }
-    }
-}
-
-/// Walk a block collecting `local_variable_declaration` nodes. Does NOT descend
-/// into nested method/constructor bodies (those get their own scope entry).
-fn collect_local_vars(body: Node<'_>, source: &[u8], out: &mut HashMap<String, String>) {
-    let mut stack: Vec<Node<'_>> = vec![body];
-    while let Some(n) = stack.pop() {
-        match n.kind() {
-            "method_declaration" | "constructor_declaration" => continue,
-            "local_variable_declaration" => {
-                // type child: first named child (type_identifier / generic_type / etc.)
-                // declarator child: variable_declarator with name field
-                let mut ty_node = None;
-                let mut c = n.walk();
-                for child in n.children(&mut c) {
-                    if child.is_named() {
-                        if ty_node.is_none()
-                            && matches!(
-                                child.kind(),
-                                "type_identifier"
-                                    | "generic_type"
-                                    | "integral_type"
-                                    | "floating_point_type"
-                                    | "boolean_type"
-                                    | "array_type"
-                            )
-                        {
-                            ty_node = Some(child);
-                        } else if child.kind() == "variable_declarator" {
-                            if let (Some(ty), Some(nm)) =
-                                (ty_node, child.child_by_field_name("name"))
-                            {
-                                if let Some((var, ty_s)) = simple_id_and_type(nm, ty, source) {
-                                    out.insert(var, ty_s);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            _ => {}
-        }
-        let mut c = n.walk();
-        for child in n.children(&mut c) {
-            stack.push(child);
-        }
-    }
-}
-
-/// Return `(var_name, type_name)` only when both name is a plain identifier
-/// and type is a simple `type_identifier` (single class name, no generics).
-fn simple_id_and_type(
-    name_node: Node<'_>,
-    type_node: Node<'_>,
-    source: &[u8],
-) -> Option<(String, String)> {
-    if name_node.kind() != "identifier" {
-        return None;
-    }
-    // Only bind plain class-name types; skip primitives and generics for now.
-    let ty_inner = if type_node.kind() == "type_identifier" {
-        type_node
-    } else {
-        return None;
-    };
-    let name = std::str::from_utf8(&source[name_node.start_byte()..name_node.end_byte()]).ok()?;
-    let ty = std::str::from_utf8(&source[ty_inner.start_byte()..ty_inner.end_byte()]).ok()?;
-    if ty.is_empty() || !ty.chars().all(|c| c.is_alphanumeric() || c == '_') {
-        return None;
-    }
-    Some((name.to_string(), ty.to_string()))
-}
 
 /// Resolve the callee name for a Java `method_invocation` node, applying
 /// receiver-type binding. Returns `None` to drop the edge entirely (rare).
 fn java_callee(
     mi: Node<'_>,
     source: &[u8],
-    locals: &LocalTypes,
+    receivers: &FileReceivers,
+    locals: &FxHashSet<usize>,
     nodes: &[RawNode],
 ) -> Option<String> {
     // Java `method_invocation` field layout:
@@ -204,17 +51,18 @@ fn java_callee(
             "this" => enclosing_class_name(nodes, pos),
             "super" => enclosing_superclass(nodes, pos),
             "identifier" => {
-                let var = std::str::from_utf8(&source[obj.start_byte()..obj.end_byte()]).ok()?;
-                // When the local-type map has the variable, resolve to declared type.
-                // When it misses (e.g. static class name like `Util`), keep the
+                // A tracked local resolves to its declared type. Anything else
+                // (a static class name like `Util`, a field) keeps the
                 // identifier as-is so Tier 2.5 qualifier-scoped lookup can match
                 // `Util.helper` against the definition node.
-                Some(
-                    locals
-                        .lookup(pos, var)
-                        .map(|t| t.to_string())
-                        .unwrap_or_else(|| var.to_string()),
-                )
+                if let Some(receiver) = receivers.receiver_at(obj) {
+                    return Some(receiver.call_entry(method_name));
+                }
+                let var = std::str::from_utf8(&source[obj.start_byte()..obj.end_byte()]).ok()?;
+                match field_type(nodes, pos, var).filter(|_| !locals.contains(&obj.id())) {
+                    Some(ty) => Some(ty.to_string()),
+                    None => Some(var.to_string()),
+                }
             }
             // A computed receiver (`a.b().m()`, `this.f.m()`): the member is
             // never a static import's name. Its type is known by syntax when
@@ -226,8 +74,9 @@ fn java_callee(
                     let untyped = CallSite::untyped_member(method_name);
                     return Some(match obj.kind() {
                         "method_invocation" => {
-                            match CallSite::nested_chain(|| java_callee(obj, source, locals, nodes))
-                            {
+                            match CallSite::nested_chain(|| {
+                                java_callee(obj, source, receivers, locals, nodes)
+                            }) {
                                 Some(inner) => CallSite::chained_member(&inner, &untyped),
                                 None => untyped,
                             }
@@ -252,7 +101,7 @@ fn java_callee(
 /// a cast names, through parentheses. Only a simple class name, generic
 /// arguments cut: a qualified `new a.b.T()` names a package path, which
 /// must not land on a project `T`, so it stays untyped.
-fn expression_type<'s>(expr: Node<'_>, source: &'s [u8]) -> Option<&'s str> {
+pub(super) fn expression_type<'s>(expr: Node<'_>, source: &'s [u8]) -> Option<&'s str> {
     match expr.kind() {
         "parenthesized_expression" => expression_type(expr.named_child(0)?, source),
         "object_creation_expression" | "cast_expression" => {
@@ -278,8 +127,13 @@ pub fn extract_java_calls_and_path_literals(
     root: Node<'_>,
     source: &[u8],
     nodes: &mut [RawNode],
+    path: &Path,
+    blind_spots: &mut Vec<BlindSpot>,
 ) -> (Vec<RawPathLiteral>, Vec<RawSqlRef>) {
-    let local_types = collect_local_types(root, source);
+    let locals = RefCell::default();
+    let mut receivers = analyze_file(&JavaLowering, &locals, root, source, path);
+    blind_spots.append(&mut receivers.blind_spots);
+    let locals = locals.into_inner();
 
     let mut path_literals: Vec<RawPathLiteral> = Vec::new();
     let mut sql_refs: Vec<RawSqlRef> = Vec::new();
@@ -287,7 +141,7 @@ pub fn extract_java_calls_and_path_literals(
     while let Some(n) = stack.pop() {
         match n.kind() {
             "method_invocation" => {
-                if let Some(callee) = java_callee(n, source, &local_types, nodes) {
+                if let Some(callee) = java_callee(n, source, &receivers, &locals, nodes) {
                     attach_to_enclosing(start_pos(n), callee, nodes);
                 }
             }
@@ -301,7 +155,7 @@ pub fn extract_java_calls_and_path_literals(
                 }
             }
             "method_reference" => {
-                if let Some(name) = bound_method_reference(n, source, &local_types) {
+                if let Some(name) = bound_method_reference(n, source, &receivers) {
                     reference_function(start_pos(n), &name, nodes);
                 }
             }
@@ -339,7 +193,7 @@ pub fn extract_java_calls_and_path_literals(
 fn bound_method_reference(
     reference: Node<'_>,
     source: &[u8],
-    locals: &LocalTypes,
+    receivers: &FileReceivers,
 ) -> Option<String> {
     let last = reference.named_child_count().checked_sub(1)?;
     let known_shape = match last {
@@ -359,44 +213,61 @@ fn bound_method_reference(
     if receiver.kind() != "identifier" || member.kind() != "identifier" {
         return None;
     }
-    let ty = locals.lookup(start_pos(reference), receiver.utf8_text(source).ok()?)?;
-    Some(format!("{ty}.{}", member.utf8_text(source).ok()?))
+    match receivers.receiver_at(receiver)? {
+        Receiver::Known(ty) => Some(format!("{}.{}", ty.text, member.utf8_text(source).ok()?)),
+        Receiver::Unknown(_) => None,
+    }
 }
 
-/// Name of the innermost enclosing Class/Interface node at `pos`.
+/// Name of the innermost enclosing class, interface or enum at `pos`.
 fn enclosing_class_name(nodes: &[RawNode], pos: Pos) -> Option<String> {
-    let mut best: Option<((u32, i64), &str)> = None;
+    enclosing_type(nodes, pos).map(|n| n.name.clone())
+}
+
+/// Whether `kind` declares a type whose body owns its members and `this`:
+/// a class or record, an interface, an enum.
+fn is_type_declaration(kind: NodeKind) -> bool {
+    matches!(kind, NodeKind::Class | NodeKind::Interface | NodeKind::Enum)
+}
+
+/// The innermost class, interface or enum node whose span holds `pos`.
+fn enclosing_type(nodes: &[RawNode], pos: Pos) -> Option<&RawNode> {
+    let mut best: Option<((u32, i64), &RawNode)> = None;
     for n in nodes {
-        if !matches!(n.kind, NodeKind::Class | NodeKind::Interface) {
+        if !is_type_declaration(n.kind) {
             continue;
         }
         if span_holds(n.span, pos) {
             let w = span_width(n.span);
             if best.is_none_or(|(bw, _)| w < bw) {
-                best = Some((w, &n.name));
+                best = Some((w, n));
             }
         }
     }
-    best.map(|(_, name)| name.to_string())
+    best.map(|(_, n)| n)
 }
 
-/// First superclass in the enclosing class's heritage list.
+/// The declared type of field `var` of the class enclosing `pos`, when it is
+/// one plain class name. A field of a nested class is no field here.
+fn field_type<'n>(nodes: &'n [RawNode], pos: Pos, var: &str) -> Option<&'n str> {
+    let class = enclosing_type(nodes, pos)?;
+    nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Property && n.name == var)
+        .find(|n| {
+            enclosing_type(nodes, (n.span.0, n.span.1)).is_some_and(|c| std::ptr::eq(c, class))
+        })
+        .and_then(|n| n.type_annotation.as_deref())
+        .filter(|ty| !ty.is_empty() && ty.chars().all(|c| c.is_alphanumeric() || c == '_'))
+}
+
+/// First superclass in the enclosing class's heritage list. An enum or an
+/// interface in between is the enclosing type: an enum's superclass is
+/// `java.lang.Enum`, which no heritage entry names.
 fn enclosing_superclass(nodes: &[RawNode], pos: Pos) -> Option<String> {
-    let mut best_w = (u32::MAX, i64::MAX);
-    let mut result = None;
-    for n in nodes {
-        if !matches!(n.kind, NodeKind::Class) {
-            continue;
-        }
-        if span_holds(n.span, pos) {
-            let w = span_width(n.span);
-            if w < best_w {
-                best_w = w;
-                result = n.heritage.first().cloned();
-            }
-        }
-    }
-    result
+    enclosing_type(nodes, pos)
+        .filter(|n| n.kind == NodeKind::Class)
+        .and_then(|n| n.heritage.first().cloned())
 }
 
 #[cfg(test)]
@@ -410,6 +281,90 @@ mod tests {
         provider
             .parse_file(Path::new("Test.java"), src.as_bytes())
             .expect("parse_file")
+    }
+
+    fn all_calls(src: &str) -> Vec<String> {
+        parse(src).nodes.into_iter().flat_map(|n| n.calls).collect()
+    }
+
+    fn calls_of(src: &str, name: &str) -> Vec<String> {
+        parse(src)
+            .nodes
+            .into_iter()
+            .find(|n| n.name == name)
+            .unwrap_or_else(|| panic!("no node named {name}"))
+            .calls
+    }
+
+    #[test]
+    fn test_java_callee_enum_constant_lambda_parameter_hides_same_named_field() {
+        let calls = all_calls("enum E { K(z -> z.m()); C z; E(Object x) {} }");
+        assert!(calls.iter().any(|c| c == "z.m"), "{calls:?}");
+        assert!(!calls.iter().any(|c| c == "C.m"), "{calls:?}");
+    }
+
+    /// After `if (!(o instanceof A a)) return;` Java calls `A.m` on `a`; the
+    /// lowering does not model that flow scope, so the call keeps the bare
+    /// name and never takes the field's type.
+    #[test]
+    fn test_java_callee_flow_scoped_pattern_variable_never_takes_field_type() {
+        let calls = calls_of(
+            "class H { B a; void f(Object o) { if (!(o instanceof A a)) return; a.m(); } }",
+            "f",
+        );
+        assert!(calls.iter().any(|c| c == "a.m"), "{calls:?}");
+        assert!(!calls.iter().any(|c| c == "B.m"), "{calls:?}");
+    }
+
+    #[test]
+    fn test_java_callee_pattern_variable_types_only_the_true_branch() {
+        let calls = calls_of(
+            "class H { B a; void f(Object o) { if (o instanceof A a) { a.p(); } else { a.q(); } } }",
+            "f",
+        );
+        assert!(calls.iter().any(|c| c == "A.p"), "{calls:?}");
+        assert!(calls.iter().any(|c| c == "a.q"), "{calls:?}");
+        assert!(!calls.iter().any(|c| c == "B.q"), "{calls:?}");
+    }
+
+    /// A syntax error may hide a declaration of `y`, so `y.n()` takes no field type.
+    #[test]
+    fn test_java_callee_erroneous_method_unbound_receiver_takes_no_field_type() {
+        let calls = calls_of(
+            "class H { C y; void f() { A x # null; x.m(); y.n(); } }",
+            "f",
+        );
+        assert!(calls.iter().any(|c| c == "A.m"), "{calls:?}");
+        assert!(calls.iter().any(|c| c == "y.n"), "{calls:?}");
+    }
+
+    /// A field of a nested enum is no field of the outer class.
+    #[test]
+    fn test_java_callee_nested_enum_field_does_not_type_outer_receiver() {
+        let src = "class Order { enum Status { NEW; private final Badge label = null; void tag() { label.mark(); } } private Tag label; void show() { label.render(); } }";
+        let show = calls_of(src, "show");
+        assert!(show.iter().any(|c| c == "Tag.render"), "{show:?}");
+        let tag = calls_of(src, "tag");
+        assert!(tag.iter().any(|c| c == "Badge.mark"), "{tag:?}");
+    }
+
+    #[test]
+    fn test_java_callee_this_inside_enum_names_the_enum() {
+        let calls = calls_of(
+            "class Order { enum Status { NEW; void a() { this.b(); } void b() {} } }",
+            "a",
+        );
+        assert!(calls.iter().any(|c| c == "Status.b"), "{calls:?}");
+    }
+
+    /// An enum's superclass is `java.lang.Enum`, never the outer class's.
+    #[test]
+    fn test_java_callee_super_inside_enum_skips_outer_superclass() {
+        let calls = calls_of(
+            "class P extends Base { enum E { X; void a() { super.toString(); } } }",
+            "a",
+        );
+        assert_eq!(calls, vec!["toString".to_string()]);
     }
 
     /// `this.foo()` should be recorded as `ClassName.foo` in the enclosing

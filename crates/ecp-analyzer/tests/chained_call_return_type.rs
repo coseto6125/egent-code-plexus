@@ -1661,6 +1661,9 @@ fn test_resolve_call_php_same_namespace_cross_directory_unique_return_type_binds
     assert_binds_foo(&graph, "run", "bar");
 }
 
+/// Stands for: a return type that names two project classes types no
+/// receiver, so the call binds the one class with the member as the tagged
+/// untyped-member guess (PHP is a guess language).
 #[test]
 fn test_resolve_call_php_ambiguous_return_type_keeps_unique_member_fallback() {
     let graph = single(&PhpProvider::new().unwrap(), &[
@@ -1674,7 +1677,7 @@ fn test_resolve_call_php_ambiguous_return_type_keeps_unique_member_fallback() {
         .collect();
     assert_eq!(bars.len(), 1, "all targets: {:?}", targets(&graph, "run"));
     assert_eq!(bars[0].file, "src/two/Foo.php");
-    assert_eq!(bars[0].confidence, 0.7);
+    assert_eq!(bars[0].confidence, 0.55);
 }
 
 #[test]

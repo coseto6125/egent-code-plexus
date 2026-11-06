@@ -1,29 +1,35 @@
 //! Ruby receiver-type binding for method call sites.
 //!
 //! Ruby's dynamic dispatch makes full receiver inference undecidable for
-//! arbitrary `obj.method` calls.  This module handles the two statically
+//! arbitrary `obj.method` calls.  This module handles the statically
 //! resolvable cases:
 //!
 //! - `self.method` inside a `class Foo … end` or `module Foo … end` block
 //!   → receiver = the enclosing class/module name (`Foo.method`)
 //! - `Constant.method` — a constant-named receiver (singleton method on a
 //!   known class) → receiver = `Constant.method`
+//! - `x.method` with `x` a local the receiver core ([`super::receiver_lower`])
+//!   proves was built with `Const.new` on every path → `Const.method`; a local
+//!   the paths disagree on is a [`CallSite::unproven_member`]
 //!
 //! A receiver rooted in a constant (`Shop::Item.save`, `Shop::Item.new.save`)
 //! or a top-level `self` keeps the bare method name. Any other receiver
-//! (`obj.method`, `obj&.method`, `a.b.method`) is untyped and emits
+//! (`obj.method`, `obj&.method`, `a.b.method`) with no evidence is untyped and emits
 //! [`CallSite::untyped_member`], so the call never binds the caller's own
 //! or inherited `method` the way an implicit-self `method` does.
 
 use super::path_literals::{
     build_raw_path_literal, enclosing_symbol_and_owner_pub, extract_ruby_string_value,
 };
+use super::receiver_lower::RubyLowering;
 use crate::calls::{
     attach_to_enclosing, range_width, reference_function, start_pos, Pos, PosRange,
 };
-use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
+use crate::receiver::{analyze_file, FileReceivers};
+use ecp_core::analyzer::types::{BlindSpot, CallSite, RawNode, RawPathLiteral, RawSqlRef};
 use ecp_core::graph::NodeKind;
 use rustc_hash::FxHashMap;
+use std::path::Path;
 use tree_sitter::Node;
 
 /// Enclosing class/module context built from the parsed node list.
@@ -65,8 +71,18 @@ pub fn extract_ruby_calls_and_path_literals(
     root: Node<'_>,
     source: &[u8],
     nodes: &mut [RawNode],
+    path: &Path,
+    blind_spots: &mut Vec<BlindSpot>,
 ) -> (Vec<RawPathLiteral>, Vec<RawSqlRef>) {
     let ctx = ClassContext::from_nodes(nodes);
+    // The only evidence is a `Const.new` assignment: a file without one has
+    // no local worth lowering.
+    let mut receivers = if source.windows(4).any(|window| window == b".new") {
+        analyze_file(&RubyLowering, &(), root, source, path)
+    } else {
+        FileReceivers::default()
+    };
+    blind_spots.append(&mut receivers.blind_spots);
     let mut receiver_types = ReceiverTypes::new(source, &ctx);
     let mut path_literals: Vec<RawPathLiteral> = Vec::new();
     let mut sql_refs: Vec<RawSqlRef> = Vec::new();
@@ -74,7 +90,7 @@ pub fn extract_ruby_calls_and_path_literals(
     while let Some(n) = stack.pop() {
         match n.kind() {
             "call" => {
-                if let Some(callee) = ruby_callee(n, source, &mut receiver_types) {
+                if let Some(callee) = ruby_callee(n, source, &mut receiver_types, &receivers) {
                     attach_to_enclosing(start_pos(n), callee, nodes);
                 }
                 if let Some(name) = typed_method_object(n, source, &mut receiver_types) {
@@ -115,6 +131,7 @@ fn ruby_callee(
     call: Node<'_>,
     source: &[u8],
     receiver_types: &mut ReceiverTypes<'_>,
+    receivers: &FileReceivers,
 ) -> Option<String> {
     let method_node = call.child_by_field_name("method")?;
     let method_name = method_node.utf8_text(source).ok()?;
@@ -136,6 +153,11 @@ fn ruby_callee(
                     return Some(format!("{}.new", path.trim_start_matches("::")));
                 }
             }
+            if receiver.kind() == "identifier" {
+                if let Some(local) = receivers.receiver_at(receiver) {
+                    return Some(local.call_entry(method_name));
+                }
+            }
             Some(match receiver_types.resolve(receiver) {
                 ReceiverType::Typed(inferred_type) => format!("{inferred_type}.{method_name}"),
                 ReceiverType::TypeRooted => method_name.to_string(),
@@ -143,7 +165,9 @@ fn ruby_callee(
                 // resolver types it by the callee's return type or class.
                 ReceiverType::Unknown if receiver.kind() == "call" => {
                     let untyped = CallSite::untyped_member(method_name);
-                    match CallSite::nested_chain(|| ruby_callee(receiver, source, receiver_types)) {
+                    match CallSite::nested_chain(|| {
+                        ruby_callee(receiver, source, receiver_types, receivers)
+                    }) {
                         Some(inner) => CallSite::chained_member(&inner, &untyped),
                         None => untyped,
                     }

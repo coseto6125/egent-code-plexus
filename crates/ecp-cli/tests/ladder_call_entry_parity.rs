@@ -40,6 +40,9 @@ use strict_parity::{run, snapshot, Edit, Observed, Scenario, Snapshot};
 type Files<'a> = &'a [(&'a str, &'a str)];
 
 const GLOBAL: &[f32] = &[0.7];
+/// The tagged untyped-member guess: a guess language binds an untyped
+/// receiver's member by name at this confidence only.
+const UNTYPED_GUESS: &[f32] = &[0.55];
 const IMPORT_SCOPED: &[f32] = &[0.95];
 const QUALIFIER_SCOPED: &[f32] = &[0.85];
 const SAME_FILE: &[f32] = &[1.0];
@@ -61,7 +64,7 @@ struct Case {
 
 /// Python. `Repo` is a from-imported type: `Repo.make()` binds its member,
 /// not `lib/extra.py`'s `make`. `obj.save()` is untyped: the one `save`, a
-/// method, passes the post-filter. Two classes define `close`: no edge.
+/// method, passes the post-filter as the tagged guess. Two classes define `close`: no edge.
 /// `Widget()` takes the constructor fallback to `__init__`.
 const PYTHON: Case = Case {
     name: "ladder_call_entry_python",
@@ -88,7 +91,7 @@ const PYTHON: Case = Case {
     dirty: "app/main.py",
     expected: &[
         ("typed", &[("make", "pkg/repo.py", ANY_TIER)]),
-        ("untyped", &[("save", "pkg/repo.py", GLOBAL)]),
+        ("untyped", &[("save", "pkg/repo.py", UNTYPED_GUESS)]),
         ("two", &[]),
         ("construct", &[("__init__", "pkg/widget.py", ANY_TIER)]),
     ],

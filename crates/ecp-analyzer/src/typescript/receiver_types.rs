@@ -20,6 +20,7 @@ use super::path_literals::{
     build_raw_path_literal, enclosing_symbol_and_owner_pub, strip_ts_string_value,
     strip_ts_template_value,
 };
+use super::receiver_lower::TsLowering;
 use crate::calls::{
     attach_to_enclosing_span, is_call_callee, new_expression_call, node_range, range_width,
     reference_function_span, start_pos, unparenthesized, CallSiteIndex, Pos, PosRange,
@@ -32,20 +33,32 @@ use crate::framework_helpers::{
     enclosing_class, innermost_class, is_class_like, js_ts_first_arg_is_literal_string, node_span,
     Span,
 };
-use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
+use crate::receiver::lattice::UnknownCause;
+use crate::receiver::{analyze_file, FileReceivers, Receiver};
+use ecp_core::analyzer::types::{BlindSpot, CallSite, RawNode, RawPathLiteral, RawSqlRef};
 use ecp_core::graph::NodeKind;
 use std::cell::OnceCell;
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use tree_sitter::Node;
 
-/// Map of function scopes (by position range) to their `var → type` bindings.
+/// Map of function scopes (by position range) to their `var → type` bindings,
+/// and the receiver states the receiver core solved for the file. The flat
+/// map answers only a receiver the core did not track: a function it left to
+/// this path.
 #[derive(Debug, Default)]
 pub struct LocalTypes {
     scopes: Vec<(PosRange, HashMap<String, String>)>,
     bindings: Vec<(PosRange, HashSet<String>)>,
+    receivers: FileReceivers,
 }
 
 impl LocalTypes {
+    /// The receiver-budget blind spots of the file, left behind once.
+    pub fn take_blind_spots(&mut self) -> Vec<BlindSpot> {
+        std::mem::take(&mut self.receivers.blind_spots)
+    }
+
     /// Smallest enclosing scope that declares `var`.
     fn lookup(&self, pos: Pos, var: &str) -> Option<&str> {
         self.nearest_typed(pos, var).map(|(_, ty)| ty)
@@ -91,7 +104,9 @@ impl LocalTypes {
 
 /// Walk every `function_declaration` / `method_definition` / `arrow_function` node
 /// and collect typed bindings plus every parameter and local declaration name.
-pub fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
+///
+/// `path` is the file the receiver-budget blind spots quote.
+pub fn collect_local_types(root: Node<'_>, source: &[u8], path: &Path) -> LocalTypes {
     let mut scopes: Vec<(PosRange, HashMap<String, String>)> = Vec::new();
     let mut bindings: Vec<(PosRange, HashSet<String>)> = Vec::new();
     let mut stack: Vec<Node<'_>> = vec![root];
@@ -138,7 +153,12 @@ pub fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
             stack.push(child);
         }
     }
-    LocalTypes { scopes, bindings }
+    let receivers = analyze_file(&TsLowering, &(), root, source, path);
+    LocalTypes {
+        scopes,
+        bindings,
+        receivers,
+    }
 }
 
 /// Collect typed parameters from a `formal_parameters` node.
@@ -842,9 +862,14 @@ pub(crate) fn bound_method_value(
         }
         this_class(member, facts)?.to_string()
     } else {
-        locals?
-            .lookup_visible(start_pos(member), object.utf8_text(source).ok()?)?
-            .to_string()
+        let locals = locals?;
+        match locals.receivers.receiver_at(object) {
+            Some(Receiver::Known(ty)) => ty.text.to_string(),
+            Some(Receiver::Unknown(_)) => return None,
+            None => locals
+                .lookup_visible(start_pos(member), object.utf8_text(source).ok()?)?
+                .to_string(),
+        }
     };
     Some(format!("{ty}.{property}"))
 }
@@ -879,8 +904,20 @@ fn ts_callee_name(
                     if let Some(callee) = dynamic.member_callee(pos, obj_name, prop_name) {
                         return Some(callee);
                     }
-                    if let Some(ty) = locals.lookup(pos, obj_name) {
-                        return Some(format!("{ty}.{prop_name}"));
+                    match locals.receivers.receiver_at(obj) {
+                        Some(Receiver::Known(ty)) => {
+                            return Some(format!("{}.{prop_name}", ty.text));
+                        }
+                        // No evidence keeps the qualified name below; a
+                        // receiver the paths disagree on or a closure may
+                        // rewrite is the unproven guess.
+                        Some(Receiver::Unknown(UnknownCause::NoEvidence)) => {}
+                        Some(unproven) => return Some(unproven.call_entry(prop_name)),
+                        None => {
+                            if let Some(ty) = locals.lookup(pos, obj_name) {
+                                return Some(format!("{ty}.{prop_name}"));
+                            }
+                        }
                     }
                     // Unknown type — emit qualified name so the resolver can try.
                     Some(format!("{obj_name}.{prop_name}"))

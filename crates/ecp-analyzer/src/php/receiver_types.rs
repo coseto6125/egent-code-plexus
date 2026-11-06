@@ -1,28 +1,29 @@
 //! PHP receiver-type binding for method call sites.
 //!
-//! Handles three patterns that PHP 7+ makes statically knowable:
-//!
 //! - `$this->method()`  → receiver = enclosing class name
 //! - `parent::method()` → receiver = first heritage class of the enclosing class
 //! - `self::method()` / `static::method()` → receiver = enclosing class name
 //!   (`static` is late-static-binding; for graph purposes we treat it the
 //!   same as `self` since the graph is per-file and the resolver will follow
 //!   the concrete class).
-//!
-//! Typed `$var->method()` where `$var` is not `$this` is intentionally left
-//! unbound: PHP 7 property/param type hints require a second pass to propagate
-//! types through the scope and are deferred to a later improvement task. It
-//! is recorded as a [`CallSite::untyped_member`].
+//! - `$var->method()` and the `[$var, 'method']` callable array → the type
+//!   the receiver core ([`super::receiver_lower`]) proves `$var` holds on
+//!   every path: a typed parameter, `new A()`, a caught class. A variable with
+//!   no evidence is a [`CallSite::untyped_member`]; one the paths disagree on
+//!   is a [`CallSite::unproven_member`].
 
 use super::path_literals::{
     build_raw_path_literal, enclosing_symbol_and_owner_pub, extract_php_string_value,
 };
+use super::receiver_lower::{is_function_like, PhpLowering};
 use crate::calls::{
     attach_to_enclosing, construction_call, range_width, reference_function, start_pos, Pos,
     PosRange,
 };
-use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
+use crate::receiver::{analyze_file, FileReceivers, Receiver};
+use ecp_core::analyzer::types::{BlindSpot, CallSite, RawNode, RawPathLiteral, RawSqlRef};
 use ecp_core::graph::NodeKind;
+use std::path::Path;
 use tree_sitter::Node;
 
 /// Enclosing-class context built by a pre-walk over the node list.
@@ -112,8 +113,18 @@ pub fn extract_php_calls_and_path_literals<'t>(
     root: Node<'t>,
     source: &[u8],
     nodes: &mut [RawNode],
+    path: &Path,
+    blind_spots: &mut Vec<BlindSpot>,
 ) -> (Vec<RawPathLiteral>, Vec<RawSqlRef>, Vec<Node<'t>>) {
     let ctx = ClassContext::from_nodes(nodes);
+    // Every receiver occurrence is an arrow: a file without one has no
+    // function worth lowering.
+    let mut receivers = if source.windows(2).any(|pair| pair == b"->") {
+        analyze_file(&PhpLowering, &(), root, source, path)
+    } else {
+        FileReceivers::default()
+    };
+    blind_spots.append(&mut receivers.blind_spots);
     let mut path_literals: Vec<RawPathLiteral> = Vec::new();
     let mut sql_refs: Vec<RawSqlRef> = Vec::new();
     let mut dynamic_calls: Vec<Node<'t>> = Vec::new();
@@ -139,7 +150,7 @@ pub fn extract_php_calls_and_path_literals<'t>(
                 }
             }
             "member_call_expression" | "nullsafe_member_call_expression" => {
-                if let Some(callee) = php_member_callee(n, source, &ctx) {
+                if let Some(callee) = php_member_callee(n, source, &ctx, &receivers) {
                     attach_call_or_reference(n, callee, nodes);
                 } else if has_runtime_name(n) {
                     dynamic_calls.push(n);
@@ -282,246 +293,6 @@ fn local_function_name(name: &str, namespace: Option<&str>) -> String {
     }
 }
 
-/// The class a parameter named `var` is declared with, in the innermost
-/// function around `node` that declares it, as long as no function body on
-/// the way assigns `var` and every closure on the way captures it. `None` for
-/// an undeclared, reassigned, uncaptured, primitive, union or `self` /
-/// `static` / `parent` type.
-fn parameter_class(node: Node<'_>, var: &str, source: &[u8]) -> Option<String> {
-    let mut scopes = Vec::new();
-    let mut current = node.parent();
-    let declared = loop {
-        let n = current?;
-        current = n.parent();
-        if !matches!(
-            n.kind(),
-            "method_declaration" | "function_definition" | "anonymous_function" | "arrow_function"
-        ) {
-            continue;
-        }
-        let params = n.child_by_field_name("parameters")?;
-        let mut cursor = params.walk();
-        let declared = params.named_children(&mut cursor).find(|p| {
-            matches!(
-                p.kind(),
-                "simple_parameter" | "property_promotion_parameter"
-            ) && p
-                .child_by_field_name("name")
-                .and_then(|v| v.utf8_text(source).ok())
-                == Some(var)
-        });
-        scopes.push(n);
-        if let Some(declared) = declared {
-            break declared;
-        }
-        // `fn` captures by value and a `use` list names what a `function`
-        // closure captures; a named function or method sees no outer
-        // variable.
-        let crosses = match n.kind() {
-            "arrow_function" => true,
-            "anonymous_function" => captures_variable(n, var, source),
-            _ => false,
-        };
-        if !crosses {
-            return None;
-        }
-    };
-    let ty = declared.child_by_field_name("type")?;
-    let nullable = ty.kind() == "optional_type"
-        || declared
-            .child_by_field_name("default_value")
-            .is_some_and(|d| d.kind() == "null");
-    let ty = if ty.kind() == "optional_type" {
-        ty.named_child(0)?
-    } else {
-        ty
-    };
-    if ty.kind() != "named_type" {
-        return None;
-    }
-    let class = qualified_ident(ty.named_child(0)?.utf8_text(source).ok()?)?;
-    if matches!(class, "self" | "static" | "parent") {
-        return None;
-    }
-    // A closure that captures `var` by reference shares it with the scope
-    // around it and runs at any time, so a write anywhere in either scope
-    // counts. A capture by value copies the variable where the closure is
-    // written, so the scope around it counts only its earlier writes.
-    let shares: Vec<bool> = scopes
-        .iter()
-        .map(|&scope| captures_by_ref(scope, var, source))
-        .collect();
-    let reassigned = scopes.iter().enumerate().any(|(i, &scope)| {
-        let scan = WriteScan {
-            coalesce_writes: nullable,
-            anywhere: shares[i] || (i > 0 && shares[i - 1]),
-        };
-        assigns_variable(scope, var, source, node, scan)
-    });
-    (!reassigned).then(|| class.to_string())
-}
-
-fn any_named_child<'t>(node: Node<'t>, pred: impl FnMut(Node<'t>) -> bool) -> bool {
-    let mut cursor = node.walk();
-    let found = node.named_children(&mut cursor).any(pred);
-    found
-}
-
-fn use_clause(closure: Node<'_>) -> Option<Node<'_>> {
-    let mut cursor = closure.walk();
-    let clause = closure
-        .named_children(&mut cursor)
-        .find(|c| c.kind() == "anonymous_function_use_clause");
-    clause
-}
-
-/// Whether the `use (..)` list of a closure names `var`, by value or by
-/// reference.
-fn captures_variable(closure: Node<'_>, var: &str, source: &[u8]) -> bool {
-    use_clause(closure)
-        .is_some_and(|clause| any_named_child(clause, |c| names_variable(c, var, source)))
-}
-
-/// Whether the `use (..)` list of a closure names `var` by reference: `&$o`.
-fn captures_by_ref(closure: Node<'_>, var: &str, source: &[u8]) -> bool {
-    use_clause(closure).is_some_and(|clause| {
-        any_named_child(clause, |c| {
-            c.kind() == "by_ref" && names_variable(c, var, source)
-        })
-    })
-}
-
-/// Whether `target` is, or destructures into, the variable `var`:
-/// `$o`, `[$o, $p]`, `&$o`, `$k => $o`. Also tests a `use ($o)` capture.
-fn names_variable(target: Node<'_>, var: &str, source: &[u8]) -> bool {
-    match target.kind() {
-        "variable_name" => target.utf8_text(source).ok() == Some(var),
-        "list_literal"
-        | "array_creation_expression"
-        | "array_element_initializer"
-        | "by_ref"
-        | "pair" => any_named_child(target, |c| names_variable(c, var, source)),
-        _ => false,
-    }
-}
-
-/// The outermost loop between `at` and `function`, as a byte range: a write
-/// anywhere in it can run before `at` on a later pass.
-fn enclosing_loop_range(at: Node<'_>, function: Node<'_>) -> Option<(usize, usize)> {
-    let mut outermost = None;
-    let mut current = at.parent();
-    while let Some(n) = current.filter(|n| n.id() != function.id()) {
-        if matches!(
-            n.kind(),
-            "for_statement" | "foreach_statement" | "while_statement" | "do_statement"
-        ) {
-            outermost = Some((n.start_byte(), n.end_byte()));
-        }
-        current = n.parent();
-    }
-    outermost
-}
-
-/// How `assigns_variable` judges a write.
-#[derive(Clone, Copy)]
-struct WriteScan {
-    /// `??=` gives a null parameter a new value, so it counts unless the
-    /// declared type excludes null.
-    coalesce_writes: bool,
-    /// A write counts wherever it sits, not only before the use.
-    anywhere: bool,
-}
-
-/// Whether the body of `function` gives `var` a new value before `at` runs:
-/// an assignment, an update, a `foreach` target, a `catch` name, `global`,
-/// `static`, `unset`, or a closure that captures it by reference. A write
-/// after `at` does not count, unless a loop around `at` repeats it or
-/// `scan.anywhere` is set. A `catch` binds where its variable is written, so
-/// it counts for a use inside its own body. The body of a nested function,
-/// closure or class is its own scope.
-fn assigns_variable(
-    function: Node<'_>,
-    var: &str,
-    source: &[u8],
-    at: Node<'_>,
-    scan: WriteScan,
-) -> bool {
-    let Some(body) = function.child_by_field_name("body") else {
-        return false;
-    };
-    let looped = enclosing_loop_range(at, function);
-    let before_use = |n: Node<'_>| {
-        scan.anywhere
-            || n.end_byte() <= at.start_byte()
-            || looped.is_some_and(|(start, end)| start <= n.start_byte() && n.end_byte() <= end)
-    };
-    let mut stack = vec![body];
-    while let Some(n) = stack.pop() {
-        let write = match n.kind() {
-            "function_definition"
-            | "method_declaration"
-            | "class_declaration"
-            | "arrow_function" => {
-                continue;
-            }
-            "anonymous_function" => {
-                // The closure that holds `at` is the capture being typed, not
-                // a write to it.
-                let holds_use = n.start_byte() <= at.start_byte() && at.end_byte() <= n.end_byte();
-                if !holds_use && captures_by_ref(n, var, source) && before_use(n) {
-                    return true;
-                }
-                continue;
-            }
-            "assignment_expression" | "reference_assignment_expression" => n
-                .child_by_field_name("left")
-                .is_some_and(|left| names_variable(left, var, source))
-                .then_some(n),
-            "augmented_assignment_expression" => {
-                let coalesces = n
-                    .child_by_field_name("operator")
-                    .is_some_and(|o| o.kind() == "??=");
-                ((scan.coalesce_writes || !coalesces)
-                    && n.child_by_field_name("left")
-                        .is_some_and(|l| names_variable(l, var, source)))
-                .then_some(n)
-            }
-            "update_expression" => n
-                .child_by_field_name("argument")
-                .is_some_and(|argument| names_variable(argument, var, source))
-                .then_some(n),
-            "catch_clause" => n
-                .child_by_field_name("name")
-                .filter(|name| names_variable(*name, var, source)),
-            "static_variable_declaration" => n
-                .child_by_field_name("name")
-                .is_some_and(|name| names_variable(name, var, source))
-                .then_some(n),
-            "global_declaration" | "unset_statement" => {
-                any_named_child(n, |c| names_variable(c, var, source)).then_some(n)
-            }
-            // The iterated expression is the first child, the body the field.
-            "foreach_statement" => {
-                let body = n.child_by_field_name("body");
-                let mut cursor = n.walk();
-                let found = n
-                    .named_children(&mut cursor)
-                    .skip(1)
-                    .filter(|c| Some(*c) != body)
-                    .any(|c| names_variable(c, var, source));
-                found.then_some(n)
-            }
-            _ => None,
-        };
-        if write.is_some_and(before_use) {
-            return true;
-        }
-        let mut cursor = n.walk();
-        stack.extend(n.named_children(&mut cursor));
-    }
-    false
-}
-
 /// A callable that `call_user_func` / `call_user_func_array` names with a
 /// literal, so the call is as static as the ordinary call of the same shape.
 pub(super) enum LiteralCallable {
@@ -543,7 +314,7 @@ fn is_ident(s: &str) -> bool {
 
 /// `Foo` / `\App\Foo` / `App\Foo` -> `App\Foo`; `None` for anything that is
 /// no name (spaces, `$`, empty).
-fn qualified_ident(s: &str) -> Option<&str> {
+pub(super) fn qualified_ident(s: &str) -> Option<&str> {
     let s = s.strip_prefix('\\').unwrap_or(s);
     s.split('\\').all(is_ident).then_some(s)
 }
@@ -559,6 +330,26 @@ fn string_literal_text(n: Node<'_>, source: &[u8]) -> Option<String> {
     Some(inner.replace("\\\\", "\\"))
 }
 
+/// The class `variable` holds where a callable array names it, as the
+/// receiver core proves it over the outermost function around the array. The
+/// name scan and `call_user_func` read callable arrays without the file's
+/// receiver table, so this runs the one function on demand.
+fn array_receiver_class(variable: Node<'_>, source: &[u8]) -> Option<String> {
+    let mut outermost = None;
+    let mut current = variable.parent();
+    while let Some(n) = current {
+        if is_function_like(n.kind()) {
+            outermost = Some(n);
+        }
+        current = n.parent();
+    }
+    let receivers = analyze_file(&PhpLowering, &(), outermost?, source, Path::new(""));
+    match receivers.receiver_at(variable)? {
+        Receiver::Known(ty) => Some(ty.text.to_string()),
+        Receiver::Unknown(_) => None,
+    }
+}
+
 fn class_of_array_element(n: Node<'_>, source: &[u8]) -> Option<LiteralCallable> {
     let method = String::new();
     match n.kind() {
@@ -571,7 +362,7 @@ fn class_of_array_element(n: Node<'_>, source: &[u8]) -> Option<LiteralCallable>
             Some(LiteralCallable::This { method })
         }
         "variable_name" => {
-            let class = parameter_class(n, n.utf8_text(source).ok()?, source)?;
+            let class = array_receiver_class(n, source)?;
             Some(LiteralCallable::Static { class, method })
         }
         "class_constant_access_expression" => {
@@ -835,10 +626,16 @@ fn php_object_creation_call(creation: Node<'_>, source: &[u8]) -> Option<String>
 }
 
 /// Resolve the callee for `$obj->method(args)` and `$obj?->method(args)`.
-/// Only `$this` is bound to the enclosing class; other receivers give an
-/// untyped member call, which resolves by the method name and never binds a
-/// `use function` import. `None` for a runtime method name.
-fn php_member_callee(call: Node<'_>, source: &[u8], ctx: &ClassContext) -> Option<String> {
+/// `$this` is bound to the enclosing class; any other variable takes the
+/// answer of the receiver core (`receivers`), and a variable it did not track
+/// gives an untyped member call, which resolves by the method name and never
+/// binds a `use function` import. `None` for a runtime method name.
+fn php_member_callee(
+    call: Node<'_>,
+    source: &[u8],
+    ctx: &ClassContext,
+    receivers: &FileReceivers,
+) -> Option<String> {
     let name_node = call
         .child_by_field_name("name")
         .filter(|n| !is_runtime_name(*n))?;
@@ -855,13 +652,16 @@ fn php_member_callee(call: Node<'_>, source: &[u8], ctx: &ClassContext) -> Optio
                 }
             }
         }
+        if let Some(receiver) = receivers.receiver_at(obj_node) {
+            return Some(receiver.call_entry(method_name));
+        }
     }
 
     let untyped = CallSite::untyped_member(method_name);
     // `Foo::create()->bar()`: the resolver types a call receiver by the
     // callee's return type (`self` / `static` included).
     Some(
-        match CallSite::nested_chain(|| php_receiver_call(obj_node, source, ctx)) {
+        match CallSite::nested_chain(|| php_receiver_call(obj_node, source, ctx, receivers)) {
             Some(inner) => CallSite::chained_member(&inner, &untyped),
             None => untyped,
         },
@@ -871,11 +671,18 @@ fn php_member_callee(call: Node<'_>, source: &[u8], ctx: &ClassContext) -> Optio
 /// The `calls` entry of a call written as a receiver (`make()->m()`,
 /// `Foo::create()->m()`, `$a->b()->m()`, `(new Foo)->m()`), the same entry
 /// that call records for itself. `None` for any other receiver.
-fn php_receiver_call(obj: Node<'_>, source: &[u8], ctx: &ClassContext) -> Option<String> {
+fn php_receiver_call(
+    obj: Node<'_>,
+    source: &[u8],
+    ctx: &ClassContext,
+    receivers: &FileReceivers,
+) -> Option<String> {
     match obj.kind() {
-        "parenthesized_expression" => php_receiver_call(obj.named_child(0)?, source, ctx),
+        "parenthesized_expression" => {
+            php_receiver_call(obj.named_child(0)?, source, ctx, receivers)
+        }
         "member_call_expression" | "nullsafe_member_call_expression" => {
-            php_member_callee(obj, source, ctx)
+            php_member_callee(obj, source, ctx, receivers)
         }
         "scoped_call_expression" => php_scoped_callee(obj, source, ctx),
         "function_call_expression" => crate::calls::callee_name_from(obj, source),

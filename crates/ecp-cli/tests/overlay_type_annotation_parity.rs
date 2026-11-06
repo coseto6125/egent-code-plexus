@@ -29,7 +29,7 @@ use crate::parity;
 use ecp_analyzer::resolution::builder::GraphBuilder;
 use ecp_cli::session::overlay_reader::{accepted_fragments, decode_view_inputs};
 use ecp_cli::session::overlay_writer::write_dirty_fragments_from_graphs;
-use ecp_core::analyzer::type_ladder::TYPE_ANNOTATION_REASON;
+use ecp_core::analyzer::type_ladder::{TYPE_ANNOTATION_REASON, TYPE_ARGUMENT_REASON};
 use ecp_core::analyzer::types::LocalGraph;
 use ecp_core::graph::{ArchivedZeroCopyGraph, RelType};
 use ecp_core::session::merged::MergedGraph;
@@ -624,5 +624,329 @@ fn test_view_inputs_fragments_written_by_0_17_3_refused_then_reparse_serves_rein
 #[test]
 fn test_overlay_type_annotation_generic_params_match_reindex() {
     let failures = mismatches(&generic_cases());
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+// ------------------------- A10 / A15a / A15b: field type arguments
+
+/// One language's field fixture: a clean part, and the dirty file `path` in
+/// two forms. `Box` names its class type parameter `Token` in `generic`
+/// (the field binds nothing) and has none in `plain` (the field binds the
+/// project class `Token`). `rows_*` are the reindex rows out of `path`.
+struct FieldLang {
+    lang: &'static str,
+    clean: &'static [(&'static str, &'static str)],
+    path: &'static str,
+    generic: &'static str,
+    plain: &'static str,
+    rows_generic: &'static [Row],
+    rows_plain: &'static [Row],
+}
+
+const FIELD_LANGS: &[FieldLang] = &[
+    FieldLang {
+        lang: "Java",
+        clean: &[
+            ("Token.java", "class Token {}\n"),
+            ("Holder.java", "import java.util.List;\nclass Holder {\n    List<Token> tokens;\n}\n"),
+        ],
+        path: "Box.java",
+        generic: "import java.util.List;\nclass Box<Token> {\n    List<Token> items;\n}\n",
+        plain: "import java.util.List;\nclass Box {\n    List<Token> items;\n}\n",
+        rows_generic: &[],
+        rows_plain: &[("items", "Token.java", "Token")],
+    },
+    FieldLang {
+        lang: "C#",
+        clean: &[
+            ("Token.cs", "class Token {}\n"),
+            ("Holder.cs", "using System.Collections.Generic;\nclass Holder {\n    List<Token> tokens;\n}\n"),
+        ],
+        path: "Box.cs",
+        generic: "using System.Collections.Generic;\nclass Box<Token> {\n    List<Token> items;\n}\n",
+        plain: "using System.Collections.Generic;\nclass Box {\n    List<Token> items;\n}\n",
+        rows_generic: &[],
+        rows_plain: &[("items", "Token.cs", "Token")],
+    },
+    FieldLang {
+        lang: "Kotlin",
+        clean: &[
+            ("Token.kt", "class Token\n"),
+            ("Holder.kt", "class Holder {\n    val tokens: List<Token> = listOf()\n}\n"),
+        ],
+        path: "Box.kt",
+        generic: "class Box<Token> {\n    val items: List<Token> = listOf()\n}\n",
+        plain: "class Box {\n    val items: List<Token> = listOf()\n}\n",
+        rows_generic: &[],
+        rows_plain: &[("items", "Token.kt", "Token")],
+    },
+    FieldLang {
+        lang: "TypeScript",
+        clean: &[
+            ("token.ts", "export class Token {}\n"),
+            ("holder.ts", "import { Token } from './token';\nexport class Holder {\n  tokens: Array<Token> = [];\n}\n"),
+        ],
+        path: "box.ts",
+        generic: "export class Box<Token> {\n  items: Array<Token> = [];\n}\n",
+        plain: "import { Token } from './token';\nexport class Box {\n  items: Array<Token> = [];\n}\n",
+        rows_generic: &[],
+        rows_plain: &[("items", "token.ts", "Token")],
+    },
+    FieldLang {
+        lang: "Swift",
+        clean: &[
+            ("Token.swift", "class Token {}\n"),
+            ("Holder.swift", "class Holder {\n    var tokens: Array<Token> = []\n}\n"),
+        ],
+        path: "Box.swift",
+        generic: "class Box<Token> {\n    var items: Array<Token> = []\n}\n",
+        plain: "class Box {\n    var items: Array<Token> = []\n}\n",
+        rows_generic: &[],
+        rows_plain: &[("items", "Token.swift", "Token")],
+    },
+    FieldLang {
+        lang: "Python",
+        clean: &[
+            ("tokens.py", "class Token: ...\n"),
+            ("holder.py", "from tokens import Token\n\nclass Holder:\n    tokens: list[Token]\n"),
+        ],
+        path: "box.py",
+        generic: "class Box[Token]:\n    items: list[Token]\n",
+        plain: "from tokens import Token\n\nclass Box:\n    items: list[Token]\n",
+        rows_generic: &[],
+        rows_plain: &[("items", "tokens.py", "Token")],
+    },
+    FieldLang {
+        lang: "Rust",
+        clean: &[],
+        path: "src/lib.rs",
+        generic: "pub struct Token;\npub struct Bag<Token> {\n    items: Vec<Token>,\n}\npub struct Holder {\n    tokens: Vec<Token>,\n}\n",
+        plain: "pub struct Token;\npub struct Bag {\n    items: Vec<Token>,\n}\npub struct Holder {\n    tokens: Vec<Token>,\n}\n",
+        rows_generic: &[("tokens", "src/lib.rs", "Token")],
+        rows_plain: &[
+            ("items", "src/lib.rs", "Token"),
+            ("tokens", "src/lib.rs", "Token"),
+        ],
+    },
+    FieldLang {
+        lang: "Dart",
+        clean: &[],
+        path: "lib/app.dart",
+        generic: "class Token {}\nclass Box<Token> {\n  List<Token> items = [];\n}\nclass Holder {\n  List<Token> tokens = [];\n}\n",
+        plain: "class Token {}\nclass Box {\n  List<Token> items = [];\n}\nclass Holder {\n  List<Token> tokens = [];\n}\n",
+        rows_generic: &[("tokens", "lib/app.dart", "Token")],
+        rows_plain: &[
+            ("items", "lib/app.dart", "Token"),
+            ("tokens", "lib/app.dart", "Token"),
+        ],
+    },
+    FieldLang {
+        lang: "Go",
+        clean: &[],
+        path: "main.go",
+        generic: "package main\n\ntype Token struct{}\ntype List[E any] struct{}\ntype Box[Token any] struct {\n\titems List[Token]\n}\ntype Holder struct {\n\ttokens List[Token]\n}\n",
+        plain: "package main\n\ntype Token struct{}\ntype List[E any] struct{}\ntype Box struct {\n\titems List[Token]\n}\ntype Holder struct {\n\ttokens List[Token]\n}\n",
+        rows_generic: &[
+            ("items", "main.go", "List"),
+            ("tokens", "main.go", "List"),
+            ("tokens", "main.go", "Token"),
+        ],
+        rows_plain: &[
+            ("items", "main.go", "List"),
+            ("items", "main.go", "Token"),
+            ("tokens", "main.go", "List"),
+            ("tokens", "main.go", "Token"),
+        ],
+    },
+    FieldLang {
+        lang: "C++",
+        clean: &[],
+        path: "tokens.hpp",
+        generic: "#include <vector>\nstruct Token {};\ntemplate <class Token>\nstruct Box {\n    std::vector<Token> items;\n};\nstruct Holder {\n    std::vector<Token> tokens;\n};\n",
+        plain: "#include <vector>\nstruct Token {};\nstruct Box {\n    std::vector<Token> items;\n};\nstruct Holder {\n    std::vector<Token> tokens;\n};\n",
+        rows_generic: &[("tokens", "tokens.hpp", "Token")],
+        rows_plain: &[
+            ("items", "tokens.hpp", "Token"),
+            ("tokens", "tokens.hpp", "Token"),
+        ],
+    },
+];
+
+/// The `type_annotation` and `type_annotation:type_argument` rows of
+/// `edges`, sorted: a field's generic argument carries the second reason.
+fn field_rows(edges: &[ReasonedEdge]) -> Vec<(&str, &str, &str)> {
+    let mut rows: Vec<_> = edges
+        .iter()
+        .filter(|e| e.reason == TYPE_ANNOTATION_REASON || e.reason == TYPE_ARGUMENT_REASON)
+        .map(|e| {
+            (
+                e.edge.caller.as_str(),
+                e.edge.callee_file.as_str(),
+                e.edge.callee.as_str(),
+            )
+        })
+        .collect();
+    rows.sort_unstable();
+    rows.dedup();
+    rows
+}
+
+/// Like [`mismatches`] over both annotation reasons. A case whose reindex
+/// holds fewer rows than `non_empty` expects fails: the positive control.
+fn field_mismatches(cases: &[Case]) -> Vec<String> {
+    let mut failures = Vec::new();
+    for case in cases {
+        let EdgeParity { reindex, overlay } = edges_after_edit(
+            &parse,
+            &case.files,
+            &case.edits,
+            RelType::Accesses,
+            &|file, _| file == case.source_file,
+        );
+        let mut expected = case.expected.clone();
+        expected.sort_unstable();
+        let got = field_rows(&reindex);
+        if got != expected {
+            failures.push(format!(
+                "{}: the reindex emits {got:?}, the fixture expects {expected:?}",
+                case.label
+            ));
+            continue;
+        }
+        if field_rows(&overlay) != got {
+            failures.push(format!(
+                "{}: overlay {overlay:#?}\nreindex {reindex:#?}",
+                case.label
+            ));
+        }
+    }
+    failures
+}
+
+/// The case for one language and direction: `to_generic` makes `Box` gain
+/// its class type parameter (a base `items -> Token` edge must be masked),
+/// else lose it (the edge appears).
+fn field_case(fixture: &FieldLang, to_generic: bool) -> Case {
+    let (base, edited, expected, direction) = if to_generic {
+        (
+            fixture.plain,
+            fixture.generic,
+            fixture.rows_generic,
+            "gains",
+        )
+    } else {
+        (fixture.generic, fixture.plain, fixture.rows_plain, "loses")
+    };
+    let mut files = fixture.clean.to_vec();
+    files.push((fixture.path, base));
+    Case {
+        label: format!("{}/Box {direction} its class type parameter", fixture.lang),
+        files,
+        edits: vec![(fixture.path, edited)],
+        source_file: fixture.path,
+        expected: expected.to_vec(),
+    }
+}
+
+/// Stands for (A10, dirty `Box`): the overlay agrees with a reindex on a
+/// field whose class type parameter shares a project class's name, in both
+/// edit directions. One reindex expects a non-empty row set, so "emit
+/// nothing" cannot pass. The class type parameters must reach the overlay
+/// input too: a fix in the builder alone fails here.
+#[test]
+fn test_overlay_field_class_type_parameter_matches_reindex() {
+    let cases: Vec<Case> = FIELD_LANGS
+        .iter()
+        .flat_map(|f| [field_case(f, true), field_case(f, false)])
+        .collect();
+    assert!(
+        cases.iter().any(|c| !c.expected.is_empty()),
+        "positive control: some case binds the project class"
+    );
+    let failures = field_mismatches(&cases);
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+/// Stands for (A10, dirty `Token`): renaming the project class in its clean
+/// file leaves `Holder.tokens` with no target, in the overlay as in a reindex.
+#[test]
+fn test_overlay_field_project_class_renamed_matches_reindex() {
+    let holder = "import java.util.List;\nclass Holder {\n    List<Token> tokens;\n}\n";
+    let case = |label: &str, edited: &'static str, expected: Vec<Row>| Case {
+        label: label.to_string(),
+        files: vec![("Token.java", "class Token {}\n"), ("Holder.java", holder)],
+        edits: vec![("Token.java", edited)],
+        source_file: "Holder.java",
+        expected,
+    };
+    let cases = [
+        case(
+            "Java/Token kept dirty",
+            "class Token { int n; }\n",
+            vec![("tokens", "Token.java", "Token")],
+        ),
+        case("Java/Token renamed", "class Tok {}\n", Vec::new()),
+    ];
+    let failures = field_mismatches(&cases);
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+/// Stands for (A15a): an interface property's annotation reaches the overlay
+/// like a class field's, whether the interface or the annotated class is dirty.
+#[test]
+fn test_overlay_typescript_interface_property_annotation_matches_reindex() {
+    let cases = [
+        Case {
+            label: "TypeScript/interface property added".to_string(),
+            files: vec![(
+                "cat.ts",
+                "export class Owner {}\nexport interface Cat {\n  name: string;\n}\n",
+            )],
+            edits: vec![(
+                "cat.ts",
+                "export class Owner {}\nexport interface Cat {\n  name: string;\n  owner: Owner;\n}\n",
+            )],
+            source_file: "cat.ts",
+            expected: vec![("owner", "cat.ts", "Owner")],
+        },
+        Case {
+            label: "TypeScript/Owner dirty".to_string(),
+            files: vec![
+                ("owner.ts", "export class Owner {}\n"),
+                (
+                    "cat.ts",
+                    "import { Owner } from './owner';\nexport interface Cat {\n  owner: Owner;\n}\n",
+                ),
+            ],
+            edits: vec![("owner.ts", "export class Owner { n = 1; }\n")],
+            source_file: "cat.ts",
+            expected: vec![("owner", "owner.ts", "Owner")],
+        },
+    ];
+    let failures = field_mismatches(&cases);
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+/// Stands for (A15b): a Dart top-level variable's generic or nullable
+/// annotation binds the argument, never `List`, in the overlay as in a reindex.
+#[test]
+fn test_overlay_dart_top_level_variable_annotation_matches_reindex() {
+    let cases = [Case {
+        label: "Dart/top-level generic and nullable".to_string(),
+        files: vec![(
+            "lib/app.dart",
+            "class Item {}\n\nList<int> items = [];\nint maybe = 0;\n",
+        )],
+        edits: vec![(
+            "lib/app.dart",
+            "class Item {}\n\nList<Item> items = [];\nItem? maybe;\n",
+        )],
+        source_file: "lib/app.dart",
+        expected: vec![
+            ("items", "lib/app.dart", "Item"),
+            ("maybe", "lib/app.dart", "Item"),
+        ],
+    }];
+    let failures = field_mismatches(&cases);
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }

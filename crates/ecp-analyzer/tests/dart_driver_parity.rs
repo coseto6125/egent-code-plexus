@@ -221,7 +221,8 @@ fn test_dart_driver_enum_variables_typedef_function_emit_once_each() {
             None,
             None,
             Some("int"),
-            Some("List"),
+            // A Dart top-level variable keeps its whole generic type text.
+            Some("List<int>"),
             None,
             Some("void")
         ]
@@ -273,8 +274,9 @@ fn test_dart_driver_duplicate_captures_dedupe_to_first() {
     assert_eq!(
         types(&g),
         [
-            Some("List"),
-            Some("List"),
+            // A Dart top-level variable keeps its whole generic type text.
+            Some("List<int>"),
+            Some("List<int>"),
             None,
             Some("Map<String, int>"),
             Some("Map<String, int>")
@@ -287,7 +289,8 @@ fn test_dart_driver_duplicate_captures_dedupe_to_first() {
         rows(&g),
         [("only", NodeKind::Variable, (0, 0, 0, 20), None)]
     );
-    assert_eq!(types(&g), [Some("List")]);
+    // A Dart top-level variable keeps its whole generic type text.
+    assert_eq!(types(&g), [Some("List<int>")]);
 
     let g = parse(b"@a.b.c\nvoid f() {}\n");
     assert_eq!(

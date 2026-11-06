@@ -44,7 +44,14 @@ pub const GRAPH_MAGIC: [u8; 8] = *b"ECP-RS\0\0";
 /// v20: `later_nodes` (one bit per node that no name table holds: a later
 ///     overload, a redefinition, a C# arity sibling), so the overlay skips
 ///     the nodes the index's name lookups skip.
-pub const GRAPH_FORMAT_VERSION: u32 = 20;
+/// v21: `containers` (each node's innermost enclosing qualifier declaration
+///     of its file), so a Rust path walks twin modules and types parent ->
+///     child, an interface property and an enclosing generic's `T` stay
+///     apart from a project name, on the overlay as in a reindex.
+pub const GRAPH_FORMAT_VERSION: u32 = 21;
+
+/// [`ZeroCopyGraph::containers`] of a node at file level.
+pub const NO_CONTAINER: u32 = u32::MAX;
 
 impl std::str::FromStr for NodeKind {
     type Err = ();
@@ -1175,15 +1182,18 @@ pub struct FunctionMeta {
     /// - bit 2: `is_static`   (no implicit receiver — class method in OO langs)
     /// - bit 3: `is_abstract` (no body — interface / pure-virtual / abstract)
     /// - bit 4: `is_generator` (yield / function* / iterator)
-    /// - bit 5: `is_extern`   (FFI declared, no Rust/native body)
+    /// - bit 5: `is_extern`   (FFI declared, no Rust/native body; C / C++: declared without a body, a prototype, whatever its `extern` keyword)
     /// - bits 6-8: visibility (0=public, 1=protected, 2=private, 3=crate/internal, 4=package, 5=fileprivate, 6=C# explicit interface implementation, 7=reserved)
     /// - bit 9: `is_virtual`  (C++ only: declared `virtual`, or an `override` / `final` member)
-    /// - bit 10: C# extension method (static method of a static class whose first parameter carries `this`)
+    /// - bit 10: C# extension method (static method of a static class whose first parameter carries `this`); C / C++: the `extern` storage-class keyword ([`Self::FLAG_C_EXTERN_STORAGE`])
     /// - bit 11: C# extension on a generic type parameter (`this T`)
     /// - bit 12: C# extension method whose parameter list ends in a `params` array (absent from `params`)
     /// - bits 13-15: C# extension method's count of default-valued parameters, saturating at 7
+    /// - C / C++ reuse bits 10-13: bit 10 is the `extern` keyword, bits 11-12 the parameter form ([`Self::C_PARAM_FORM_MASK`]), bit 13 internal linkage ([`Self::FLAG_C_INTERNAL_LINKAGE`])
     ///
-    /// Bits 12-15 stay zero on every method that is no C# extension method.
+    /// On a C# method, bits 12-15 stay zero unless it is an extension
+    /// method. On a C or C++ node, bits 10-13 hold the C fields above. A
+    /// reader of either meaning checks the node's file language first.
     pub flags: u16,
     /// Parameter list, flat-encoded as alternating name/type StrRefs:
     /// `[name1, type1, name2, type2, ...]`. Empty Vec when zero params or
@@ -1209,6 +1219,21 @@ impl FunctionMeta {
     /// Bit 9; bits 6-8 hold the visibility code. The `Overrides` pass reads
     /// it: a C++ base method overrides only when it is virtual.
     pub const FLAG_VIRTUAL: u16 = 0b0000_0010_0000_0000;
+    /// C / C++ only: bits 10-13 are C# extension bits on a C# method. Read
+    /// them only after checking the node's file language.
+    ///
+    /// Bit 10: the `extern` storage-class keyword. A definition carrying it
+    /// is no prototype ([`Self::FLAG_EXTERN`] stays clear).
+    pub const FLAG_C_EXTERN_STORAGE: u16 = 1 << 10;
+    /// Bits 11-12: the parameter form. 0 is a prototype list (`f(int)`,
+    /// `f(void)`), [`Self::C_PARAM_FORM_EMPTY_PARENS`] is `f()` (unspecified
+    /// in C), [`Self::C_PARAM_FORM_OLD_STYLE`] is a K&R identifier list.
+    pub const C_PARAM_FORM_MASK: u16 = 0b11 << 11;
+    pub const C_PARAM_FORM_EMPTY_PARENS: u16 = 1 << 11;
+    pub const C_PARAM_FORM_OLD_STYLE: u16 = 2 << 11;
+    /// Bit 13: a member of a C++ anonymous namespace. `static` keeps
+    /// [`Self::FLAG_STATIC`].
+    pub const FLAG_C_INTERNAL_LINKAGE: u16 = 1 << 13;
 
     pub const fn is_test(&self) -> bool {
         self.flags & Self::FLAG_TEST != 0
@@ -1365,6 +1390,24 @@ pub struct ZeroCopyGraph {
     /// (`SymbolTable::register_overload`, `register_arity_sibling`), so a
     /// name lookup returns its first instead.
     pub later_nodes: Vec<u8>,
+
+    // ── Schema v21 additions ─────────────────────────────────────────
+    /// For each node, the index of its innermost enclosing qualifier
+    /// declaration of the same file (Module, Namespace, Class, Struct, Enum,
+    /// Trait, Interface, Impl), or [`NO_CONTAINER`]. Dense: `containers[i]`
+    /// is node `i`'s. Every language reads it:
+    /// - The resolver walks a Rust path parent -> child on it, so twin
+    ///   modules and types of one file stay apart.
+    /// - The admission Contract rule reads it, so `ecp impact` on an
+    ///   interface property sees no false `ReadsField` from a bare field
+    ///   read.
+    /// - The enclosing type-parameter chain reads it, so a field typed by an
+    ///   enclosing generic's `T` binds no project `T`.
+    /// - `declaring_type` reads it for the type of an `impl` member.
+    ///
+    /// The overlay reads the same column, so each holds as in a reindex
+    /// ([`crate::analyzer::containment::containers`]).
+    pub containers: Vec<u32>,
 }
 
 impl ZeroCopyGraph {
@@ -1457,8 +1500,9 @@ impl ArchivedZeroCopyGraph {
         Some(hits)
     }
 
-    /// Whether the v13 import / export facts and the v20 `later_nodes`
-    /// bitmap are present and consistent with `files` and `nodes`. An archive without them cannot tell a file
+    /// Whether the v13 import / export facts, the v20 `later_nodes` bitmap
+    /// and the v21 `containers` column are present and consistent with
+    /// `files` and `nodes`. An archive without them cannot tell a file
     /// with no imports from a file whose imports were never recorded, so
     /// the loader rejects it and the graph is rebuilt.
     ///
@@ -1471,6 +1515,7 @@ impl ArchivedZeroCopyGraph {
             && self.file_flags.len() == files
             && self.exported_nodes.len() == self.nodes.len().div_ceil(8)
             && self.later_nodes.len() == self.nodes.len().div_ceil(8)
+            && self.containers.len() == self.nodes.len()
             && (self.file_path_order.is_empty() || self.file_path_order.len() == files)
     }
 
@@ -1677,6 +1722,16 @@ impl ArchivedZeroCopyGraph {
             .is_some_and(|bits| *bits & (1u8 << (node_idx % 8)) != 0)
     }
 
+    /// The innermost enclosing qualifier declaration of `node_idx`
+    /// ([`ZeroCopyGraph::containers`]); `None` at file level, and for a node
+    /// past the column's end (a fixture that records none).
+    pub fn container(&self, node_idx: u32) -> Option<u32> {
+        self.containers
+            .get(node_idx as usize)
+            .map(|c| c.to_native())
+            .filter(|&c| c != NO_CONTAINER)
+    }
+
     pub fn is_exported_node(&self, node_idx: u32) -> bool {
         self.exported_nodes
             .get(node_idx as usize / 8)
@@ -1745,6 +1800,7 @@ impl Default for ZeroCopyGraph {
             workspace: Default::default(),
             lexical_parents: Vec::new(),
             later_nodes: Vec::new(),
+            containers: Vec::new(),
         }
     }
 }

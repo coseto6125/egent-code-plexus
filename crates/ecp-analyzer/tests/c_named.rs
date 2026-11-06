@@ -1,13 +1,14 @@
-//! C "Named binding" dimension: `typedef`, `#define` (object-like and
-//! function-like), and `extern` declarations all surface as `RawImport`
-//! entries with `alias = Some(short_name)` so downstream resolvers can do
-//! qualifier-scope lookups the same way they do for Java static imports.
+//! C "Named binding" dimension: `#define` (object-like and function-like)
+//! and `extern` declarations surface as `RawImport` entries (a `typedef` is
+//! a `Typedef` node), each with `alias = Some(short_name)`
+//! so downstream resolvers can do qualifier-scope lookups the same way they do for Java static imports.
 //!
 //! Reference implementation: Java in `src/java/parser.rs`.
 
 use ecp_analyzer::c::parser::CProvider;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::RawImport;
+use ecp_core::graph::NodeKind;
 use std::path::Path;
 
 fn parse(src: &str) -> Vec<RawImport> {
@@ -25,62 +26,74 @@ fn find<'a>(imports: &'a [RawImport], alias: &str) -> &'a RawImport {
         .unwrap_or_else(|| panic!("missing alias `{alias}` in {imports:#?}"))
 }
 
+/// The `Typedef` nodes of `src` as `(alias, aliased type)`.
+/// a typedef is no `RawImport`; the node carries the
+/// aliased type in `type_annotation`.
+fn typedefs(src: &str) -> Vec<(String, Option<String>)> {
+    let graph = CProvider::new()
+        .expect("CProvider init")
+        .parse_file(Path::new("t.c"), src.as_bytes())
+        .expect("parse_file");
+    assert!(
+        graph.imports.is_empty(),
+        "a typedef emits no import: {:#?}",
+        graph.imports
+    );
+    graph
+        .nodes
+        .into_iter()
+        .filter(|n| n.kind == NodeKind::Typedef)
+        .map(|n| (n.name, n.type_annotation))
+        .collect()
+}
+
+fn typedef_of(src: &str, alias: &str) -> Option<String> {
+    typedefs(src)
+        .into_iter()
+        .find(|(name, _)| name == alias)
+        .unwrap_or_else(|| panic!("missing Typedef node `{alias}`"))
+        .1
+}
+
 #[test]
 fn test_c_typedef_primitive_emits_alias() {
-    let imports = parse("typedef int Counter;\n");
-    let i = find(&imports, "Counter");
-    assert_eq!(i.imported_name, "Counter");
-    assert_eq!(i.source, "int");
+    assert_eq!(
+        typedef_of("typedef int Counter;\n", "Counter").as_deref(),
+        Some("int")
+    );
 }
 
 #[test]
 fn test_c_typedef_struct_emits_alias() {
-    let imports = parse("typedef struct foo { int x; } Foo;\n");
-    let i = find(&imports, "Foo");
-    assert_eq!(i.imported_name, "Foo");
-    assert!(
-        i.source.contains("struct foo"),
-        "expected source to include `struct foo`, got {:?}",
-        i.source
+    assert_eq!(
+        typedef_of("typedef struct foo { int x; } Foo;\n", "Foo").as_deref(),
+        Some("struct foo")
     );
 }
 
 #[test]
 fn test_c_typedef_anonymous_struct_emits_alias() {
-    let imports = parse("typedef struct { int x; } Point;\n");
-    let i = find(&imports, "Point");
-    assert_eq!(i.imported_name, "Point");
-    assert!(
-        i.source.contains("struct"),
-        "expected source to include `struct`, got {:?}",
-        i.source
+    assert_eq!(
+        typedef_of("typedef struct { int x; } Point;\n", "Point").as_deref(),
+        Some("struct")
     );
 }
 
 #[test]
 fn test_c_typedef_function_pointer_emits_alias() {
-    let imports = parse("typedef int (*Callback)(int);\n");
-    let i = find(&imports, "Callback");
-    assert_eq!(i.imported_name, "Callback");
-    // Underlying type is the return type slice — `*Callback` lives inside
-    // the declarator that holds the alias name, so it's correctly excluded.
-    assert!(
-        i.source.contains("int"),
-        "expected source to mention return type, got {:?}",
-        i.source
+    // The aliased type is the return type: `*Callback` lives inside the
+    // declarator that holds the alias name.
+    assert_eq!(
+        typedef_of("typedef int (*Callback)(int);\n", "Callback").as_deref(),
+        Some("int")
     );
 }
 
 #[test]
 fn test_c_typedef_pointer_alias() {
-    // Multi-level pointer typedef: alias name nested in pointer_declarators.
-    let imports = parse("typedef char** StrArray;\n");
-    let i = find(&imports, "StrArray");
-    assert_eq!(i.imported_name, "StrArray");
-    assert!(
-        i.source.contains("char"),
-        "expected source to include `char`, got {:?}",
-        i.source
+    assert_eq!(
+        typedef_of("typedef char** StrArray;\n", "StrArray").as_deref(),
+        Some("char **")
     );
 }
 
@@ -165,7 +178,9 @@ typedef int Counter;
 extern int g_counter;
 "#;
     let imports = parse(src);
-    find(&imports, "Counter");
+    assert!(imports
+        .iter()
+        .all(|i| i.alias.as_deref() != Some("Counter")));
     find(&imports, "MAX");
     find(&imports, "g_counter");
 }

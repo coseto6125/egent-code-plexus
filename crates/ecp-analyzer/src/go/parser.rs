@@ -15,7 +15,7 @@ use crate::framework_confidence;
 use crate::framework_helpers::{
     enclosing_fn_idx_by_span, has_import_from, node_span, push_blind_spot,
 };
-use crate::function_meta::subtree_contains_kind;
+use crate::function_meta::{go_declared_type_params, subtree_contains_kind};
 use crate::parse_budget::{parse_with_budget, ParseBudget};
 use ecp_core::analyzer::parse_prof::Pass;
 use ecp_core::analyzer::provider::LanguageProvider;
@@ -502,6 +502,20 @@ pub struct GoFile<'t> {
     local_types: LocalTypes,
 }
 
+/// The type-parameter marker of a generic struct, interface or defined type
+/// (`type Box[T any] struct`); `None` for a callable and for a plain type.
+fn type_params_decorator(root: &Node<'_>, kind: NodeKind, source: &[u8]) -> Option<String> {
+    if !matches!(
+        kind,
+        NodeKind::Struct | NodeKind::Interface | NodeKind::Typedef
+    ) {
+        return None;
+    }
+    let list = root.child_by_field_name("type_parameters")?;
+    let names = go_declared_type_params(&list, source);
+    (!names.is_empty()).then(|| RawNode::type_params_marker(names.iter().map(String::as_str)))
+}
+
 impl ParseSpec for GoSpec {
     type Role = GoRole;
     type Match<'t> = GoMatch<'t>;
@@ -855,11 +869,12 @@ impl ParseSpec for GoSpec {
                 } else {
                     None
                 };
-                let decorators = if matches!(k, NodeKind::Function | NodeKind::Method) {
+                let mut decorators = if matches!(k, NodeKind::Function | NodeKind::Method) {
                     collect_go_pragmas(root, source)
                 } else {
                     vec![]
                 };
+                decorators.extend(type_params_decorator(&root, k, source));
                 cx.nodes.push(RawNode {
                     decorators,
                     is_exported: is_exported(&name),
@@ -957,7 +972,8 @@ impl ParseSpec for GoSpec {
                 // Replaces the shared `extract_calls` for Go so `obj.Method()`
                 // is recorded as `Type.Method` when `obj`'s type is locally known.
                 let recv_map = build_receiver_map(root, source);
-                f.local_types = collect_local_types(root, source, &recv_map);
+                f.local_types = collect_local_types(root, source, &recv_map, cx.path);
+                cx.blind_spots.extend(f.local_types.take_blind_spots());
                 let (raw_path_literals, raw_sql_refs) =
                     extract_go_calls_and_path_literals_with_imports(
                         root,
@@ -1057,5 +1073,80 @@ impl ParseSpec for GoSpec {
         category: FileCategory,
     ) -> Vec<RawFunctionMeta> {
         crate::function_meta::go::extract(root, source, nodes, category)
+    }
+}
+
+#[cfg(test)]
+mod type_param_marker_tests {
+    use super::GoProvider;
+    use ecp_core::analyzer::provider::LanguageProvider;
+    use ecp_core::analyzer::types::RawNode;
+    use ecp_core::graph::NodeKind;
+    use std::path::Path;
+
+    fn parse(src: &str) -> Vec<RawNode> {
+        GoProvider::new()
+            .expect("provider")
+            .parse_file(Path::new("t.go"), src.as_bytes())
+            .expect("parse")
+            .nodes
+    }
+
+    fn params(src: &str, name: &str) -> Vec<String> {
+        let nodes = parse(src);
+        nodes
+            .iter()
+            .find(|n| n.name == name && !matches!(n.kind, NodeKind::Function | NodeKind::Method))
+            .map(|n| n.declared_type_params().map(str::to_string).collect())
+            .unwrap_or_else(|| panic!("no type {name}: {nodes:?}"))
+    }
+
+    #[test]
+    fn test_type_params_marker_go_generic_types_round_trip() {
+        assert_eq!(
+            params("package p\ntype Box[T any] struct{ v T }\n", "Box"),
+            ["T"]
+        );
+        assert_eq!(
+            params(
+                "package p\ntype Pair[K comparable, V any] struct{}\n",
+                "Pair"
+            ),
+            ["K", "V"]
+        );
+        assert_eq!(
+            params("package p\ntype Same[A, B any] struct{}\n", "Same"),
+            ["A", "B"]
+        );
+        assert_eq!(
+            params(
+                "package p\ntype Getter[T any] interface{ Get() T }\n",
+                "Getter"
+            ),
+            ["T"]
+        );
+    }
+
+    #[test]
+    fn test_type_params_marker_go_plain_type_has_none() {
+        assert!(params("package p\ntype Plain struct{}\n", "Plain").is_empty());
+    }
+
+    #[test]
+    fn test_type_params_marker_go_callable_has_none() {
+        for n in parse(
+            "package p\nfunc Id[T any](x T) T { return x }\ntype S struct{}\nfunc (s S) M() {}\n",
+        )
+        .iter()
+        .filter(|n| matches!(n.kind, NodeKind::Function | NodeKind::Method))
+        {
+            assert!(
+                !n.decorators
+                    .iter()
+                    .any(|d| RawNode::is_type_params_marker(d)),
+                "{}",
+                n.name
+            );
+        }
     }
 }

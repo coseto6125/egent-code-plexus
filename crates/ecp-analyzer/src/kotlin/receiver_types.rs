@@ -17,6 +17,9 @@
 //!
 //! - `Other().m()` where this file declares `class Other` → `Other.m`
 //!
+//! A receiver binding the receiver core left unproven (the budget) emits
+//! [`CallSite::unproven_member`], never the bare name.
+//!
 //! Falls back to the bare method name for other unresolved receivers, but
 //! a computed receiver (`other().m()`) whose `m` an enclosing type declares
 //! emits [`CallSite::untyped_member`], so it never binds the caller's own
@@ -25,61 +28,57 @@
 use super::path_literals::{
     build_raw_path_literal, enclosing_symbol_and_owner_pub, strip_kotlin_string_value,
 };
+use super::receiver_lower::KotlinLowering;
 use crate::calls::{
-    attach_to_enclosing, node_range, range_width, reference_function, span_holds, span_width,
-    start_pos, Pos, PosRange,
+    attach_to_enclosing, reference_function, span_holds, span_width, start_pos, Pos,
 };
-use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
+use crate::receiver::lattice::UnknownCause;
+use crate::receiver::{analyze_file, FileReceivers, Receiver as CoreReceiver};
+use ecp_core::analyzer::types::{BlindSpot, CallSite, RawNode, RawPathLiteral, RawSqlRef};
 use ecp_core::graph::NodeKind;
 use std::collections::HashMap;
+use std::path::Path;
 use tree_sitter::Node;
 
 #[derive(Debug, Default)]
 struct LocalTypes {
-    scopes: Vec<(PosRange, HashMap<String, String>)>,
+    /// The receiver state of every local, parameter and property of an
+    /// enclosing class that is read as a receiver, keyed by that identifier.
+    receivers: FileReceivers,
     imports: HashMap<String, String>,
 }
 
 impl LocalTypes {
-    fn lookup(&self, pos: Pos, var: &str) -> Option<&str> {
-        let mut best: Option<&str> = None;
-        let mut best_width = (u32::MAX, i64::MAX);
-        for ((start, end), map) in &self.scopes {
-            if *start <= pos && pos <= *end {
-                if let Some(t) = map.get(var) {
-                    let w = range_width((*start, *end));
-                    if w < best_width {
-                        best_width = w;
-                        best = Some(t.as_str());
-                    }
-                }
-            }
+    /// The receiver state of the binding the identifier `node` reads, `None`
+    /// for a name that is no binding here.
+    fn local(&self, node: Node<'_>) -> Option<&CoreReceiver> {
+        self.receivers.receiver_at(node)
+    }
+
+    fn lookup(&self, node: Node<'_>, var: &str) -> Option<&str> {
+        match self.local(node) {
+            Some(CoreReceiver::Known(ty)) => Some(&*ty.text),
+            // An unknown local type still shadows an imported binding.
+            Some(CoreReceiver::Unknown(_)) => None,
+            None => self.imports.get(var).map(String::as_str),
         }
-        // An unknown local type still shadows an imported binding or a
-        // typed name of a wider scope.
-        best.or_else(|| self.imports.get(var).map(String::as_str))
-            .filter(|ty| !ty.is_empty())
+        .filter(|ty| !ty.is_empty())
     }
 
-    /// Whether a function or class scope holding `pos` declares `var`,
-    /// typed or not, or an import binds it.
-    fn binds(&self, pos: Pos, var: &str) -> bool {
-        self.imports.contains_key(var) || self.binds_local(pos, var)
+    /// Whether a local, parameter or class property declares the name `node`
+    /// reads, typed or not, or an import binds `var`.
+    fn binds(&self, node: Node<'_>, var: &str) -> bool {
+        self.imports.contains_key(var) || self.binds_local(node)
     }
 
-    /// Whether a function or class scope holding `pos` declares `var`.
-    fn binds_local(&self, pos: Pos, var: &str) -> bool {
-        self.scopes
-            .iter()
-            .any(|((start, end), map)| *start <= pos && pos <= *end && map.contains_key(var))
+    fn binds_local(&self, node: Node<'_>) -> bool {
+        self.local(node).is_some()
     }
 }
 
-/// Walk every `function_declaration`, collecting typed parameters and local
-/// `property_declaration` nodes (which represent `val`/`var` declarations),
-/// and every class's primary-constructor parameters.
-fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
-    let mut scopes: Vec<(PosRange, HashMap<String, String>)> = Vec::new();
+/// The import bindings of the file, and the receiver state of its locals
+/// ([`KotlinLowering`]).
+fn collect_local_types(root: Node<'_>, source: &[u8], path: &Path) -> LocalTypes {
     let mut imports = HashMap::new();
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
@@ -110,51 +109,8 @@ fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
             }
             continue;
         }
-        if n.kind() == "class_declaration" {
-            // Primary-constructor parameters are in scope for the whole
-            // class body; a `val` / `var` one is also a property, which no
-            // Property node records.
-            let mut map: HashMap<String, String> = HashMap::new();
-            let mut c = n.walk();
-            for ctor in n.children(&mut c) {
-                if ctor.kind() != "primary_constructor" {
-                    continue;
-                }
-                let mut pc = ctor.walk();
-                for param in ctor.children(&mut pc) {
-                    let mut ic = param.walk();
-                    let name = param
-                        .children(&mut ic)
-                        .find(|child| child.kind() == "simple_identifier");
-                    if let Some(name) = name.and_then(|name| name.utf8_text(source).ok()) {
-                        map.insert(name.to_string(), String::new());
-                    }
-                }
-            }
-            if !map.is_empty() {
-                scopes.push((node_range(n), map));
-            }
-        }
-        if n.kind() == "function_declaration" {
-            let scope = node_range(n);
-            let mut map: HashMap<String, String> = HashMap::new();
-            if let Some(params) = n.child_by_field_name("parameters") {
-                collect_params(params, source, &mut map);
-            }
-            // Also handle function_value_parameters (alternative field name in tree-sitter-kotlin)
-            let mut c = n.walk();
-            for child in n.children(&mut c) {
-                if child.kind() == "function_value_parameters" {
-                    collect_params(child, source, &mut map);
-                }
-                if child.kind() == "function_body" {
-                    collect_property_decls(child, source, &mut scopes);
-                }
-            }
-            if !map.is_empty() {
-                scopes.push((scope, map));
-            }
-            // Don't descend — nested lambdas form their own scopes.
+        // Imports head the file: a declaration holds none.
+        if matches!(n.kind(), "class_declaration" | "function_declaration") {
             continue;
         }
         let mut c = n.walk();
@@ -162,113 +118,10 @@ fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
             stack.push(child);
         }
     }
-    LocalTypes { scopes, imports }
-}
-
-/// `function_value_parameters` → `parameter` with `simple_identifier` name
-/// and `user_type` → `type_identifier` type (second named child).
-fn collect_params(params: Node<'_>, source: &[u8], out: &mut HashMap<String, String>) {
-    let mut c = params.walk();
-    for p in params.children(&mut c) {
-        if p.kind() != "parameter" {
-            continue;
-        }
-        let mut name_node = None;
-        let mut type_node = None;
-        let mut pc = p.walk();
-        for child in p.children(&mut pc) {
-            if child.kind() == "simple_identifier" && name_node.is_none() {
-                name_node = Some(child);
-            } else if child.kind() == "user_type" {
-                type_node = Some(child);
-            }
-        }
-        if let Some(name) = name_node.and_then(|name| name.utf8_text(source).ok()) {
-            out.insert(name.to_string(), String::new());
-        }
-        if let (Some(nm), Some(ty)) = (name_node, type_node) {
-            if let Some((var, ty_s)) = simple_id_and_usertype(nm, ty, source) {
-                out.insert(var, ty_s);
-            }
-        }
+    LocalTypes {
+        receivers: analyze_file(&KotlinLowering, &(), root, source, path),
+        imports,
     }
-}
-
-/// Walk a `function_body`, collecting `property_declaration` nodes, each
-/// in a scope of its own: a local is visible from the end of its
-/// declaration to the end of the block that declares it.
-/// Does NOT descend into nested `function_declaration` / lambdas.
-fn collect_property_decls(
-    body: Node<'_>,
-    source: &[u8],
-    scopes: &mut Vec<(PosRange, HashMap<String, String>)>,
-) {
-    let mut stack: Vec<Node<'_>> = vec![body];
-    while let Some(n) = stack.pop() {
-        if n.kind() == "function_declaration" || n.kind() == "lambda_literal" {
-            continue;
-        }
-        if n.kind() == "property_declaration" {
-            let mut out: HashMap<String, String> = HashMap::new();
-            // variable_declaration: first named child `simple_identifier`, second `user_type`
-            let mut c = n.walk();
-            for child in n.children(&mut c) {
-                if child.kind() == "variable_declaration" {
-                    let mut nm = None;
-                    let mut ty = None;
-                    let mut vc = child.walk();
-                    for vc_child in child.children(&mut vc) {
-                        match vc_child.kind() {
-                            "simple_identifier" if nm.is_none() => nm = Some(vc_child),
-                            "user_type" => ty = Some(vc_child),
-                            _ => {}
-                        }
-                    }
-                    if let Some(name) = nm.and_then(|name| name.utf8_text(source).ok()) {
-                        out.insert(name.to_string(), String::new());
-                    }
-                    if let (Some(nm_n), Some(ty_n)) = (nm, ty) {
-                        if let Some((var, ty_s)) = simple_id_and_usertype(nm_n, ty_n, source) {
-                            out.insert(var, ty_s);
-                        }
-                    }
-                }
-            }
-            if !out.is_empty() {
-                let declared = node_range(n).1;
-                let block_end = n.parent().map_or(declared, |block| node_range(block).1);
-                scopes.push(((declared, block_end), out));
-            }
-        }
-        let mut c = n.walk();
-        for child in n.children(&mut c) {
-            stack.push(child);
-        }
-    }
-}
-
-fn simple_id_and_usertype(
-    name_node: Node<'_>,
-    type_node: Node<'_>,
-    source: &[u8],
-) -> Option<(String, String)> {
-    if name_node.kind() != "simple_identifier" {
-        return None;
-    }
-    // user_type → type_identifier (simple class name only)
-    let ty_inner = type_node
-        .named_child(0)
-        .filter(|n| n.kind() == "type_identifier")
-        .unwrap_or(type_node);
-    if ty_inner.kind() != "type_identifier" {
-        return None;
-    }
-    let name = std::str::from_utf8(&source[name_node.start_byte()..name_node.end_byte()]).ok()?;
-    let ty = std::str::from_utf8(&source[ty_inner.start_byte()..ty_inner.end_byte()]).ok()?;
-    if ty.is_empty() {
-        return None;
-    }
-    Some((name.to_string(), ty.to_string()))
 }
 
 /// Resolve a Kotlin `call_expression` callee, applying receiver-type binding.
@@ -310,27 +163,42 @@ fn kotlin_callee(
                             .ok()?;
                     // Only a name no scope, import or enclosing type binds
                     // may be a type, which the resolver decides.
-                    if !locals.binds(pos, var) && !declares_member(nodes, pos, var) {
+                    if !locals.binds(receiver, var) && !declares_member(nodes, pos, var) {
                         return Some(CallSite::from_receiver(var, method));
                     }
-                    locals.lookup(pos, var).map(str::to_string)
+                    // A binding the core could not follow (the budget) lost
+                    // its type, pinned or not: a bare name would bind the
+                    // caller's own `m`, so the site stays unproven.
+                    let unproven = locals.local(receiver).filter(|state| {
+                        !matches!(
+                            state,
+                            CoreReceiver::Known(_)
+                                | CoreReceiver::Unknown(UnknownCause::NoEvidence)
+                        )
+                    });
+                    if let Some(unproven) = unproven {
+                        return Some(unproven.call_entry(method));
+                    }
+                    locals.lookup(receiver, var).map(str::to_string)
                 }
-                "call_expression" => constructed_class(receiver, source, nodes)
-                    .filter(|name| !locals.binds(pos, name) && !declares_member(nodes, pos, name)),
+                "call_expression" => constructed_class(receiver, source, nodes).filter(|name| {
+                    let shadowed = receiver
+                        .named_child(0)
+                        .is_some_and(|callee| locals.binds(callee, name));
+                    !shadowed && !declares_member(nodes, pos, name)
+                }),
                 _ => None,
             };
-            let computed = !matches!(
-                receiver.kind(),
-                "this_expression" | "super_expression" | "simple_identifier"
-            );
+            let not_this = !matches!(receiver.kind(), "this_expression" | "super_expression");
             let site = match ty {
                 Some(t) => return Some(format!("{t}.{method}")),
-                // A computed receiver (`other().m()`) is no `this`: where an
-                // enclosing type declares `m`, the bare name would bind that
-                // member. Elsewhere the bare name still reaches an extension
+                // A computed receiver (`other().m()`) or an untyped value
+                // (`val x = make(); x.m()`) is no `this`: where an enclosing
+                // type declares `m`, the bare name would bind that member.
+                // Elsewhere the bare name still reaches an extension
                 // function, which Kotlin declares free and an untyped member
                 // call never binds.
-                None if computed && declares(nodes, pos, method, NodeKind::is_callable) => {
+                None if not_this && declares(nodes, pos, method, NodeKind::is_callable) => {
                     CallSite::untyped_member(method)
                 }
                 None => method.to_string(),
@@ -343,9 +211,10 @@ fn kotlin_callee(
                 receiver
                     .named_child(0)
                     .filter(|f| f.kind() == "simple_identifier")
-                    .and_then(|f| f.utf8_text(source).ok())
-                    .is_some_and(|name| {
-                        locals.binds_local(pos, name) || declares_member(nodes, pos, name)
+                    .is_some_and(|f| {
+                        locals.binds_local(f)
+                            || f.utf8_text(source)
+                                .is_ok_and(|name| declares_member(nodes, pos, name))
                     })
             };
             Some(match receiver.kind() {
@@ -371,8 +240,11 @@ pub fn extract_kotlin_calls_and_path_literals(
     root: Node<'_>,
     source: &[u8],
     nodes: &mut [RawNode],
+    path: &Path,
+    blind_spots: &mut Vec<BlindSpot>,
 ) -> (Vec<RawPathLiteral>, Vec<RawSqlRef>) {
-    let local_types = collect_local_types(root, source);
+    let mut local_types = collect_local_types(root, source, path);
+    blind_spots.append(&mut local_types.receivers.blind_spots);
     let mut path_literals: Vec<RawPathLiteral> = Vec::new();
     let mut sql_refs: Vec<RawSqlRef> = Vec::new();
     let mut stack: Vec<Node<'_>> = vec![root];
@@ -447,8 +319,8 @@ fn bound_callable_reference(
         ("callable_reference", "type_identifier") => {
             let var = receiver.utf8_text(source).ok()?;
             let ty = locals
-                .binds_local(pos, var)
-                .then(|| locals.lookup(pos, var))??;
+                .binds_local(receiver)
+                .then(|| locals.lookup(receiver, var))??;
             (ty.to_string(), member)
         }
         ("navigation_expression", "this_expression")
@@ -572,8 +444,16 @@ fn enclosing_superclass(nodes: &[RawNode], pos: Pos) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::super::parser::KotlinProvider;
+    use super::{kotlin_callee, LocalTypes};
+    use crate::kotlin::receiver_lower::KotlinLowering;
+    use crate::receiver::ir::{BindingOrigin, Value};
+    use crate::receiver::solve::MAX_TRACKED_CELLS;
+    use crate::receiver::{analyze_file, IrBuilder, LangPolicy, Lowered, Lowering};
     use ecp_core::analyzer::provider::LanguageProvider;
+    use ecp_core::analyzer::types::CallSite;
+    use std::collections::HashMap;
     use std::path::Path;
+    use tree_sitter::Node;
 
     fn parse(src: &str) -> ecp_core::analyzer::types::LocalGraph {
         let provider = KotlinProvider::new().expect("KotlinProvider::new");
@@ -683,10 +563,11 @@ class Standalone {
         );
     }
 
-    /// `import a.b.*` binds no receiver: a property named like the package
-    /// keeps the bare member name.
+    /// `import a.b.*` binds no receiver, and a `val` constructor parameter is
+    /// a property of the class: `repository.fetchUsers()` types its receiver
+    /// as the parameter's declared class.
     #[test]
-    fn test_kotlin_callee_wildcard_package_named_receiver_emits_bare_method() {
+    fn test_kotlin_callee_val_constructor_parameter_receiver_emits_declared_type() {
         let src = r#"
 package com.app.ui
 import com.app.repository.*
@@ -702,7 +583,31 @@ class VM(private val repository: UserRepository) {
             .iter()
             .find(|n| n.name == "load")
             .expect("load function not found");
-        assert_eq!(load.calls, ["fetchUsers"]);
+        assert_eq!(load.calls, ["UserRepository.fetchUsers"]);
+    }
+
+    /// An untyped local (`val x = make()`) is no `this`: `x.save()` must not
+    /// emit the bare `save`, which would bind the enclosing class's own
+    /// `save`. Where no enclosing type declares the name, the bare name
+    /// stays, so an extension function can still bind.
+    #[test]
+    fn test_kotlin_callee_untyped_local_receiver_own_method_namesake_emits_untyped_member() {
+        let src = "class Repo {\n    fun save() {}\n    fun go() {\n        val x = make()\n        x.save()\n        x.close()\n    }\n}\n";
+        let graph = parse(src);
+        let go = graph
+            .nodes
+            .iter()
+            .find(|n| n.name == "go")
+            .expect("go function not found");
+        let mut calls = go.calls.clone();
+        calls.sort_unstable();
+        let mut expected = [
+            "make".to_string(),
+            CallSite::untyped_member("save"),
+            "close".to_string(),
+        ];
+        expected.sort_unstable();
+        assert_eq!(calls, expected);
     }
 
     /// An explicit class import still qualifies a static-style receiver.
@@ -716,5 +621,98 @@ class VM(private val repository: UserRepository) {
             .find(|n| n.name == "go")
             .expect("go function not found");
         assert_eq!(go.calls, ["Helper.work"]);
+    }
+
+    /// Lowers the function that reads `repo` with more written, read cells
+    /// than the receiver core tracks, `repo` untyped among them, so `repo`
+    /// answers `Unknown(Budget)` whatever the solver's tracking rule.
+    struct OverBudget;
+
+    impl Lowering for OverBudget {
+        type Cx<'a> = ();
+
+        fn policy(&self) -> LangPolicy {
+            KotlinLowering.policy()
+        }
+
+        fn is_function(&self, node: Node<'_>) -> bool {
+            node.kind() == "function_declaration"
+        }
+
+        fn lower(&self, _cx: &(), function: Node<'_>, source: &[u8], b: &mut IrBuilder) -> Lowered {
+            let mut stack = vec![function];
+            let mut repo = None;
+            while let Some(n) = stack.pop() {
+                // The receiver of `repo.save()`, not the parameter name.
+                if n.kind() == "simple_identifier"
+                    && n.utf8_text(source) == Ok("repo")
+                    && n.parent()
+                        .is_some_and(|p| p.kind() == "navigation_expression")
+                {
+                    repo = Some(n);
+                }
+                stack.extend(n.named_children(&mut n.walk()));
+            }
+            let Some(repo) = repo else {
+                return Lowered::NoUses;
+            };
+            for i in 0..MAX_TRACKED_CELLS {
+                let filler = b.declare(&format!("x{i}"), BindingOrigin::Local, None);
+                b.assign(filler, Value::Unknown);
+                b.use_binding(filler, i);
+            }
+            let binding = b.declare("repo", BindingOrigin::Param, None);
+            b.assign(binding, Value::Unknown);
+            b.use_binding(binding, repo.id());
+            Lowered::Done
+        }
+    }
+
+    /// Over the budget a receiver's type is lost. The bare `save` would bind
+    /// the caller's own `save` the way an implicit-`this` call does; the
+    /// site must be an unproven member, which binds nothing in Kotlin.
+    #[test]
+    fn test_kotlin_callee_over_budget_receiver_emits_unproven_member() {
+        let src = "class Big {\n    fun save() {}\n    fun store(repo: Repo) {\n        repo.save()\n    }\n}\n";
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_kotlin::LANGUAGE.into())
+            .unwrap();
+        let tree = parser.parse(src, None).unwrap();
+        let locals = LocalTypes {
+            receivers: analyze_file(
+                &OverBudget,
+                &(),
+                tree.root_node(),
+                src.as_bytes(),
+                Path::new("Big.kt"),
+            ),
+            imports: HashMap::new(),
+        };
+        let mut stack = vec![tree.root_node()];
+        let mut call = None;
+        while let Some(n) = stack.pop() {
+            if n.kind() == "call_expression" {
+                call = Some(n);
+            }
+            stack.extend(n.named_children(&mut n.walk()));
+        }
+        let call = call.expect("repo.save() call");
+        assert_eq!(
+            kotlin_callee(call, src.as_bytes(), &locals, &[]),
+            Some(CallSite::unproven_member("save"))
+        );
+    }
+
+    /// Under the budget the same parameter keeps its declared type.
+    #[test]
+    fn test_kotlin_callee_typed_parameter_in_a_class_emits_declared_type() {
+        let graph = parse("class Big {\n    fun save() {}\n    fun store(repo: Repo) {\n        repo.save()\n    }\n}\n");
+        let store = graph
+            .nodes
+            .iter()
+            .find(|n| n.name == "store")
+            .expect("store function not found");
+        assert_eq!(store.calls, ["Repo.save"]);
     }
 }

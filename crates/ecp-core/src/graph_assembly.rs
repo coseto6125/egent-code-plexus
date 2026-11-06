@@ -17,7 +17,7 @@ use crate::contracts::workspace::WorkspaceFacts;
 use crate::graph::{
     BlindSpotRecord, CallMeta, Edge, ExportAliasFact, File, FunctionMeta, ImportFact,
     LexicalParentFact, NameIndexEntry, Node, NodeKind, PathAliasFact, RouteMiddleware, RouteShape,
-    SupertypeFact, ZeroCopyGraph, GRAPH_FORMAT_VERSION, GRAPH_MAGIC,
+    SupertypeFact, ZeroCopyGraph, GRAPH_FORMAT_VERSION, GRAPH_MAGIC, NO_CONTAINER,
 };
 use crate::pool::StringPool;
 
@@ -76,6 +76,9 @@ pub struct GraphAssembly {
     /// Later-node bitmap (see [`ZeroCopyGraph::later_nodes`]); nodes past
     /// its end are not later.
     pub later_nodes: Vec<u8>,
+    /// Per node, its container (see [`ZeroCopyGraph::containers`]); nodes
+    /// past its end are at file level.
+    pub containers: Vec<u32>,
 }
 
 /// The import / export facts of each file and node, as the builder records
@@ -119,6 +122,7 @@ impl Default for GraphAssembly {
             workspace: WorkspaceFacts::default(),
             lexical_parents: Vec::new(),
             later_nodes: Vec::new(),
+            containers: Vec::new(),
         }
     }
 }
@@ -148,6 +152,7 @@ impl GraphAssembly {
             workspace,
             mut lexical_parents,
             mut later_nodes,
+            mut containers,
         } = self;
 
         assert!(
@@ -270,6 +275,7 @@ impl GraphAssembly {
         file_flags.resize(files.len(), 0);
         exported_nodes.resize(num_nodes.div_ceil(8), 0);
         later_nodes.resize(num_nodes.div_ceil(8), 0);
+        containers.resize(num_nodes, NO_CONTAINER);
         let file_path_order = file_path_order(&files, &string_pool);
         // `supertypes_of()` binary-searches by `type_idx`.
         supertype_table.sort_by_key(|fact| fact.type_idx);
@@ -316,6 +322,7 @@ impl GraphAssembly {
             workspace,
             lexical_parents,
             later_nodes,
+            containers,
         }
     }
 }
@@ -813,6 +820,47 @@ mod tests {
         assert!(
             !archived.has_module_facts(),
             "a short bitmap must be rejected"
+        );
+    }
+
+    /// Stands for: the v21 `containers` column is dense over the nodes, so
+    /// `finish` pads the nodes a builder appended after Pass 1 (a Route, a
+    /// File) at file level, and a graph whose column misses a node is
+    /// rebuilt instead of reading the missing node as file level.
+    #[test]
+    fn test_finish_containers_padded_read_back_and_short_column_rejected() {
+        let mut pool = StringPool::new();
+        let files = vec![file(&mut pool, "a.rs")];
+        let graph = GraphAssembly {
+            string_pool: pool,
+            files,
+            nodes: (0..4).map(|_| Node::default()).collect(),
+            containers: vec![NO_CONTAINER, 0],
+            ..Default::default()
+        }
+        .finish();
+        assert_eq!(
+            graph.containers,
+            [NO_CONTAINER, 0, NO_CONTAINER, NO_CONTAINER]
+        );
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&graph).unwrap();
+        let archived =
+            rkyv::access::<crate::graph::ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes)
+                .unwrap();
+        assert!(archived.has_module_facts());
+        assert_eq!(archived.container(1), Some(0));
+        assert_eq!(archived.container(0), None, "file level");
+        assert_eq!(archived.container(9), None, "past the column");
+
+        let mut short = graph;
+        short.containers.pop();
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&short).unwrap();
+        let archived =
+            rkyv::access::<crate::graph::ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes)
+                .unwrap();
+        assert!(
+            !archived.has_module_facts(),
+            "a short column must be rejected"
         );
     }
 

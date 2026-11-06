@@ -23,13 +23,16 @@
 use super::path_literals::{
     build_concatenated, build_raw_path_literal, enclosing_symbol_and_owner, strip_quotes,
 };
+use super::receiver_lower::CppLowering;
 use crate::calls::{
     attach_to_enclosing, construction_call, node_range, range_width, start_pos, CallSiteIndex, Pos,
     PosRange,
 };
 use crate::indirect_dispatch::FnPtrVars;
-use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
+use crate::receiver::{analyze_file, FileReceivers};
+use ecp_core::analyzer::types::{BlindSpot, CallSite, RawNode, RawPathLiteral, RawSqlRef};
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::path::Path;
 use tree_sitter::Node;
 
 #[derive(Debug, Default)]
@@ -45,9 +48,16 @@ pub struct CppBindings {
     /// Typed data members per class path (`a::Foo`), wherever the class
     /// declares them: two namespaces' `Foo` keep their own fields.
     class_fields: FxHashMap<String, FxHashMap<String, String>>,
+    /// The type each local or parameter receiver holds where it is used.
+    receivers: FileReceivers,
 }
 
 impl CppBindings {
+    /// The receiver-budget blind spots of the file, left behind once.
+    pub fn take_blind_spots(&mut self) -> Vec<BlindSpot> {
+        std::mem::take(&mut self.receivers.blind_spots)
+    }
+
     /// Every local and parameter binding in its own function, lambda or
     /// `catch` scope, and every data member of a class this file declares
     /// over the class body and the class's out-of-class definitions, for
@@ -149,7 +159,7 @@ impl CppBindings {
     }
 }
 
-pub fn collect_bindings(root: Node<'_>, source: &[u8]) -> CppBindings {
+pub fn collect_bindings(root: Node<'_>, source: &[u8], path: &Path) -> CppBindings {
     let mut fn_scopes: Vec<(PosRange, FxHashMap<String, String>)> = Vec::new();
     let mut class_scopes: Vec<(PosRange, String)> = Vec::new();
     let mut class_fields: FxHashMap<String, FxHashMap<String, String>> = FxHashMap::default();
@@ -216,6 +226,7 @@ pub fn collect_bindings(root: Node<'_>, source: &[u8]) -> CppBindings {
         fn_scopes,
         class_scopes,
         class_fields,
+        receivers: analyze_file(&CppLowering, &(), root, source, path),
     }
 }
 
@@ -265,7 +276,7 @@ fn last_segment(path: &str) -> &str {
 
 /// The inner declarator of a pointer / reference / init / array
 /// declarator. `reference_declarator` has no `declarator` field.
-fn inner_declarator(node: Node<'_>) -> Option<Node<'_>> {
+pub(super) fn inner_declarator(node: Node<'_>) -> Option<Node<'_>> {
     node.child_by_field_name("declarator")
         .or_else(|| node.named_child(0))
 }
@@ -317,7 +328,7 @@ fn bind_param(p: Node<'_>, source: &[u8], out: &mut FxHashMap<String, String>) {
 /// The name in a parameter declarator that is itself callable, such as
 /// `Beta* (*make)()`. This only runs for parameters, so ordinary function
 /// declarations never become local values.
-fn callable_param_identifier(node: Node<'_>, source: &[u8]) -> Option<String> {
+pub(super) fn callable_param_identifier(node: Node<'_>, source: &[u8]) -> Option<String> {
     let node = find_function_declarator(node)?;
     let paren = node.child_by_field_name("declarator")?;
     if paren.kind() != "parenthesized_declarator" {
@@ -447,7 +458,7 @@ fn unwrap_field_identifier<'s>(node: Node<'_>, source: &'s [u8]) -> Option<&'s s
 /// Recursively unwrap declarator nodes to extract the bound identifier.
 /// Handles `identifier`, `init_declarator`, `pointer_declarator`,
 /// `reference_declarator`. Returns None for unrelated kinds.
-fn unwrap_declarator_identifier(node: Node<'_>, source: &[u8]) -> Option<String> {
+pub(super) fn unwrap_declarator_identifier(node: Node<'_>, source: &[u8]) -> Option<String> {
     match node.kind() {
         "identifier" => std::str::from_utf8(&source[node.start_byte()..node.end_byte()])
             .ok()
@@ -459,7 +470,7 @@ fn unwrap_declarator_identifier(node: Node<'_>, source: &[u8]) -> Option<String>
     }
 }
 
-fn find_function_declarator<'a>(mut node: Node<'a>) -> Option<Node<'a>> {
+pub(super) fn find_function_declarator<'a>(mut node: Node<'a>) -> Option<Node<'a>> {
     loop {
         match node.kind() {
             "function_declarator" => return Some(node),
@@ -601,16 +612,18 @@ fn cpp_callee_name(call: Node<'_>, source: &[u8], bindings: &CppBindings) -> Opt
             let arg = function.child_by_field_name("argument")?;
             // `(*p).method()` / `(&x).method()` / `(*this).method()` type as
             // the operand.
-            let receiver = match arg.kind() {
-                "pointer_expression" => arg.named_child(0)?,
-                _ => arg,
-            };
+            let receiver = super::receiver_lower::member_operand(arg)?;
             if receiver.kind() == "this" {
                 // `this->method()`; bare when no class encloses the call.
                 return Some(match bindings.enclosing_class(pos) {
                     Some(cls) => format!("{cls}.{method}"),
                     None => method.to_string(),
                 });
+            }
+            if receiver.kind() == "identifier" {
+                if let Some(state) = bindings.receivers.receiver_at(receiver) {
+                    return Some(state.call_entry(method));
+                }
             }
             Some(
                 match member_receiver_type(receiver, source, bindings, pos) {
@@ -666,5 +679,44 @@ fn cpp_callee_name(call: Node<'_>, source: &[u8], bindings: &CppBindings) -> Opt
         _ => std::str::from_utf8(&source[function.start_byte()..function.end_byte()])
             .ok()
             .map(str::to_string),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::parser::CppProvider;
+    use ecp_core::analyzer::provider::LanguageProvider;
+    use ecp_core::analyzer::types::CallSite;
+    use std::path::Path;
+
+    fn calls_of(source: &str, function: &str) -> Vec<String> {
+        let graph = CppProvider::new()
+            .expect("CppProvider::new")
+            .parse_file(Path::new("t.cpp"), source.as_bytes())
+            .expect("parse_file");
+        let mut calls = graph
+            .nodes
+            .into_iter()
+            .find(|n| n.name == function)
+            .unwrap_or_else(|| panic!("no node named {function}"))
+            .calls;
+        calls.sort();
+        calls
+    }
+
+    /// `r->reset()` on a `Ref` value calls `Ref::operator->` and then
+    /// `reset` on its result, so the call names no `Ref.reset`; the old
+    /// per-function type map must not supply one either.
+    #[test]
+    fn test_cpp_callee_name_arrow_on_class_value_emits_untyped_member() {
+        let calls = calls_of(
+            "class Node { public: void reset(); };\n\
+             class Ref { public: Node* operator->(); void reset(); };\n\
+             void use(Ref r, Ref* p) { r->reset(); p->reset(); }\n",
+            "use",
+        );
+        let mut want = vec![CallSite::untyped_member("reset"), "Ref.reset".to_string()];
+        want.sort();
+        assert_eq!(calls, want);
     }
 }

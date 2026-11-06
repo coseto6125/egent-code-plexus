@@ -6,7 +6,11 @@
 //! - `is_static`: `static` modifier on class method OR storage-class `static` on free function.
 //! - `is_abstract`: pure-virtual declaration `virtual ... = 0;` (no body; ends with `= 0`).
 //! - `is_generator`: body contains `co_yield` (C++20 coroutine generator pattern).
-//! - `is_extern`: `extern "C"` linkage specifier OR declaration without body.
+//! - `is_extern`: declaration without body. The `extern` keyword on its own
+//!   sets `FLAG_C_EXTERN_STORAGE`.
+//! - parameter form (bits 11-12): `f()` is empty parens, `f(int)` / `f(void)`
+//!   a prototype list.
+//! - `FLAG_C_INTERNAL_LINKAGE`: a member of an anonymous namespace.
 //! - visibility (class methods): track `public:` / `protected:` / `private:` section labels.
 //!   Struct default = public (0); class default = private (2).
 //! - params: same as C (`Type name` or unnamed).
@@ -59,7 +63,7 @@ fn extract_one(
     let is_free_decl_only = fn_node.kind() == "declaration";
     let is_field_decl = fn_node.kind() == "field_declaration";
 
-    let mut has_extern = is_free_decl_only;
+    let mut has_extern_storage = false;
     let mut has_static = false;
     let mut has_virtual = false;
     let mut is_pure_virtual = false;
@@ -74,17 +78,13 @@ fn extract_one(
                     "storage_class_specifier" => {
                         let txt = node_text(&child, source);
                         match txt {
-                            "extern" => has_extern = true,
+                            "extern" => has_extern_storage = true,
                             "static" => has_static = true,
                             _ => {}
                         }
                     }
                     "virtual" => {
                         has_virtual = true;
-                    }
-                    "linkage_specification" => {
-                        // `extern "C"` linkage block.
-                        has_extern = true;
                     }
                     _ => {}
                 }
@@ -127,8 +127,14 @@ fn extract_one(
         }
     }
 
-    if has_extern {
+    if is_free_decl_only {
         flags |= FunctionMeta::FLAG_EXTERN;
+    }
+    if has_extern_storage {
+        flags |= FunctionMeta::FLAG_C_EXTERN_STORAGE;
+    }
+    if in_anonymous_namespace(fn_node) {
+        flags |= FunctionMeta::FLAG_C_INTERNAL_LINKAGE;
     }
     if has_static {
         flags |= FunctionMeta::FLAG_STATIC;
@@ -175,7 +181,8 @@ fn extract_one(
     flags |= vis_code << 6;
 
     // Parameters.
-    let params = extract_params(fn_node, source);
+    let (params, param_form) = extract_params(fn_node, source);
+    flags |= param_form;
 
     // Return type: `type` field; for trailing return `auto foo() -> Bar` check for
     // `trailing_return_type` node.
@@ -199,6 +206,13 @@ fn extract_one(
         decorators,
         type_params,
     })
+}
+
+/// Whether an enclosing `namespace { .. }` has no name: its members have
+/// internal linkage.
+fn in_anonymous_namespace(fn_node: &Node<'_>) -> bool {
+    std::iter::successors(fn_node.parent(), Node::parent)
+        .any(|p| p.kind() == "namespace_definition" && p.child_by_field_name("name").is_none())
 }
 
 /// Infer C++ method visibility from enclosing `field_declaration_list` access specifiers.
@@ -382,19 +396,23 @@ fn parse_cpp_attributes(txt: &str) -> Vec<String> {
         .collect()
 }
 
-/// Extract flat `[name1, type1, name2, type2, ...]` from C++ function parameters.
-fn extract_params(fn_node: &Node<'_>, source: &[u8]) -> Vec<String> {
+/// Extract flat `[name1, type1, name2, type2, ...]` from C++ function
+/// parameters. The second value is the parameter-form bits of
+/// `FunctionMeta::flags`: `f()` differs from `f(void)`.
+fn extract_params(fn_node: &Node<'_>, source: &[u8]) -> (Vec<String>, u16) {
     let Some(decl_node) = find_function_declarator(*fn_node) else {
-        return vec![];
+        return (vec![], 0);
     };
     let Some(params_node) = decl_node.child_by_field_name("parameters") else {
-        return vec![];
+        return (vec![], 0);
     };
     let mut result = Vec::new();
+    let mut listed_any = false;
     let mut cursor = params_node.walk();
     if cursor.goto_first_child() {
         loop {
             let child = cursor.node();
+            listed_any |= child.kind().contains("parameter") || child.kind() == "...";
             if child.kind() == "parameter_declaration"
                 || child.kind() == "optional_parameter_declaration"
             {
@@ -431,7 +449,12 @@ fn extract_params(fn_node: &Node<'_>, source: &[u8]) -> Vec<String> {
             }
         }
     }
-    result
+    let form = if listed_any {
+        0
+    } else {
+        FunctionMeta::C_PARAM_FORM_EMPTY_PARENS
+    };
+    (result, form)
 }
 
 /// True when the declarator carries `override` or `final` (a `virtual_specifier`).
@@ -514,20 +537,41 @@ fn extract_declarator_name(decl: Node<'_>, source: &[u8]) -> String {
 }
 
 /// The variables of a `template<typename T, class U = X, typename... Ts>`
-/// list. A non-type parameter (`int N`, `Foo N`) is skipped: its leading
-/// identifier is a type, not a name.
-fn template_type_params(list: &Node<'_>, source: &[u8]) -> Vec<String> {
+/// list, shared by callables and by class, struct and alias declarations.
+/// A constrained parameter (`template<Hashable K>`, `std::integral auto`)
+/// and a template template parameter (`template<class> class C`) declare
+/// their name too. A parameter with a built-in type (`int N`,
+/// `unsigned N`, `auto N`) is a value. A parameter whose type names a class
+/// (`Foo N`, `std::size_t N`) reads as a constrained one: the grammar cannot
+/// tell the two apart, and a value parameter shadows any type of its name in
+/// the template, so the name never types an annotation either way.
+pub(crate) fn template_type_params(list: &Node<'_>, source: &[u8]) -> Vec<String> {
     let mut cursor = list.walk();
     list.named_children(&mut cursor)
-        .filter(|entry| {
-            matches!(
-                entry.kind(),
-                "type_parameter_declaration"
-                    | "optional_type_parameter_declaration"
-                    | "variadic_type_parameter_declaration"
-            )
+        .filter_map(|entry| match entry.kind() {
+            "type_parameter_declaration"
+            | "optional_type_parameter_declaration"
+            | "variadic_type_parameter_declaration" => type_param_entry(&entry, source),
+            "template_template_parameter_declaration" => {
+                let mut inner = entry.walk();
+                let declared = entry
+                    .named_children(&mut inner)
+                    .find(|child| child.kind().ends_with("type_parameter_declaration"))?;
+                type_param_entry(&declared, source)
+            }
+            "parameter_declaration" | "optional_parameter_declaration" => {
+                let ty = entry.child_by_field_name("type")?;
+                if matches!(
+                    ty.kind(),
+                    "primitive_type" | "sized_type_specifier" | "placeholder_type_specifier"
+                ) {
+                    return None;
+                }
+                let name = entry.child_by_field_name("declarator")?;
+                (name.kind() == "identifier").then(|| node_text(&name, source).to_string())
+            }
+            _ => None,
         })
-        .filter_map(|entry| type_param_entry(&entry, source))
         .collect()
 }
 

@@ -844,6 +844,8 @@ impl ParseSpec for JavaScriptSpec {
                     &mut cx.nodes,
                     &dynamic,
                     &mut cx.call_sites,
+                    cx.path,
+                    &mut cx.blind_spots,
                 );
                 cx.path_literals = raw_path_literals;
                 cx.sql_refs = raw_sql_refs;

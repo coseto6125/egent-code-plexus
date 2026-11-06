@@ -15,13 +15,18 @@
 //!    than just `"Bark"`, feeding the resolver's Tier 2.5 qualifier lookup.
 
 use super::path_literals::{build_raw_path_literal, strip_go_string_value};
+use super::receiver_lower::GoLowering;
 use crate::calls::{
     attach_to_enclosing, is_call_callee, is_same_kind_field, node_range, range_width,
     reference_function, start_pos, Pos, PosRange,
 };
 use crate::function_meta::go::go_type_params;
-use ecp_core::analyzer::types::{CallSite, RawImport, RawNode, RawPathLiteral, RawSqlRef};
+use crate::receiver::{analyze_file, FileReceivers, Receiver};
+use ecp_core::analyzer::types::{
+    BlindSpot, CallSite, RawImport, RawNode, RawPathLiteral, RawSqlRef,
+};
 use std::collections::HashMap;
+use std::path::Path;
 use tree_sitter::Node;
 
 // ── receiver map ─────────────────────────────────────────────────────────────
@@ -109,9 +114,17 @@ struct Scope {
 #[derive(Debug, Default)]
 pub struct LocalTypes {
     scopes: Vec<Scope>,
+    /// The receiver states the receiver core solved; `scopes` answers only a
+    /// receiver the core did not track (a function it left to this path).
+    receivers: FileReceivers,
 }
 
 impl LocalTypes {
+    /// The receiver-budget blind spots of the file, left behind once.
+    pub fn take_blind_spots(&mut self) -> Vec<BlindSpot> {
+        std::mem::take(&mut self.receivers.blind_spots)
+    }
+
     /// Find the type bound to `var` at `pos`. The innermost visible binding
     /// wins even when it has no reducible type, so an outer typed binding
     /// cannot leak through a local shadow.
@@ -145,7 +158,14 @@ impl LocalTypes {
 
 /// Build `LocalTypes` by scanning every `function_declaration` and
 /// `method_declaration` in the file.
-pub fn collect_local_types(root: Node<'_>, source: &[u8], recv_map: &ReceiverMap) -> LocalTypes {
+///
+/// `path` is the file the receiver-budget blind spots quote.
+pub fn collect_local_types(
+    root: Node<'_>,
+    source: &[u8],
+    recv_map: &ReceiverMap,
+    path: &Path,
+) -> LocalTypes {
     let mut scopes: Vec<Scope> = Vec::new();
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
@@ -173,7 +193,10 @@ pub fn collect_local_types(root: Node<'_>, source: &[u8], recv_map: &ReceiverMap
     // to the receiver type (already included via collect_params above).
     // recv_map is currently unused after the refactor but kept for API stability.
     let _ = recv_map;
-    LocalTypes { scopes }
+    LocalTypes {
+        scopes,
+        receivers: analyze_file(&GoLowering, &(), root, source, path),
+    }
 }
 
 fn collect_function_scope(function: Node<'_>, source: &[u8], scopes: &mut Vec<Scope>) {
@@ -560,7 +583,11 @@ fn method_value(
     {
         return None;
     }
-    let ty = locals.lookup(start_pos(selector), operand.utf8_text(source).ok()?)?;
+    let ty = match locals.receivers.receiver_at(operand) {
+        Some(Receiver::Known(ty)) => &*ty.text,
+        Some(Receiver::Unknown(_)) => return None,
+        None => locals.lookup(start_pos(selector), operand.utf8_text(source).ok()?)?,
+    };
     Some(format!("{ty}.{}", field.utf8_text(source).ok()?))
 }
 
@@ -590,6 +617,9 @@ fn go_callee_name(
                 if operand.kind() == "identifier" {
                     let var_name = node_text(operand, source)?;
                     let pos = start_pos(call);
+                    if let Some(receiver) = locals.receivers.receiver_at(operand) {
+                        return Some(receiver.call_entry(&method_name));
+                    }
                     if let Some(ty) = locals.lookup(pos, &var_name) {
                         return Some(format!("{ty}.{method_name}"));
                     }
@@ -647,7 +677,7 @@ fn go_callee_name(
 /// Extract the bare type identifier from a type node, stripping pointer `*`
 /// and type arguments (`Wrap[int]` → `Wrap`). Returns `None` for qualified
 /// types (they can't be matched against a single class name in the resolver).
-fn bare_type_name(ty_node: Node<'_>, source: &[u8]) -> Option<String> {
+pub(super) fn bare_type_name(ty_node: Node<'_>, source: &[u8]) -> Option<String> {
     match ty_node.kind() {
         "type_identifier" => node_text(ty_node, source),
         "generic_type" => {

@@ -49,6 +49,7 @@ pub mod post_process;
 pub mod preproc_fallback;
 pub mod protobuf;
 pub mod python;
+pub mod receiver;
 pub mod resolution;
 pub mod route_detector;
 pub mod ruby;

@@ -935,8 +935,13 @@ impl ParseSpec for RubySpec {
                 // Extract call sites with receiver-type binding.
                 // Handles self.method → EnclosingClass.method, Constant.method → Constant.method.
                 // Same DFS also collects path-shaped string literals.
-                let (raw_path_literals, raw_sql_refs) =
-                    extract_ruby_calls_and_path_literals(root, source, &mut cx.nodes);
+                let (raw_path_literals, raw_sql_refs) = extract_ruby_calls_and_path_literals(
+                    root,
+                    source,
+                    &mut cx.nodes,
+                    cx.path,
+                    &mut cx.blind_spots,
+                );
                 cx.path_literals = raw_path_literals;
                 cx.sql_refs = raw_sql_refs;
             }

@@ -10,6 +10,7 @@ use crate::framework_confidence;
 use crate::framework_helpers::{
     collect_jvm_transactional_scopes, has_import_from, MODULE_LEVEL_SOURCE,
 };
+use crate::function_meta::declared_type_params;
 use crate::parse_budget::{parse_with_budget, ParseBudget};
 use ecp_core::analyzer::membership::span_area;
 use ecp_core::analyzer::parse_prof::Pass;
@@ -480,6 +481,15 @@ impl ParseSpec for KotlinSpec {
                     i
                 });
                 let entry = &mut cx.nodes[idx];
+                if !entry
+                    .decorators
+                    .iter()
+                    .any(|d| RawNode::is_type_params_marker(d))
+                {
+                    entry
+                        .decorators
+                        .extend(type_params_decorator(root, k, source));
+                }
 
                 if !m.is_exported {
                     entry.is_exported = false;
@@ -546,6 +556,8 @@ impl ParseSpec for KotlinSpec {
                     cx.tree.root_node(),
                     cx.source,
                     &mut cx.nodes,
+                    cx.path,
+                    &mut cx.blind_spots,
                 );
                 cx.path_literals = raw_path_literals;
                 cx.sql_refs = raw_sql_refs;
@@ -577,5 +589,77 @@ impl ParseSpec for KotlinSpec {
         category: FileCategory,
     ) -> Vec<RawFunctionMeta> {
         crate::function_meta::kotlin::extract(root, source, nodes, category)
+    }
+}
+
+/// The type-parameter marker of a generic class, interface or typealias: the
+/// direct `type_parameters` child of the declaration. `None` for a callable
+/// (its meta holds them) and for a declaration without a list.
+fn type_params_decorator(root: Node<'_>, kind: NodeKind, source: &[u8]) -> Option<String> {
+    if !matches!(
+        kind,
+        NodeKind::Class | NodeKind::Interface | NodeKind::Typedef
+    ) {
+        return None;
+    }
+    let mut cursor = root.walk();
+    let list = root
+        .children(&mut cursor)
+        .find(|child| child.kind() == "type_parameters")?;
+    let names = declared_type_params(&list, source);
+    (!names.is_empty()).then(|| RawNode::type_params_marker(names.iter().map(String::as_str)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(src: &str) -> Vec<RawNode> {
+        KotlinProvider::new()
+            .expect("provider")
+            .parse_file(Path::new("t.kt"), src.as_bytes())
+            .expect("parse")
+            .nodes
+    }
+
+    fn params(src: &str, name: &str) -> Vec<String> {
+        let nodes = parse(src);
+        nodes
+            .iter()
+            .find(|n| n.name == name && n.kind != NodeKind::Constructor)
+            .map(|n| n.declared_type_params().map(str::to_string).collect())
+            .unwrap_or_else(|| panic!("no node {name}: {nodes:?}"))
+    }
+
+    #[test]
+    fn test_type_params_marker_kotlin_generic_declarations_round_trip() {
+        assert_eq!(params("class Box<T>(val v: T)", "Box"), ["T"]);
+        assert_eq!(params("class Pair<K, V : K>", "Pair"), ["K", "V"]);
+        assert_eq!(params("interface Repo<E>", "Repo"), ["E"]);
+        assert_eq!(params("typealias Fn<T> = (T) -> Unit", "Fn"), ["T"]);
+    }
+
+    #[test]
+    fn test_type_params_marker_kotlin_plain_declaration_has_none() {
+        assert!(params("class Plain", "Plain").is_empty());
+        assert!(params("class Plain : Base<Int>()", "Plain").is_empty());
+        assert!(params("typealias Cb = (String) -> Unit", "Cb").is_empty());
+        assert!(params("class Box<T> { class Inner }", "Inner").is_empty());
+    }
+
+    #[test]
+    fn test_type_params_marker_kotlin_callable_has_none() {
+        for n in parse("fun <T> id(x: T): T = x\nclass C<T> { fun <U> put(x: U) {} }")
+            .iter()
+            .filter(|n| matches!(n.kind, NodeKind::Function | NodeKind::Method))
+        {
+            assert!(
+                !n.decorators
+                    .iter()
+                    .any(|d| RawNode::is_type_params_marker(d)),
+                "{}",
+                n.name
+            );
+        }
     }
 }

@@ -28,10 +28,11 @@
   Function     : 1  (increment)
 
 === Astro Page.astro (snapshot-only — no oracle) ===
-  total_nodes  : 4
+  total_nodes  : 6
   imports      : 2
   Section      : 2  (frontmatter, template)
   Interface    : 1  (User)
+  Property     : 2  (User.id, User.name)
   Const        : 1  (users)
 
 === Vue OptionsApi.vue (snapshot-only — Options API pattern) ===
@@ -41,10 +42,11 @@
   Method       : 5  (data, doubled, increment, reset, mounted)
 
 === Vue PropsAndEmits.vue (snapshot-only — Vue 3 macros) ===
-  total_nodes  : 8
+  total_nodes  : 10
   imports      : 1
   Section      : 2  (template, script setup)
   Interface    : 1  (ButtonProps)
+  Property     : 2  (ButtonProps.label, ButtonProps.disabled)
   Const        : 3  (props, emit, isDisabled)
   Function     : 2  (onClick, reset)
 
@@ -89,10 +91,11 @@
   Const        : 2  (isLoggedIn, users)
 
 === Astro TypedProps.astro (snapshot-only — TS interface + const captured) ===
-  total_nodes  : 4
+  total_nodes  : 7
   imports      : 1
   Section      : 2  (frontmatter, template)
   Interface    : 1  (Props)
+  Property     : 3  (Props.title, Props.description, Props.imageUrl)
   Const        : 1  (slug)
 
 # Parity notes (Vue vs ref-gitnexus):

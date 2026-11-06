@@ -481,6 +481,7 @@ const VERSION_HISTORY: &[VersionBumpEntry] = &[
     VersionBumpEntry { version: 18, reason: "PartOf RelType: each C# partial type part links to the one representative part, so a traversal from any part reaches every part's members." },
     VersionBumpEntry { version: 19, reason: "File records store the parsed language (file and resolution language), so a Vue/Svelte/Astro file resolves as its script language and the global tier pairs files by that stored language." },
     VersionBumpEntry { version: 20, reason: "later_nodes bitmap: each node Pass 1 keeps out of the name tables (a later overload, a redefinition, a C# arity sibling), so the overlay's name scans skip what the index skips." },
+    VersionBumpEntry { version: 21, reason: "containers column: each node's innermost enclosing module, namespace, type or impl of its file, so a Rust path through twin modules or types binds the member at the exact path on the overlay as in a reindex, and an interface property or an enclosing generic's T stays apart from a project name." },
     // Future bumps append here. The is_test field on BlindSpotRecord
     // (FU-001) was added without a discriminant bump — rkyv tolerates the
     // trailing-field addition as long as nothing earlier shifts.

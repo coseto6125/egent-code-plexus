@@ -149,6 +149,11 @@ pub(crate) fn declarator_type(
         if p.id() == decl.id() {
             break;
         }
+        // A name inside parentheses is a function-pointer member
+        // (`void (*open)(int)`): the text before it is no type.
+        if p.kind() == "parenthesized_declarator" {
+            return None;
+        }
         top = p;
     }
     let first = decl.child_by_field_name("declarator")?;
@@ -407,12 +412,12 @@ fn extern_bound_identifier<'a>(decl: Node<'a>) -> Option<Node<'a>> {
 }
 
 /// Walk the translation unit and emit `RawImport` entries for the C "named
-/// binding" constructs: `typedef` aliases, `#define` macros (object-like
-/// and function-like), and `extern` declarations. Include-guard `#define`s
-/// are filtered via [`is_include_guard`].
+/// binding" constructs: `#define` macros (object-like and function-like) and
+/// `extern` declarations. Include-guard `#define`s are filtered via
+/// [`is_include_guard`]. A `typedef` is no import: its `Typedef` node carries
+/// the aliased type ([`typedef_aliased_type`]).
 ///
 /// `RawImport` shape per construct:
-/// - `typedef X Y;`        → `{ source: "X", alias: Some("Y"), imported_name: "Y" }`
 /// - `#define MAX 100`     → `{ source: "100", alias: Some("MAX"), imported_name: "MAX" }`
 /// - `#define ADD(a,b) ..` → `{ source: "(a,b) ..", alias: Some("ADD"), imported_name: "ADD" }`
 /// - `extern int g;`       → `{ source: "external", alias: Some("g"), imported_name: "g" }`
@@ -428,7 +433,6 @@ fn extract_named_bindings(
     stack.reverse();
     while let Some(node) = stack.pop() {
         match node.kind() {
-            "type_definition" => emit_typedef_binding(node, source, imports),
             "preproc_def" => emit_object_macro_binding(node, source, rows, imports),
             "preproc_function_def" => emit_function_macro_binding(node, source, imports),
             "declaration" => emit_extern_binding(node, source, imports),
@@ -584,73 +588,51 @@ pub(crate) fn is_typedef_tail(decl: Node<'_>) -> bool {
         .is_some_and(|(_, stmt)| stmt.id() == decl.id())
 }
 
-fn emit_typedef_binding(td: Node<'_>, source: &[u8], imports: &mut Vec<RawImport>) {
-    if is_cut_typedef(td) {
-        if let Some((alias, stmt)) = macro_typedef_tail(td) {
-            let underlying = stmt
-                .child_by_field_name("type")
-                .and_then(|t| t.utf8_text(source).ok())
-                .unwrap_or("<unknown>");
-            let stars = stmt
-                .child_by_field_name("declarator")
-                .and_then(|d| pointer_prefix(d, source));
-            let underlying = match stars {
-                Some(stars) => format!("{underlying} {stars}"),
-                None => underlying.to_string(),
-            };
-            let alias = alias.utf8_text(source).unwrap_or_default();
-            imports.push(driver::imports::raw(
-                underlying,
-                alias.to_string(),
-                Some(alias.to_string()),
-                Some(BindingKind::Alias),
-            ));
+/// The type a typedef `declarator` aliases: the text between `typedef` and
+/// the first declarator, a struct body collapsed to its tag, plus the
+/// declarator's own leading stars (`typedef char **A;` aliases `char **`,
+/// `typedef void *(*F)(int);` the return type `void *`). A typedef cut short
+/// by a macro call takes the type of the statement `tail` that holds its
+/// alias. `None` when no type text is left.
+fn typedef_aliased_type(
+    td: Node<'_>,
+    declarator: Option<Node<'_>>,
+    tail: Option<Node<'_>>,
+    source: &[u8],
+) -> Option<String> {
+    if tail.is_none() && td.kind() != "type_definition" {
+        return None;
+    }
+    let (shared, declarator) = match tail {
+        Some(stmt) => (
+            stmt.child_by_field_name("type")?
+                .utf8_text(source)
+                .ok()?
+                .trim()
+                .to_string(),
+            stmt.child_by_field_name("declarator"),
+        ),
+        None => {
+            let first = td.child_by_field_name("declarator")?;
+            let text = slice_type_before(td, first, source)?;
+            // `__extension__ typedef ..` (glibc, kernel uapi) leads with the
+            // GNU keyword the grammar allows before `typedef`.
+            let shared = text
+                .trim_start_matches("__extension__")
+                .trim_start()
+                .strip_prefix("typedef")?
+                .trim()
+                .to_string();
+            (shared, declarator)
         }
-        return;
-    }
-    // `typedef struct node Node, *NodePtr;` binds each declarator. The
-    // underlying type is the text between `typedef` and the first
-    // declarator, which keeps `struct foo { ... }` and function-pointer
-    // return types as written.
-    let mut cursor = td.walk();
-    let declarators: Vec<Node<'_>> = td
-        .children_by_field_name("declarator", &mut cursor)
-        .collect();
-    let Some(first) = declarators.first() else {
-        return;
     };
-    let typedef_kw_end = {
-        let mut c = td.walk();
-        let kw_end = td
-            .children(&mut c)
-            .find(|ch| ch.kind() == "typedef")
-            .map(|ch| ch.end_byte())
-            .unwrap_or(td.start_byte());
-        kw_end
-    };
-    let shared = source
-        .get(typedef_kw_end..first.start_byte())
-        .and_then(|b| std::str::from_utf8(b).ok())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "<unknown>".to_string());
-    for alias_root in &declarators {
-        let Some(alias) = typedef_alias(*alias_root).and_then(|a| a.utf8_text(source).ok()) else {
-            continue;
-        };
-        // The leading stars belong to the aliased, returned or element type:
-        // `typedef char **A;` is `char **`, `typedef void *(*F)(int);` `void *`.
-        let underlying = match pointer_prefix(*alias_root, source) {
-            Some(stars) => format!("{shared} {stars}"),
-            None => shared.clone(),
-        };
-        imports.push(driver::imports::raw(
-            underlying,
-            alias.to_string(),
-            Some(alias.to_string()),
-            Some(BindingKind::Alias),
-        ));
+    if shared.is_empty() {
+        return None;
     }
+    Some(match declarator.and_then(|d| pointer_prefix(d, source)) {
+        Some(stars) => format!("{shared} {stars}"),
+        None => shared,
+    })
 }
 
 fn emit_object_macro_binding(
@@ -976,11 +958,15 @@ impl ParseSpec for CSpec {
                     .map(|s| s.to_string())
             });
             if let Some(name_str) = name_owned {
-                let type_annotation = type_node.and_then(|t| {
-                    std::str::from_utf8(&source[t.start_byte()..t.end_byte()])
-                        .ok()
-                        .map(|s| s.trim().to_string())
-                });
+                let type_annotation = if k == NodeKind::Typedef {
+                    typedef_aliased_type(root, d.name, tail, source)
+                } else {
+                    type_node.and_then(|t| {
+                        std::str::from_utf8(&source[t.start_byte()..t.end_byte()])
+                            .ok()
+                            .map(|s| s.trim().to_string())
+                    })
+                };
 
                 // A function with `static` storage class is translation-unit private.
                 let is_exported = !has_static_specifier(root, source);
@@ -1126,7 +1112,8 @@ impl ParseSpec for CSpec {
                     &cx.call_sites,
                 );
             }
-            // Named bindings: `typedef`, `#define`, `extern` declarations.
+            // Named bindings: `#define`, `extern` declarations. A `typedef`
+            // is a Typedef node, no binding.
             // Emitted as `RawImport` with `alias = Some(short_name)` mirroring
             // Java's static-import convention so downstream resolvers can
             // qualifier-scope-lookup C aliases the same way.

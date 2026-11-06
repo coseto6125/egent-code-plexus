@@ -103,3 +103,21 @@ fn test_typed_property_annotation_binds_project_type() {
         "plain parameter is no property"
     );
 }
+
+/// A10 no-regression. Stands for: PHP has no class type parameters, so a typed
+/// property keeps binding its project class (positive only).
+#[test]
+fn test_field_annotation_no_class_type_parameters_binds_project_class() {
+    let g = name_ref_support::graph(
+        &PhpProvider::new().unwrap(),
+        &[(
+            "src/Box.php",
+            "<?php\nclass Token {}\nclass Box { public Token $tokens; }\n",
+        )],
+    );
+    assert!(
+        annotated(&g, "tokens").contains(&("src/Box.php".to_string(), "Token".to_string())),
+        "{:?}",
+        annotated(&g, "tokens")
+    );
+}

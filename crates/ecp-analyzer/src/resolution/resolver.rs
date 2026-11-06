@@ -37,6 +37,7 @@
 //! regression suite and `crates/ecp-analyzer/benches/resolver_lookup.rs` for
 //! the before/after bench numbers.
 
+use ecp_core::analyzer::admission::{language_reaches, Gate, Site, SiteForm};
 use ecp_core::analyzer::c_family;
 use ecp_core::analyzer::csharp_access::{self, CallAccess};
 use ecp_core::analyzer::csharp_extension::{self, ReceiverSite};
@@ -800,21 +801,52 @@ impl<'r, 'a> NameTierFacts for IndexTiers<'r, 'a, '_> {
         imports: &[RawImport],
         target: ResolveTarget,
         call: Option<CallPick<'_>>,
+        heritage: &[String],
+        form: SiteForm,
     ) -> Resolution {
         let table = self.facts.0.symbol_table;
         let free_only = call.is_some_and(|call| call.free_only);
-        let candidates = || table.global_field_candidates(name, target, free_only);
-        // The language test first: the caller's `FileMeta` costs a path
-        // lookup, and only a C / C++ caller reads it here.
+        let caller = NameTierFacts::caller(self);
+        let gate = Gate::new(
+            table,
+            Site {
+                caller,
+                caller_file: self.source,
+                caller_owner: call.and_then(|call| call.owner),
+                heritage,
+                form,
+                name,
+                imports,
+            },
+        );
+        let candidates = || gate.admitted(table.global_field_candidates(name, target, free_only));
         let field = c_family::is_c_family(self.language)
-            .then(|| table.c_family_field(NameTierFacts::caller(self), self.source, candidates))
+            .then(|| table.c_family_field(caller, self.source, candidates))
             .flatten();
-        match field {
+        gate.settle(match field {
             Some(field) => {
                 name_tiers::global_tier(self, name, imports, target, call, || field.iter().copied())
             }
             None => name_tiers::global_tier(self, name, imports, target, call, candidates),
+        })
+    }
+
+    fn canonical_c_declaration(&self, id: NodeId) -> NodeId {
+        let table = self.facts.0.symbol_table;
+        if !c_family::may_be_declaration(table, id, table.c_callable(id)) {
+            return id;
         }
+        let Some(name) = type_ladder::TypeFacts::name_of(table, id) else {
+            return id;
+        };
+        c_family::canonical_declaration(
+            table,
+            NameTierFacts::caller(self),
+            self.source,
+            id,
+            || table.global_field_candidates(name, ResolveTarget::Callable, false),
+            |id| table.c_callable(id),
+        )
     }
 
     fn decl_file(&self, id: NodeId) -> Option<&str> {
@@ -1780,7 +1812,14 @@ impl<'a> Resolver<'a> {
             FieldRead::Global => {
                 let language = self.symbol_table.file_language(&source_file_str);
                 self.tiers(source_file, &source_file_str, language)
-                    .global(name, raw_imports, ResolveTarget::Field, None)
+                    .global(
+                        name,
+                        raw_imports,
+                        ResolveTarget::Field,
+                        None,
+                        &[],
+                        SiteForm::GlobalFieldRead,
+                    )
                     .edge()
                     .into_iter()
                     .collect()
@@ -2034,8 +2073,11 @@ impl<'a> Resolver<'a> {
             let exported = import.imported_name.as_str();
             let mut in_project = false;
             let mut hit: Option<NodeId> = None;
+            let caller_meta = st.file_meta(source_file_str);
             self.for_each_candidate(source_file, &import.source, |cand| {
-                if !st.has_file(cand) {
+                // A file of a language the import cannot name is no
+                // candidate (`from cls import Cls` and `cls.ts`).
+                if !st.has_file(cand) || !language_reaches(caller_meta, st.file_meta(cand)) {
                     return true;
                 }
                 in_project = true;
@@ -2545,6 +2587,140 @@ mod tests {
             ResolveTarget::Callable,
         );
         assert!(out.is_empty(), "{out:?}");
+    }
+
+    /// `api.h` declares `lib_init`, `lib.c` defines it, `widget.cpp` holds an
+    /// unrelated `W::lib_init` when `with_widget`.
+    fn a05_table(with_widget: bool) -> SymbolTable {
+        let mut st = st_with(&[
+            ("api.h", "lib_init", NodeKind::Function),
+            ("lib.c", "lib_init", NodeKind::Function),
+        ]);
+        st.note_c_callable(0, ecp_core::graph::FunctionMeta::FLAG_EXTERN, &[]);
+        st.note_c_callable(1, 0, &[]);
+        if with_widget {
+            st.register_node("widget.cpp", "W", 2, NodeKind::Struct);
+            st.register_node_owned("widget.cpp", "lib_init", 3, NodeKind::Method, "W");
+            st.note_c_callable(3, 0, &[]);
+        }
+        st
+    }
+
+    fn bare_call_targets(st: &SymbolTable, file: &str, owner: Option<&str>) -> Vec<NodeId> {
+        Resolver::new(st)
+            .resolve_call(
+                &PathBuf::from(file),
+                CallSite::Plain("lib_init"),
+                &[],
+                &[],
+                owner,
+                None,
+                Resolution::Unknown,
+            )
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect()
+    }
+
+    #[test]
+    fn test_resolve_call_cpp_bare_call_unrelated_class_method_binds_c_definition() {
+        assert_eq!(
+            bare_call_targets(&a05_table(true), "main.cpp", None),
+            vec![1]
+        );
+        assert_eq!(
+            bare_call_targets(&a05_table(false), "main.cpp", None),
+            vec![1]
+        );
+    }
+
+    #[test]
+    fn test_resolve_call_cpp_bare_call_from_own_class_member_binds_member() {
+        let st = a05_table(true);
+        assert_eq!(bare_call_targets(&st, "widget.cpp", Some("W")), vec![3]);
+    }
+
+    /// `types.hpp` declares the static member `Inst::cb_ns` in its class,
+    /// `cb.cpp` defines it out of line; `extra` adds a second out-of-line
+    /// definition of the same owner and parameters, `twin` a second class
+    /// named `Inst` (another namespace's) whose header declares `cb_ns` too.
+    fn member_table_with(extra: bool, twin: bool) -> SymbolTable {
+        let mut st = SymbolTable::new();
+        st.register_node_owned("types.hpp", "cb_ns", 0, NodeKind::Method, "Inst");
+        st.register_node_owned("cb.cpp", "cb_ns", 1, NodeKind::Method, "Inst");
+        st.register_node_owned("other.cpp", "cb_ns", 2, NodeKind::Method, "Other");
+        st.register_node("types.hpp", "Inst", 3, NodeKind::Class);
+        let params = ["x".to_string(), "int &".to_string()];
+        st.note_c_callable(0, ecp_core::graph::FunctionMeta::FLAG_STATIC, &params);
+        st.note_c_callable(1, 0, &params);
+        st.note_c_callable(2, 0, &params);
+        if extra {
+            st.register_node_owned("cb2.cpp", "cb_ns", 4, NodeKind::Method, "Inst");
+            st.note_c_callable(4, 0, &params);
+        }
+        if twin {
+            // Ids stay dense: the next free one after the optional `extra`.
+            let class = 4 + u32::from(extra);
+            st.register_node("b/inst.hpp", "Inst", class, NodeKind::Class);
+            st.register_node_owned("b/inst.hpp", "cb_ns", class + 1, NodeKind::Method, "Inst");
+            st.note_c_callable(class + 1, 0, &params);
+        }
+        st
+    }
+
+    fn member_table(extra: bool) -> SymbolTable {
+        member_table_with(extra, false)
+    }
+
+    fn canonical(st: &SymbolTable, id: NodeId) -> NodeId {
+        let path = PathBuf::from("main.cpp");
+        Resolver::new(st)
+            .tiers(&path, "main.cpp", Language::Cpp)
+            .canonical_c_declaration(id)
+    }
+
+    #[test]
+    fn test_canonical_c_declaration_header_member_one_out_of_line_definition_returns_definition() {
+        assert_eq!(canonical(&member_table(false), 0), 1);
+    }
+
+    #[test]
+    fn test_canonical_c_declaration_header_member_two_definitions_returns_declaration() {
+        assert_eq!(canonical(&member_table(true), 0), 0);
+    }
+
+    /// Stands for: `a::Inst` and `b::Inst` both declare `cb_ns`, and only
+    /// `a::Inst`'s is defined out of line. The candidates carry the bare
+    /// owner, so the definition settles neither header member: `b::Inst`'s
+    /// inline member must not reach `a::Inst`'s body.
+    #[test]
+    fn test_canonical_c_declaration_two_classes_of_one_name_returns_declaration() {
+        let st = member_table_with(false, true);
+        assert_eq!(canonical(&st, 5), 5);
+        assert_eq!(canonical(&st, 0), 0);
+    }
+
+    #[test]
+    fn test_canonical_c_declaration_definition_or_other_kind_returns_itself() {
+        let st = member_table(false);
+        assert_eq!(canonical(&st, 1), 1);
+        let st = st_with(&[("t.hpp", "S", NodeKind::Struct)]);
+        assert_eq!(canonical(&st, 0), 0);
+    }
+
+    #[test]
+    fn test_canonical_c_declaration_prototype_returns_settling_definition() {
+        assert_eq!(canonical(&a05_table(false), 0), 1);
+    }
+
+    #[test]
+    fn test_canonical_c_declaration_member_without_meta_returns_declaration() {
+        let mut st = SymbolTable::new();
+        st.register_node_owned("types.hpp", "cb_ns", 0, NodeKind::Method, "Inst");
+        st.register_node_owned("cb.cpp", "cb_ns", 1, NodeKind::Method, "Inst");
+        st.register_node("types.hpp", "Inst", 2, NodeKind::Class);
+        st.note_c_callable(1, 0, &["x".to_string(), "int &".to_string()]);
+        assert_eq!(canonical(&st, 0), 0);
     }
 
     #[test]

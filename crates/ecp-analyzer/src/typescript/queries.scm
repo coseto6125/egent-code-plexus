@@ -192,9 +192,15 @@
 ;; Properties — class fields (public_field_definition), constructor parameter
 ;; properties (required_parameter / optional_parameter with accessibility modifier).
 ;; The declared type text feeds the `type_annotation` edge.
-;; Interface property_signature is intentionally omitted: ref-gitnexus does not
-;; emit those as Property nodes (pinned by typescript_method_classification.rs
-;; `interface_property_signature_not_emitted`).
+;; An interface `property_signature` is a Property owned by the interface, so a
+;; field read on a class receiver never lands on an interface namesake. Only the
+;; interface body: an object type literal's members are not declarations.
+(interface_body
+  (property_signature
+    name: (property_identifier) @property.name
+    type: (type_annotation (_) @type)?
+  ) @property)
+
 (public_field_definition
   name: (property_identifier) @property.name
   type: (type_annotation (_) @type)?

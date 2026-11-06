@@ -1362,6 +1362,31 @@ pub struct PythonFile {
     module_names: Option<ModuleNames>,
 }
 
+/// The type-parameter marker of a PEP 695 generic class (`class Box[T]`):
+/// the first identifier of each entry, so a bound is never read as a name.
+/// `None` for a callable, a plain class, or an empty list.
+fn type_params_decorator(root: &Node<'_>, kind: NodeKind, source: &[u8]) -> Option<String> {
+    fn first_identifier(node: Node<'_>) -> Option<Node<'_>> {
+        if node.kind() == "identifier" {
+            return Some(node);
+        }
+        let mut cursor = node.walk();
+        let first = node.named_children(&mut cursor).next()?;
+        first_identifier(first)
+    }
+    if kind != NodeKind::Class || root.kind() != "class_definition" {
+        return None;
+    }
+    let list = root.child_by_field_name("type_parameters")?;
+    let mut cursor = list.walk();
+    let names: Vec<&str> = list
+        .named_children(&mut cursor)
+        .filter_map(first_identifier)
+        .filter_map(|name| name.utf8_text(source).ok())
+        .collect();
+    (!names.is_empty()).then(|| RawNode::type_params_marker(names))
+}
+
 impl ParseSpec for PythonSpec {
     type Role = PythonRole;
     type Match<'t> = PythonMatch<'t>;
@@ -1737,6 +1762,8 @@ impl ParseSpec for PythonSpec {
         }
 
         if let (Some(n), Some(k), Some(root)) = (d.name, d.kind, root_span_node) {
+            let mut decorators = decorators;
+            decorators.extend(type_params_decorator(&root, k, source));
             // No ancestor filter: emit every assignment that matches the
             // query. Lets downstream consumers decide what's a true
             // module-level vs class-attr vs local — we don't pre-classify.
@@ -2029,7 +2056,8 @@ impl ParseSpec for PythonSpec {
                 // local annotation (typed param or annotated assignment) — fed
                 // back into the resolver's Tier 2.5 qualifier-scoped lookup.
                 // Falls back to bare member name when no annotation is in scope.
-                let local_types = collect_local_types(root, source);
+                let mut local_types = collect_local_types(root, source, cx.path);
+                cx.blind_spots.extend(local_types.take_blind_spots());
                 // A literal `importlib.import_module("<lit>")` is a synthetic
                 // namespace import, like the static arms above.
                 let mut dynamic = collect_dynamic_imports(root, source);
@@ -2233,5 +2261,62 @@ impl ParseSpec for PythonSpec {
         category: FileCategory,
     ) -> Vec<RawFunctionMeta> {
         crate::function_meta::python::extract(root, source, nodes, category)
+    }
+}
+
+#[cfg(test)]
+mod type_param_marker_tests {
+    use super::PythonProvider;
+    use ecp_core::analyzer::provider::LanguageProvider;
+    use ecp_core::analyzer::types::RawNode;
+    use ecp_core::graph::NodeKind;
+    use std::path::Path;
+
+    fn parse(src: &str) -> Vec<RawNode> {
+        PythonProvider::new()
+            .expect("provider")
+            .parse_file(Path::new("t.py"), src.as_bytes())
+            .expect("parse")
+            .nodes
+    }
+
+    fn params(src: &str, name: &str) -> Vec<String> {
+        let nodes = parse(src);
+        nodes
+            .iter()
+            .find(|n| n.kind == NodeKind::Class && n.name == name)
+            .map(|n| n.declared_type_params().map(str::to_string).collect())
+            .unwrap_or_else(|| panic!("no class {name}: {nodes:?}"))
+    }
+
+    #[test]
+    fn test_type_params_marker_python_pep695_class_round_trips() {
+        assert_eq!(params("class Box[T]:\n    pass\n", "Box"), ["T"]);
+        assert_eq!(
+            params("class Pair[K, V: int, *Ts]:\n    pass\n", "Pair"),
+            ["K", "V", "Ts"]
+        );
+    }
+
+    #[test]
+    fn test_type_params_marker_python_plain_class_has_none() {
+        assert!(params("class Plain:\n    pass\n", "Plain").is_empty());
+        assert!(params("class Sub(Base[int]):\n    pass\n", "Sub").is_empty());
+    }
+
+    #[test]
+    fn test_type_params_marker_python_callable_has_none() {
+        for n in parse("def f[T](x: T) -> T:\n    return x\n")
+            .iter()
+            .filter(|n| matches!(n.kind, NodeKind::Function | NodeKind::Method))
+        {
+            assert!(
+                !n.decorators
+                    .iter()
+                    .any(|d| RawNode::is_type_params_marker(d)),
+                "{}",
+                n.name
+            );
+        }
     }
 }

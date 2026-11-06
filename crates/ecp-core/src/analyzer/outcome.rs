@@ -30,7 +30,9 @@ pub enum Tier {
     Global,
     NearestCopy,
     /// A member call on an untyped receiver bound by the member name alone,
-    /// in a language where that is a guess (`ladder::untyped_bind_is_guess`).
+    /// in a language where that is a guess (`ladder::untyped_bind_is_guess`),
+    /// or an unproven one where that binds as a guess
+    /// (`ladder::unproven_binds_guess`).
     /// It replaces the tier that found the method, so a same-named method of
     /// an unrelated type never reads as evidence.
     UntypedName,
@@ -101,12 +103,19 @@ pub enum NoEdge {
     DeclaredAttribute,
     /// A typed chain level found no member after its Kotlin retry.
     ChainBroken,
+    /// A member call whose receiver the receiver core left unproven
+    /// (`CallSite::UnprovenMember`), in a language where that binds nothing
+    /// (`ladder::unproven_binds_guess`): no tier and no fallback may guess.
+    ReceiverUnproven,
 }
 
 impl NoEdge {
     pub const fn reach(self) -> Reach {
         match self {
-            NoEdge::PackageMissing | NoEdge::DeclaredAttribute | NoEdge::ChainBroken => Reach::Call,
+            NoEdge::PackageMissing
+            | NoEdge::DeclaredAttribute
+            | NoEdge::ChainBroken
+            | NoEdge::ReceiverUnproven => Reach::Call,
             _ => Reach::Ladder,
         }
     }
@@ -291,6 +300,15 @@ mod tests {
     fn test_noedge_chain_broken_allows_fallbacks_false() {
         assert_eq!(NoEdge::ChainBroken.reach(), Reach::Call);
         assert!(!Resolution::NoEdge(NoEdge::ChainBroken).call_fallbacks_allowed());
+    }
+
+    #[test]
+    fn test_noedge_receiver_unproven_allows_fallbacks_false() {
+        assert_eq!(NoEdge::ReceiverUnproven.reach(), Reach::Call);
+        let unproven = Resolution::NoEdge(NoEdge::ReceiverUnproven);
+        assert!(!unproven.call_fallbacks_allowed());
+        assert_eq!(unproven.edge(), None);
+        assert_eq!(unproven.named_only(), unproven);
     }
 
     #[test]

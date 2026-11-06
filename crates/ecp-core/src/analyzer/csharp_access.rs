@@ -13,9 +13,10 @@
 //! type (`object o; o.M()`) binds no ordinary target the rule could judge
 //! (codex ruling P-recv Q3); only an extension method, which it admits.
 
-use crate::analyzer::csharp_extension::{is_keyword_type, EXTENSION_FLAG};
+use crate::analyzer::csharp_extension::{is_extension, is_keyword_type};
 use crate::analyzer::same_file_pick::PickFacts;
 use crate::analyzer::types::CallSite;
+use crate::file_category::Language;
 use crate::graph::{FunctionMeta, NodeKind};
 
 /// `FunctionMeta::flags` visibility code of `private` (bits 6-8).
@@ -83,7 +84,7 @@ pub fn call_admits<F: PickFacts + ?Sized>(
         return true;
     }
     let is_static = flags & FunctionMeta::FLAG_STATIC != 0;
-    if call.instance && is_static && flags & EXTENSION_FLAG == 0 {
+    if call.instance && is_static && !is_extension(flags, Language::CSharp) {
         return false;
     }
     match visibility(flags) {

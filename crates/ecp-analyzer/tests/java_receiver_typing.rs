@@ -145,3 +145,45 @@ fn test_typed_param_interface_default_method_resolves_to_interface() {
 fn test_untyped_member_call_binds_by_name_as_tagged_guess() {
     receiver_typing_support::assert_untyped_member_is_guess("java");
 }
+
+/// Stands for (M01, Java): a same-named Kotlin class added to the project
+/// leaves the Java typed call on its own file, and no edge reaches the added
+/// file.
+#[test]
+fn test_calls_java_typed_receiver_with_kotlin_namesake_binds_java_method() {
+    use ecp_analyzer::kotlin::parser::KotlinProvider;
+    use ecp_analyzer::resolution::builder::GraphBuilder;
+    use ecp_core::analyzer::provider::LanguageProvider;
+    use std::path::Path;
+
+    let java = JavaProvider::new().unwrap();
+    let build = |with_kotlin: bool| {
+        let mut builder = GraphBuilder::new();
+        for (path, src) in [
+            ("Cls.java", "class Cls { void m() {} }\n"),
+            ("Use.java", "class Use { void run(Cls c) { c.m(); } }\n"),
+        ] {
+            builder.add_graph(java.parse_file(Path::new(path), src.as_bytes()).unwrap());
+        }
+        if with_kotlin {
+            builder.add_graph(
+                KotlinProvider::new()
+                    .unwrap()
+                    .parse_file(Path::new("Cls.kt"), b"class Cls { fun m() {} }\n")
+                    .unwrap(),
+            );
+        }
+        builder.build()
+    };
+    let base = receiver_typing_support::call_rows_to(&build(false), "run", "m");
+    assert_eq!(base.len(), 1, "{base:?}");
+    assert_eq!(
+        (base[0].0.as_str(), base[0].2.as_str()),
+        ("Cls.java", "call")
+    );
+    let variant = receiver_typing_support::call_rows_to(&build(true), "run", "m");
+    assert_eq!(
+        variant, base,
+        "the added Cls.kt must not change the verdict"
+    );
+}

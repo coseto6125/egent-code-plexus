@@ -40,7 +40,7 @@ use ecp_core::analyzer::pipeline::AnalyzerPipeline;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::LocalGraph;
 use ecp_core::contracts::dirty_event::PathClass;
-use ecp_core::graph::{NodeKind, RelType, GRAPH_FORMAT_VERSION};
+use ecp_core::graph::{NodeKind, RelType, GRAPH_FORMAT_VERSION, NO_CONTAINER};
 use ecp_core::registry::{CommitBuildMeta, BUILDER_FINGERPRINT};
 use ecp_core::session::layout;
 use ecp_core::session::merged::MergedGraph;
@@ -371,6 +371,43 @@ fn test_prev_release_graph_refused_and_rebuilt_lexical_table_present() {
     let engine = Engine::load(&graph_path).expect("the rebuilt graph loads");
     let graph = engine.graph().unwrap();
     assert_eq!(graph.version.to_native(), GRAPH_FORMAT_VERSION);
+    assert_eq!(
+        graph.containers.len(),
+        graph.nodes.len(),
+        "the rebuilt graph names a container for every node (graph v21)"
+    );
+    // The column a v21 reader walks Rust paths on: each entry is no
+    // container, or a qualifier of the node's own file whose lines enclose
+    // the node. The writer's sample holds no qualifier around a function, so
+    // every function reads as top-level.
+    for (idx, node) in graph.nodes.iter().enumerate() {
+        let container = graph.containers[idx].to_native();
+        if container == NO_CONTAINER {
+            continue;
+        }
+        let outer = &graph.nodes[container as usize];
+        assert!(
+            matches!(
+                NodeKind::from(&outer.kind),
+                NodeKind::Module
+                    | NodeKind::Namespace
+                    | NodeKind::Class
+                    | NodeKind::Struct
+                    | NodeKind::Enum
+                    | NodeKind::Trait
+                    | NodeKind::Interface
+                    | NodeKind::Impl
+            ) && outer.file_idx == node.file_idx
+                && outer.span.0.to_native() <= node.span.0.to_native()
+                && node.span.2.to_native() <= outer.span.2.to_native(),
+            "node {idx} names container {container}, which does not enclose it"
+        );
+        assert_ne!(
+            NodeKind::from(&node.kind),
+            NodeKind::Function,
+            "node {idx}: the sample declares every function at top level"
+        );
+    }
     assert!(graph.lexical_parents.is_empty(), "no language opts in yet");
     let pool = graph.string_pool.as_slice();
     for idx in 0..graph.nodes.len() as u32 {

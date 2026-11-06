@@ -225,3 +225,140 @@ fn test_type_annotation_unused_alias_binds_nothing_extra() {
     );
     assert!(annotated(&g, "f").is_empty());
 }
+
+/// A10: a field type argument that names a class type parameter binds no
+/// project type, even when a project class shares the parameter's name.
+mod a10 {
+    use crate::name_ref_support::{annotated, graph};
+    use ecp_analyzer::python::parser::PythonProvider;
+    use ecp_core::graph::ZeroCopyGraph;
+
+    fn pair(file: &str, name: &str) -> (String, String) {
+        (file.to_string(), name.to_string())
+    }
+
+    /// Target names of every type-annotation edge out of `source`.
+    fn names(g: &ZeroCopyGraph, source: &str) -> Vec<String> {
+        annotated(g, source).into_iter().map(|(_, n)| n).collect()
+    }
+
+    fn token_file(_token: &str) -> String {
+        "tokens.py".to_string()
+    }
+
+    fn build(generic: Option<&str>, token: &str) -> ZeroCopyGraph {
+        let arg = generic.unwrap_or(token);
+        let params = generic.map_or(String::new(), |p| format!("[{p}]"));
+        let _ = (&arg, &params);
+        let files = [
+            (token_file(token), format!("class {token}: ...\n")),
+            (
+                "box.py".to_string(),
+                format!(
+                    "{}class Box{params}:\n    items: list[{arg}]\n",
+                    if generic.is_none() {
+                        format!("from tokens import {token}\n\n")
+                    } else {
+                        String::new()
+                    }
+                ),
+            ),
+            (
+                "holder.py".to_string(),
+                format!("from tokens import {token}\n\nclass Holder:\n    tokens: list[{token}]\n"),
+            ),
+        ];
+        let refs: Vec<(&str, &str)> = files
+            .iter()
+            .map(|(p, s)| (p.as_str(), s.as_str()))
+            .collect();
+        graph(&PythonProvider::new().unwrap(), &refs)
+    }
+
+    /// Stands for: a field whose type argument names a class type parameter
+    /// binds no project type, although a project class has the same name; the
+    /// sibling field in an unparameterised holder (POSITIVE CONTROL) binds it.
+    #[test]
+    fn test_field_annotation_class_type_parameter_named_like_project_class_binds_nothing() {
+        let g = build(Some("Token"), "Token");
+        assert!(
+            !names(&g, "items").iter().any(|n| n == "Token"),
+            "items binds a type parameter as a project class: {:?}",
+            annotated(&g, "items")
+        );
+        assert!(
+            annotated(&g, "tokens").contains(&pair(&token_file("Token"), "Token")),
+            "control: {:?}",
+            annotated(&g, "tokens")
+        );
+    }
+
+    /// Stands for: a generic argument in a holder with no type parameters
+    /// binds the project class it names.
+    #[test]
+    fn test_field_annotation_project_class_in_unparameterised_holder_binds_class() {
+        let g = build(Some("Token"), "Token");
+        assert!(
+            annotated(&g, "tokens").contains(&pair(&token_file("Token"), "Token")),
+            "{:?}",
+            annotated(&g, "tokens")
+        );
+    }
+
+    /// Stands for (M07, rename the parameter): `Box<E>` / `List<E>` binds no
+    /// project edge, and `tokens` still binds `Token`.
+    #[test]
+    fn test_field_annotation_renamed_class_type_parameter_binds_nothing() {
+        let g = build(Some("E"), "Token");
+        assert!(
+            !names(&g, "items").iter().any(|n| n == "Token"),
+            "{:?}",
+            annotated(&g, "items")
+        );
+        assert!(
+            annotated(&g, "tokens").contains(&pair(&token_file("Token"), "Token")),
+            "control: {:?}",
+            annotated(&g, "tokens")
+        );
+    }
+
+    /// Stands for (M07, rename the project class): the project class is `Tok`
+    /// and the parameter stays `Token`; `items` binds neither, `tokens` binds `Tok`.
+    #[test]
+    fn test_field_annotation_renamed_project_class_keeps_parameter_binding_nothing() {
+        let g = build(Some("Token"), "Tok");
+        let items = names(&g, "items");
+        assert!(
+            !items.iter().any(|n| n == "Tok" || n == "Token"),
+            "{:?}",
+            annotated(&g, "items")
+        );
+        assert!(
+            annotated(&g, "tokens").contains(&pair(&token_file("Tok"), "Tok")),
+            "control: {:?}",
+            annotated(&g, "tokens")
+        );
+    }
+
+    /// Stands for (M07, remove the parameter): with no class type parameter
+    /// the same field binds the project class `Token`.
+    #[test]
+    fn test_field_annotation_without_class_type_parameter_binds_project_class() {
+        let g = build(None, "Token");
+        assert!(
+            annotated(&g, "items").contains(&pair(&token_file("Token"), "Token")),
+            "{:?}",
+            annotated(&g, "items")
+        );
+    }
+
+    /// Fixture sanity: the PEP 695 class and its annotated field parse as nodes,
+    /// so an empty `items` result is a binding verdict, not a parse failure.
+    #[test]
+    fn test_field_annotation_pep695_fixture_parses_class_and_field() {
+        let g = build(Some("Token"), "Token");
+        let pool = g.string_pool.as_slice();
+        let has = |n: &str| g.nodes.iter().any(|x| x.name.resolve(pool) == n);
+        assert!(has("Box") && has("items") && has("Holder") && has("tokens"));
+    }
+}

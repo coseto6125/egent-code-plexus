@@ -28,6 +28,9 @@ use strict_parity::{observe, snapshot, Edit, Scenario, Snapshot};
 type Files<'a> = &'a [(&'a str, &'a str)];
 
 const GLOBAL: &[f32] = &[0.7];
+/// The tagged untyped-member guess: a guess language binds an untyped
+/// receiver's member by name at this confidence only.
+const UNTYPED_GUESS: &[f32] = &[0.55];
 const IMPORT_SCOPED: &[f32] = &[0.95];
 
 /// What one caller must call: `(callee name, callee file, allowed confidences)`.
@@ -213,7 +216,7 @@ const PYTHON_SUBMODULE_MEMBER_BOUND: Row = Row {
 /// Row 9. An untyped receiver (`obj`, a parameter) reaches no free function
 /// of the caller's own module: the post-filter refuses `helper`, the only
 /// `helper`, which the global tier binds. Another module's function is a
-/// module value and passes (`run_module`).
+/// module value and passes (`run_module`), as the tagged guess.
 const PYTHON_UNTYPED_POST_FILTER: Row = Row {
     name: "python_untyped_post_filter",
     files: &[
@@ -226,7 +229,7 @@ const PYTHON_UNTYPED_POST_FILTER: Row = Row {
     caller_file: "app/main.py",
     expected: &[
         ("run", &[]),
-        ("run_module", &[("compute", "lib/tools.py", GLOBAL)]),
+        ("run_module", &[("compute", "lib/tools.py", UNTYPED_GUESS)]),
     ],
 };
 

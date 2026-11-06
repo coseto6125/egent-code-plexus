@@ -29,21 +29,28 @@
 use super::path_literals::{
     build_raw_path_literal, enclosing_symbol_and_owner_pub, strip_csharp_string_value,
 };
+use super::receiver_lower::CSharpLowering;
 use crate::calls::{
     attach_to_enclosing, construction_call, is_call_callee, is_same_kind_field, node_range,
     range_width, reference_function, span_holds, span_width, start_pos, unparenthesized, Pos,
     PosRange,
 };
+use crate::receiver::{analyze_file, FileReceivers, Receiver as CoreReceiver};
 use ecp_core::analyzer::csharp_extension::system_type_name;
-use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef, THIS_MEMBER_PREFIX};
+use ecp_core::analyzer::types::{
+    BlindSpot, CallSite, RawNode, RawPathLiteral, RawSqlRef, THIS_MEMBER_PREFIX,
+};
 use ecp_core::graph::NodeKind;
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::path::Path;
 use tree_sitter::Node;
 
 #[derive(Debug, Default)]
 struct LocalTypes {
-    scopes: Vec<(PosRange, HashMap<String, String>)>,
+    /// The receiver state of every local, parameter and pattern variable
+    /// read as a receiver, keyed by that identifier.
+    receivers: FileReceivers,
     /// Every field and property by name: the range of the type declaration
     /// that declares it, and its type when that is a plain type name (`""`
     /// otherwise). Keyed by name, so a lookup reads only the same-name
@@ -73,29 +80,20 @@ impl LocalTypes {
             .any(|(start, end)| *start <= pos && pos <= *end)
     }
 
-    fn lookup(&self, pos: Pos, var: &str) -> Option<&str> {
-        let mut best: Option<&str> = None;
-        let mut best_width = (u32::MAX, i64::MAX);
-        for ((start, end), map) in &self.scopes {
-            if *start <= pos && pos <= *end {
-                if let Some(t) = map.get(var) {
-                    let w = range_width((*start, *end));
-                    if w < best_width {
-                        best_width = w;
-                        best = Some(t.as_str());
-                    }
-                }
-            }
+    /// The local, parameter or pattern variable the identifier `node` reads:
+    /// its declared class name, `""` for one declared without a plain class
+    /// name, `None` for a name that is no local.
+    fn local_type(&self, node: Node<'_>) -> Option<&str> {
+        match self.receivers.receiver_at(node)? {
+            CoreReceiver::Known(ty) => Some(&ty.text),
+            CoreReceiver::Unknown(_) => Some(""),
         }
-        best
     }
 }
 
-/// Walk every method/constructor/local-function declaration, collecting typed
-/// parameters and local variable declarations, and every field and property
-/// a type declares.
-fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
-    let mut scopes: Vec<(PosRange, HashMap<String, String>)> = Vec::new();
+/// Walk the file once for every field and property a type declares, and for
+/// the receiver state of its locals ([`CSharpLowering`]).
+fn collect_local_types(root: Node<'_>, source: &[u8], path: &Path) -> LocalTypes {
     let mut members: HashMap<String, Vec<(PosRange, String)>> = HashMap::new();
     let mut explicit: Vec<PosRange> = Vec::new();
     let mut stack: Vec<Node<'_>> = vec![root];
@@ -107,19 +105,8 @@ fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
             "field_declaration" | "property_declaration" => {
                 collect_members(n, source, &mut members);
             }
+            // A method body declares no field or property.
             "method_declaration" | "constructor_declaration" | "local_function_statement" => {
-                let scope = node_range(n);
-                let mut map: HashMap<String, String> = HashMap::new();
-                if let Some(params) = n.child_by_field_name("parameters") {
-                    collect_params(params, source, &mut map);
-                }
-                if let Some(body) = n.child_by_field_name("body") {
-                    collect_local_vars(body, source, &mut map);
-                }
-                if !map.is_empty() {
-                    scopes.push((scope, map));
-                }
-                // Don't descend into nested method bodies.
                 continue;
             }
             _ => {}
@@ -130,7 +117,7 @@ fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
         }
     }
     LocalTypes {
-        scopes,
+        receivers: analyze_file(&CSharpLowering, &(), root, source, path),
         members,
         explicit,
     }
@@ -202,107 +189,8 @@ fn collect_members(
     }
 }
 
-/// C# formal parameters: `parameter_list` → `parameter` with `name` and `type` fields.
-fn collect_params(params: Node<'_>, source: &[u8], out: &mut HashMap<String, String>) {
-    let mut c = params.walk();
-    for p in params.children(&mut c) {
-        if p.kind() != "parameter" {
-            continue;
-        }
-        let Some(nm) = p.child_by_field_name("name") else {
-            continue;
-        };
-        let typed = p
-            .child_by_field_name("type")
-            .and_then(|ty| simple_id_and_type(nm, ty, source));
-        match typed {
-            Some((var, ty_s)) => {
-                out.insert(var, ty_s);
-            }
-            None => declare_untyped(nm, source, out),
-        }
-    }
-}
-
-/// Record a declared name whose type is not a plain class name as `""`: it
-/// still shadows a type of the same name, so a call on it is an untyped
-/// member call instead of resolving through that type.
-fn declare_untyped(name_node: Node<'_>, source: &[u8], out: &mut HashMap<String, String>) {
-    // `implicit_parameter` is the grammar's alias of the identifier in `x => ..`.
-    if !matches!(name_node.kind(), "identifier" | "implicit_parameter") {
-        return;
-    }
-    if let Ok(name) = name_node.utf8_text(source) {
-        out.entry(name.to_string()).or_default();
-    }
-}
-
-/// Walk a block, collecting `local_declaration_statement` → `variable_declaration`,
-/// and every other declared name (`var x`, `for` / `using` / `foreach` / `catch`
-/// variables, lambda parameters) as untyped.
-/// Does NOT descend into nested method/constructor/local-function bodies.
-fn collect_local_vars(body: Node<'_>, source: &[u8], out: &mut HashMap<String, String>) {
-    let mut stack: Vec<Node<'_>> = vec![body];
-    while let Some(n) = stack.pop() {
-        match n.kind() {
-            "method_declaration" | "constructor_declaration" | "local_function_statement" => {
-                continue;
-            }
-            "variable_declarator" | "parameter" | "catch_declaration" => {
-                if let Some(nm) = n.child_by_field_name("name") {
-                    declare_untyped(nm, source, out);
-                }
-            }
-            "foreach_statement" => {
-                if let Some(left) = n.child_by_field_name("left") {
-                    declare_untyped(left, source, out);
-                }
-            }
-            "lambda_expression" => {
-                if let Some(param) = n.child_by_field_name("parameters") {
-                    declare_untyped(param, source, out);
-                }
-            }
-            "local_declaration_statement" => {
-                if let Some(var_decl) = n.named_child(0) {
-                    if var_decl.kind() == "variable_declaration" {
-                        // First named child is the type; variable_declarator children hold names.
-                        let mut ty_node = None;
-                        let mut c = var_decl.walk();
-                        for child in var_decl.children(&mut c) {
-                            if child.is_named() {
-                                if ty_node.is_none() && is_type_node(child) {
-                                    ty_node = Some(child);
-                                } else if child.kind() == "variable_declarator" {
-                                    // `var x = new T(..)`: the construction
-                                    // names the type `var` leaves out.
-                                    let ty = ty_node.or_else(|| constructed_type(child));
-                                    if let (Some(ty), Some(nm)) =
-                                        (ty, child.child_by_field_name("name"))
-                                    {
-                                        if let Some((var, ty_s)) =
-                                            simple_id_and_type(nm, ty, source)
-                                        {
-                                            out.insert(var, ty_s);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            _ => {}
-        }
-        let mut c = n.walk();
-        for child in n.children(&mut c) {
-            stack.push(child);
-        }
-    }
-}
-
 /// The type node of the `new T(..)` that initializes `declarator`.
-fn constructed_type(declarator: Node<'_>) -> Option<Node<'_>> {
+pub(super) fn constructed_type(declarator: Node<'_>) -> Option<Node<'_>> {
     let mut cursor = declarator.walk();
     let creation = declarator
         .named_children(&mut cursor)
@@ -310,37 +198,10 @@ fn constructed_type(declarator: Node<'_>) -> Option<Node<'_>> {
     creation.child_by_field_name("type")
 }
 
-fn is_type_node(n: Node<'_>) -> bool {
-    matches!(
-        n.kind(),
-        "identifier"
-            | "predefined_type"
-            | "nullable_type"
-            | "generic_name"
-            | "array_type"
-            | "qualified_name"
-    )
-}
-
-/// Return `(var_name, type_name)` only when the name is a plain identifier and
-/// the type is a plain class name (single `identifier` node).
-fn simple_id_and_type(
-    name_node: Node<'_>,
-    type_node: Node<'_>,
-    source: &[u8],
-) -> Option<(String, String)> {
-    if name_node.kind() != "identifier" {
-        return None;
-    }
-    let ty = class_type_name(type_node, source)?;
-    let name = std::str::from_utf8(&source[name_node.start_byte()..name_node.end_byte()]).ok()?;
-    Some((name.to_string(), ty.to_string()))
-}
-
 /// The name of a plain class-name type (a single `identifier`). `dynamic`
 /// parses as an identifier but names no type: a value of it is untyped, so
 /// its member calls keep the resolver's member fallback.
-fn class_type_name<'s>(ty: Node<'_>, source: &'s [u8]) -> Option<&'s str> {
+pub(super) fn class_type_name<'s>(ty: Node<'_>, source: &'s [u8]) -> Option<&'s str> {
     (ty.kind() == "identifier")
         .then(|| ty.utf8_text(source).ok())
         .flatten()
@@ -353,10 +214,11 @@ fn class_type_name<'s>(ty: Node<'_>, source: &'s [u8]) -> Option<&'s str> {
 fn calls_value(call: Node<'_>, source: &[u8], locals: &LocalTypes, nodes: &[RawNode]) -> bool {
     call.child_by_field_name("function")
         .filter(|function| function.kind() == "identifier")
-        .and_then(|function| function.utf8_text(source).ok())
-        .is_some_and(|name| {
-            let pos = start_pos(call);
-            locals.lookup(pos, name).is_some() || declares_member(nodes, locals, pos, name)
+        .is_some_and(|function| {
+            locals.local_type(function).is_some()
+                || function
+                    .utf8_text(source)
+                    .is_ok_and(|name| declares_member(nodes, locals, start_pos(call), name))
         })
 }
 
@@ -454,7 +316,7 @@ fn classify_receiver<'a>(
             .map_or(Receiver::Implicit, |ty| Receiver::Typed(Cow::Owned(ty))),
         "identifier" => {
             let name = text(receiver).ok()?;
-            let value = match locals.lookup(pos, name) {
+            let value = match locals.local_type(receiver) {
                 Some(ty) => typed(ty),
                 None => member(name).unwrap_or(Receiver::MaybeType(name)),
             };
@@ -620,7 +482,7 @@ fn type_path_tail<'a>(
     }
     let root = name_of(node)?;
     let value = node.kind() == "identifier"
-        && (locals.lookup(pos, root).is_some()
+        && (locals.local_type(node).is_some()
             || locals.member_type(pos, root).is_some()
             || declares_member(nodes, locals, pos, root));
     (!value).then_some(tail.unwrap_or(root))
@@ -745,9 +607,12 @@ fn method_group(
     // declares is a read, not a method group.
     let known = match receiver.kind() {
         "this_expression" | "this" => locals.member_type(pos, member).is_none(),
-        "identifier" => receiver.utf8_text(source).is_ok_and(|name| {
-            locals.lookup(pos, name).is_some() || locals.member_type(pos, name).is_some()
-        }),
+        "identifier" => {
+            locals.local_type(receiver).is_some()
+                || receiver
+                    .utf8_text(source)
+                    .is_ok_and(|name| locals.member_type(pos, name).is_some())
+        }
         _ => false,
     };
     if !known {
@@ -768,8 +633,11 @@ pub fn extract_csharp_calls_and_path_literals(
     root: Node<'_>,
     source: &[u8],
     nodes: &mut [RawNode],
+    path: &Path,
+    blind_spots: &mut Vec<BlindSpot>,
 ) -> (Vec<RawPathLiteral>, Vec<RawSqlRef>) {
-    let local_types = collect_local_types(root, source);
+    let mut local_types = collect_local_types(root, source, path);
+    blind_spots.append(&mut local_types.receivers.blind_spots);
     let mut path_literals: Vec<RawPathLiteral> = Vec::new();
     let mut sql_refs: Vec<RawSqlRef> = Vec::new();
     let mut stack: Vec<(Node<'_>, Option<Node<'_>>)> = vec![(root, None)];
@@ -844,38 +712,37 @@ fn declares_member(nodes: &[RawNode], locals: &LocalTypes, pos: Pos, name: &str)
         })
 }
 
-fn enclosing_class_name(nodes: &[RawNode], pos: Pos) -> Option<String> {
-    let mut best: Option<((u32, i64), &str)> = None;
+/// The innermost class, struct or interface whose span holds `pos`: the
+/// type `this` names. A struct nested in a class is its own `this`.
+fn enclosing_type(nodes: &[RawNode], pos: Pos) -> Option<&RawNode> {
+    let mut best: Option<((u32, i64), &RawNode)> = None;
     for n in nodes {
-        if !matches!(n.kind, NodeKind::Class | NodeKind::Interface) {
+        if !matches!(
+            n.kind,
+            NodeKind::Class | NodeKind::Struct | NodeKind::Interface
+        ) {
             continue;
         }
         if span_holds(n.span, pos) {
             let w = span_width(n.span);
             if best.is_none_or(|(bw, _)| w < bw) {
-                best = Some((w, &n.name));
+                best = Some((w, n));
             }
         }
     }
-    best.map(|(_, name)| name.to_string())
+    best.map(|(_, n)| n)
 }
 
+fn enclosing_class_name(nodes: &[RawNode], pos: Pos) -> Option<String> {
+    enclosing_type(nodes, pos).map(|n| n.name.clone())
+}
+
+/// The first base of the enclosing class. A struct's base is
+/// `System.ValueType`, which no heritage entry names.
 fn enclosing_base_name(nodes: &[RawNode], pos: Pos) -> Option<String> {
-    let mut best_w = (u32::MAX, i64::MAX);
-    let mut result = None;
-    for n in nodes {
-        if !matches!(n.kind, NodeKind::Class) {
-            continue;
-        }
-        if span_holds(n.span, pos) {
-            let w = span_width(n.span);
-            if w < best_w {
-                best_w = w;
-                result = n.heritage.first().cloned();
-            }
-        }
-    }
-    result
+    enclosing_type(nodes, pos)
+        .filter(|n| n.kind == NodeKind::Class)
+        .and_then(|n| n.heritage.first().cloned())
 }
 
 #[cfg(test)]
@@ -890,6 +757,36 @@ mod tests {
         provider
             .parse_file(Path::new("Test.cs"), src.as_bytes())
             .expect("parse_file")
+    }
+
+    fn has(calls: &[String], want: CallSite<'_>) -> bool {
+        calls.iter().any(|c| CallSite::parse(c) == want)
+    }
+
+    fn all_calls(src: &str) -> Vec<String> {
+        parse(src).nodes.into_iter().flat_map(|n| n.calls).collect()
+    }
+
+    /// `if (!d.TryGetValue(k, out Foo v)) return; v.Bar();`: C# scopes `v`
+    /// to the enclosing block (C# spec 7.3), so the field `v` is hidden.
+    #[test]
+    fn test_csharp_callee_guard_out_variable_hides_same_named_field() {
+        let calls = all_calls(
+            "class S { Cache v; void M(Store d) { if (!d.TryGetValue(\"k\", out Foo v)) return; v.Bar(); } }",
+        );
+        assert!(has(&calls, CallSite::Plain("Foo.Bar")), "{calls:?}");
+        assert!(!has(&calls, CallSite::Plain("Cache.Bar")), "{calls:?}");
+    }
+
+    #[test]
+    fn test_csharp_callee_this_inside_nested_struct_names_the_struct() {
+        let graph = parse(
+            "class Outer : Base { struct Inner { void A() { this.B(); base.C(); } void B() {} } }",
+        );
+        let calls = &graph.nodes.iter().find(|n| n.name == "A").expect("A").calls;
+        assert!(has(calls, CallSite::Plain("Inner.B")), "{calls:?}");
+        assert!(has(calls, CallSite::Plain("C")), "{calls:?}");
+        assert!(!has(calls, CallSite::Plain("Base.C")), "{calls:?}");
     }
 
     /// `this.Eat()` should be recorded as `Animal.Eat` using the enclosing class name.
@@ -976,8 +873,9 @@ class App {
     /// Property guard: a `var items = ...` or `List<string> items = ...`
     /// declaration must NOT bind `items → List` — calling `items.Add()` would
     /// then emit `"List.Add"`, which is meaningless against the generic
-    /// instantiation. `simple_id_and_type` rejects non-`identifier` type
-    /// nodes for this reason; this test pins that behaviour.
+    /// instantiation. `class_type_name` (through
+    /// `CSharpLowering::declare_typed`) rejects non-`identifier` type nodes
+    /// for this reason; this test pins that behaviour.
     #[test]
     fn csharp_generic_type_does_not_bind_bare_type() {
         let src = r#"

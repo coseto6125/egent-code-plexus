@@ -38,6 +38,7 @@
 //! B §3.2 table ([`Resolution::call_fallbacks_allowed`]). Each side answers
 //! through its [`CallFacts`].
 
+use crate::analyzer::admission::{language_reaches, Gate, Site, SiteForm};
 use crate::analyzer::import_binding::{
     extension_retry, fqn_language, import_binding, import_family, import_member_fallback,
     may_suppress, module_head, retry_name, MemberOwner,
@@ -48,10 +49,10 @@ use crate::analyzer::outcome::{Hit, NoEdge, Resolution, Tier};
 use crate::analyzer::reexport::{
     self, is_ecmascript, pick_call, GoPackageLookup, ImportRef, ModuleFacts, ResolveTarget,
 };
-use crate::analyzer::rust_paths::rust_path_prefix_agrees_with_import;
+use crate::analyzer::rust_paths::{rust_path_prefix_agrees_with_import, rust_type_path_prefix};
 use crate::analyzer::same_file_pick::{
-    is_free, member_call_admits, prefer_free, prefer_owned, type_receiver_is_closed, PickFacts,
-    PickScope,
+    declaring_type, is_free, member_call_admits, prefer_free, prefer_owned,
+    type_receiver_is_closed, PickFacts, PickScope,
 };
 use crate::analyzer::type_ladder::{member_ownership, Ownership, TypeCandidates, TypeFacts};
 use crate::analyzer::types::{owner_key, CallSite, NameRef, NameRefKind, RawImport};
@@ -137,16 +138,214 @@ pub fn module_item<D: PickFacts + ?Sized>(decls: &D, id: u32) -> Option<u32> {
     past_body_local(decls, id, |id| is_module_item(decls, id))
 }
 
-/// Whether `file` declares more than one module or type named `name`
-/// (`v1::Config` beside `v2::Config`, `outer::a` beside `a`). A member
-/// records its owner as a bare name ([`owner_key`]), so it cannot say which
-/// of such twins holds it: a Rust path through one binds nothing.
-fn declares_twin_qualifiers<D: ResolveFacts>(decls: &D, file: &str, name: &str) -> bool {
-    decls
-        .call_decls(file, name)
-        .filter(|&(id, kind)| kind.is_qualifier() && !decls.is_body_local(id))
-        .nth(1)
-        .is_some()
+/// Whether a later declaration of `id`'s uid shares its container
+/// (`#[cfg(unix)] mod sys` beside `#[cfg(windows)] mod sys`): no path tells
+/// the two apart.
+///
+/// The container column skips function bodies, so a body-local `struct Foo`
+/// and the module-level `struct Foo` share the container `None`. A path never
+/// names a body-local item, so a twin must sit on the same side of a body.
+fn has_cfg_twin<D: PickFacts + ?Sized>(decls: &D, id: u32) -> bool {
+    let (container, in_body) = (decls.container(id), decls.is_body_local(id));
+    decls.later_overloads(id).iter().any(|&later| {
+        decls.kind(later) == decls.kind(id)
+            && decls.container(later) == container
+            && decls.is_body_local(later) == in_body
+    })
+}
+
+/// What a path segment names among a file's modules and types.
+enum Child {
+    One(u32),
+    Missing,
+    /// Two candidates share the container: twins no path tells apart.
+    Ambiguous,
+}
+
+/// `file`'s modules and types ([`NodeKind::is_qualifier`]) named `name`
+/// outside every function body, each name-table first followed by its later
+/// declarations ([`PickFacts::later_overloads`]): a module-level
+/// `struct Foo` after a body-local one is a redefinition of the body-local
+/// first, in no name table ([`past_body_local`]), and a `#[cfg]` twin is a
+/// later declaration of its first.
+fn qualifier_rows<D: ResolveFacts>(decls: &D, file: &str, name: &str) -> Vec<u32> {
+    let mut rows = Vec::new();
+    for (first, kind) in decls.call_decls(file, name) {
+        if !kind.is_qualifier() {
+            continue;
+        }
+        let later = decls.later_overloads(first);
+        rows.extend(
+            std::iter::once(first)
+                .chain(later.iter().copied())
+                .filter(|&id| decls.kind(id).is_qualifier() && !decls.is_body_local(id)),
+        );
+    }
+    rows
+}
+
+/// The one id `rows` holds: `Missing` for none, `Ambiguous` for two (twins
+/// no path tells apart).
+fn one_of(rows: impl IntoIterator<Item = u32>) -> Child {
+    let mut rows = rows.into_iter();
+    match (rows.next(), rows.next()) {
+        (None, _) => Child::Missing,
+        (Some(id), None) => Child::One(id),
+        _ => Child::Ambiguous,
+    }
+}
+
+/// The module or type named `name` that `file` declares directly inside
+/// `parent` (`None`: at file level), outside every function body
+/// ([`qualifier_rows`]): one step of a path walked parent -> child on
+/// [`PickFacts::container`], so `outer::a` and `a` stay apart.
+fn qualifier_child<D: ResolveFacts>(
+    decls: &D,
+    file: &str,
+    parent: Option<u32>,
+    name: &str,
+) -> Child {
+    one_of(
+        qualifier_rows(decls, file, name)
+            .into_iter()
+            .filter(|&id| decls.container(id) == parent),
+    )
+}
+
+/// The item a module-tree path places in `file`: its [`qualifier_child`] at
+/// file level, else the one module or type of that name anywhere in the
+/// file, which a `pub use` of an inline `mod`'s item names.
+fn path_item<D: ResolveFacts>(decls: &D, file: &str, name: &str) -> Child {
+    match qualifier_child(decls, file, None, name) {
+        Child::Missing => one_of(qualifier_rows(decls, file, name)),
+        found => found,
+    }
+}
+
+/// The holder a path names `id` through: its declaring type
+/// ([`declaring_type`]) or its module or namespace container; `Ok(None)` at
+/// file level, `Err(())` for an `impl` block whose type its scope does not
+/// declare.
+fn holder_of<D: PickFacts + ?Sized>(decls: &D, id: u32) -> Result<Option<u32>, ()> {
+    match decls.container(id) {
+        None => Ok(None),
+        Some(block) if decls.kind(block) == NodeKind::Impl => {
+            declaring_type(decls, id).map(Some).ok_or(())
+        }
+        Some(container) => Ok(Some(container)),
+    }
+}
+
+/// The holders of one declaration up to file level ([`holder_of`]).
+struct HolderPath<'d> {
+    /// The innermost holder.
+    holder: Option<u32>,
+    /// The holders' names, innermost first, as a path spells them: the
+    /// [`owner_key`] each held declaration carries.
+    names: Vec<&'d str>,
+    /// Whether a holder is a module: a path through it must spell it.
+    in_module: bool,
+    /// Whether a holder has a twin [`has_cfg_twin`] reports.
+    twin: bool,
+}
+
+/// [`HolderPath`] of `id`; `None` when a holder is unknown, or names no
+/// owner.
+fn holder_path<D: PickFacts + ?Sized>(decls: &D, id: u32) -> Option<HolderPath<'_>> {
+    let holder = holder_of(decls, id).ok()?;
+    let mut path = HolderPath {
+        holder,
+        names: Vec::new(),
+        in_module: false,
+        twin: false,
+    };
+    let (mut held, mut next) = (id, holder);
+    while let Some(h) = next {
+        // Containers nest strictly; the bound only guards a corrupt column.
+        if path.names.len() >= 64 {
+            return None;
+        }
+        path.names.push(decls.owner(held)?);
+        path.in_module |= decls.kind(h) == NodeKind::Module;
+        path.twin |= has_cfg_twin(decls, h);
+        held = h;
+        next = holder_of(decls, h).ok()?;
+    }
+    Some(path)
+}
+
+/// Whether the segments a path spells and a declaration's holder names,
+/// both innermost first, agree as far as the shorter goes.
+fn path_agrees(spelled: &[&str], names: &[&str]) -> bool {
+    spelled.starts_with(names) || names.starts_with(spelled)
+}
+
+/// R13's exact-path rule for a Rust `::` path: it names `id` only through
+/// the holders that hold `id` ([`HolderPath`]). The qualifier's segments,
+/// innermost first and up to a `self` / `super` anchor, and `id`'s holder
+/// names must agree as far as the shorter goes (a relative path spells
+/// fewer); a path through a module must, and a holder with a
+/// [`has_cfg_twin`] twin never does. Nor does the path name `id` when
+/// another declaration of the member with another holder agrees as far.
+/// `api::v2::Config::new()` thus never binds `v1::Config`'s `new`, and
+/// `crate::a::b::wrong()` never the `wrong` of `outer::a::b`: the module
+/// tree's exact walk ([`module_tree_member`]) decides them. A holder the
+/// side cannot read keeps the pick.
+fn rust_path_spells<D: ResolveFacts>(
+    decls: &D,
+    file: &str,
+    site: QualifiedSite<'_>,
+    id: u32,
+) -> bool {
+    let Some(path) = holder_path(decls, id) else {
+        return true;
+    };
+    // `site.qualifier` is only the last segment ([`split_qualifier`]); the
+    // path is the callee before its member. A `self` / `super` anchor names
+    // the caller's module, which the holders cannot check: the segments
+    // inside it are all a path spells. `crate` stays, and no holder is
+    // named `crate`.
+    let path_text = site
+        .callee
+        .rsplit_once("::")
+        .map_or(site.qualifier, |(q, _)| q);
+    let spelled: Vec<&str> = path_text
+        .rsplit("::")
+        .map(|seg| seg.split('<').next().unwrap_or(seg))
+        .take_while(|seg| !matches!(*seg, "self" | "super"))
+        .filter(|seg| !seg.is_empty())
+        .collect();
+    let agrees = |names: &[&str]| path_agrees(&spelled, names);
+    let own = agrees(&path.names);
+    if path.twin || (path.in_module && !own) {
+        return false;
+    }
+    let depth = if own {
+        path.names.len().min(spelled.len())
+    } else {
+        1
+    };
+    let wanted = site.target.kind_predicate();
+    let member = site.member.split('<').next().unwrap_or(site.member);
+    let candidates = decls.pick_candidates(file, member);
+    for &first in candidates.iter() {
+        let later = decls.later_overloads(first);
+        for rival in std::iter::once(first).chain(later.iter().copied()) {
+            if rival == id || !wanted(decls.kind(rival)) || decls.is_body_local(rival) {
+                continue;
+            }
+            let Some(other) = holder_path(decls, rival) else {
+                continue;
+            };
+            if other.holder != path.holder
+                && other.names.len().min(spelled.len()) >= depth
+                && agrees(&other.names)
+            {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 /// What a call site adds to a name lookup. The index's
@@ -173,7 +372,9 @@ pub struct CallPick<'c> {
 /// owner ([`prefer_owned`], with `heritage` unless the receiver is
 /// untyped), or to a free function when it reaches no member
 /// ([`prefer_free`]). `Unknown` when the file declares no such name, or
-/// holds several unrelated owners of it: the later tiers decide.
+/// holds several unrelated owners of it: the later tiers decide. A
+/// declaration the site cannot reach ([`crate::analyzer::admission`]) neither picks nor
+/// binds, so the later tiers decide in its place.
 pub fn same_file<F: ResolveFacts>(
     facts: &F,
     file: &str,
@@ -182,10 +383,48 @@ pub fn same_file<F: ResolveFacts>(
     call: Option<CallPick<'_>>,
     heritage: &[String],
 ) -> Resolution {
+    same_file_at(
+        facts,
+        file,
+        name,
+        target,
+        call,
+        heritage,
+        SiteForm::of(name, call),
+    )
+}
+
+/// [`same_file`] for a site whose `form` the caller states: a bare field
+/// read ([`field_read`]) is [`SiteForm::FieldRead`], which no `call` maps to.
+fn same_file_at<F: ResolveFacts>(
+    facts: &F,
+    file: &str,
+    name: &str,
+    target: ResolveTarget,
+    call: Option<CallPick<'_>>,
+    heritage: &[String],
+    form: SiteForm,
+) -> Resolution {
     let free_only = call.is_some_and(|call| call.free_only);
+    let gate = form.checks_in_file().then(|| {
+        Gate::new(
+            facts,
+            Site {
+                caller: facts.file_meta(file),
+                caller_file: file,
+                caller_owner: call.and_then(|call| call.owner),
+                heritage,
+                form,
+                name,
+                imports: &[],
+            },
+        )
+    });
+    let gate = gate.as_ref();
+    let admits = move |id: u32| gate.is_none_or(|gate| gate.admit_in_file(id).is_ok());
     let decls = facts
         .call_decls(file, name)
-        .filter(move |&(_, kind)| !free_only || kind != NodeKind::Method);
+        .filter(move |&(id, kind)| (!free_only || kind != NodeKind::Method) && admits(id));
     let Some(pick) = pick_call(decls, target) else {
         return Resolution::Unknown;
     };
@@ -210,12 +449,13 @@ pub fn same_file<F: ResolveFacts>(
     };
     // A C# explicit interface implementation is no member a bare name
     // reaches: a later tier takes the call to an inherited one.
-    match hit.filter(|&id| {
-        (!free_only || facts.kind(id) != NodeKind::Method) && !facts.hidden_member(id)
+    let resolution = match hit.filter(|&id| {
+        (!free_only || facts.kind(id) != NodeKind::Method) && !facts.hidden_member(id) && admits(id)
     }) {
         Some(id) => Resolution::bound(id, Tier::SameFile),
         None => Resolution::Unknown,
-    }
+    };
+    gate.map_or(resolution, |gate| gate.settle(resolution))
 }
 
 /// Tier 2.75: a bare `name` in a type with declared `bases`. Each base, in
@@ -416,7 +656,9 @@ pub enum FieldRead {
     /// A qualified read: the side's full name lookup of
     /// [`ResolveTarget::Field`] runs, and its qualifier tier settles it.
     Qualified,
-    /// A bare read that Tier 1 left: Tier 3 ([`global`]) with no call site.
+    /// A bare read that Tier 1 left: Tier 3 ([`global`]) with no call site,
+    /// whose admission gate the side builds with
+    /// [`SiteForm::GlobalFieldRead`].
     Global,
 }
 
@@ -425,11 +667,22 @@ pub enum FieldRead {
 /// qualifier or not at all. No import tier runs, because an import binds a
 /// module's name, never the field a receiver reads. No call site: no owner
 /// narrows the pick, no base is probed, and Tier 3 binds no nearest copy.
+/// Under the gate's Contract rule, a property a contract declares binds
+/// neither tier: Tier 1 ([`SiteForm::FieldRead`]) drops it, and Tier 3
+/// ([`SiteForm::GlobalFieldRead`]) counts it toward ambiguity.
 pub fn field_read<F: ResolveFacts>(facts: &F, file: &str, name: &str) -> FieldRead {
     if split_qualifier(name).is_some() {
         return FieldRead::Qualified;
     }
-    match same_file(facts, file, name, ResolveTarget::Field, None, &[]) {
+    match same_file_at(
+        facts,
+        file,
+        name,
+        ResolveTarget::Field,
+        None,
+        &[],
+        SiteForm::FieldRead,
+    ) {
         Resolution::Bound(hit) => FieldRead::Bound(hit),
         _ => FieldRead::Global,
     }
@@ -1057,6 +1310,11 @@ pub fn qualifier_file<F: QualifierFacts>(
     let impl_receiver =
         language == Language::Rust && callee.is_some_and(|callee| !callee.contains("::"));
     let declares_member = |file: &str| decls.first_decl_in_file(file, member, target).is_some();
+    // An import or a file name never reaches a file of a language the
+    // caller's code cannot name (`from cls import Cls` and `cls.ts`): such a
+    // candidate is skipped and the probe goes on, whatever the extension
+    // order put first.
+    let reaches = |file: &str| language_reaches(caller, decls.file_meta(file));
     let agrees = |file: &str| {
         callee.map_or(Some(true), |callee| {
             facts.rust_path_agrees(source, callee, qualifier, file, imports)
@@ -1088,7 +1346,7 @@ pub fn qualifier_file<F: QualifierFacts>(
         // module the qualifier stands for, so it keeps the candidate probe.
         if exported == "*" && import_member_fallback(language) && !fqn_language(language) {
             match facts.import_module(source, &import.source, language) {
-                Module::Unique(file) => return Some(file),
+                Module::Unique(file) if reaches(file.as_ref()) => return Some(file),
                 _ => continue,
             }
         }
@@ -1097,7 +1355,7 @@ pub fn qualifier_file<F: QualifierFacts>(
         if exported == "*" && is_ecmascript(language) {
             let mut hit = None;
             facts.for_each_candidate(source, &import.source, |candidate| {
-                let found = facts.exports(candidate, member, target);
+                let found = facts.exports(candidate, member, target) && reaches(candidate);
                 if found {
                     hit = facts.stored_file(candidate);
                 }
@@ -1114,7 +1372,7 @@ pub fn qualifier_file<F: QualifierFacts>(
             } else {
                 format!("{}::{exported}", import.source)
             };
-            if let Some(module_file) = facts.rust_module_file(source, &module_path) {
+            if let Some(module_file) = rust_use_module_file(facts, source, &module_path) {
                 return declares_member(module_file.as_ref()).then_some(module_file);
             }
             // A head that is a module of the caller's own file (`mod utils;
@@ -1134,7 +1392,8 @@ pub fn qualifier_file<F: QualifierFacts>(
         let mut hit = None;
         facts.for_each_candidate(source, &import.source, |candidate| {
             let found = facts.holds_import(candidate, exported, default_import)
-                && declares_member(candidate);
+                && declares_member(candidate)
+                && reaches(candidate);
             if found {
                 hit = facts.stored_file(candidate);
             }
@@ -1142,6 +1401,39 @@ pub fn qualifier_file<F: QualifierFacts>(
         });
         if hit.is_some() {
             return hit;
+        }
+    }
+
+    // A qualifier no `use` names may come from a glob: `use p::*; q::f()` is
+    // `p::q::f()`. Two globs that place different files leave it ambiguous.
+    let named_by_use = imports
+        .iter()
+        .any(|i| i.alias.as_deref().unwrap_or(&i.imported_name) == qualifier);
+    if language == Language::Rust
+        && !named_by_use
+        && callee.is_some_and(|callee| rust_type_path_prefix(callee, qualifier).is_none())
+    {
+        let mut placed: Vec<F::Module> = Vec::new();
+        for glob in imports
+            .iter()
+            .filter(|i| i.imported_name == "*" && i.alias.is_none())
+        {
+            let path = format!("{}::{qualifier}", glob.source);
+            let Some(file) = rust_use_module_file(facts, source, &path) else {
+                continue;
+            };
+            let name: &str = file.as_ref();
+            if !placed.iter().any(|p| AsRef::<str>::as_ref(p) == name) {
+                placed.push(file);
+            }
+        }
+        match placed.len() {
+            0 => {}
+            1 => {
+                let file = placed.remove(0);
+                return declares_member(file.as_ref()).then_some(file);
+            }
+            _ => return None,
         }
     }
 
@@ -1166,14 +1458,59 @@ pub fn qualifier_file<F: QualifierFacts>(
     let root = decls.crate_root(source);
     let mut named = facts
         .files_by_stem(qualifier)
-        .filter(|&file| decls.crate_root(file) == root);
+        .filter(|&file| decls.crate_root(file) == root && reaches(file));
     let file = match (named.next(), named.next()) {
         (Some(file), None) => file,
         _ => return None,
     };
+    // `a::f()` where the caller's file declares `mod a;`: a stray `a.rs`
+    // the name alone suggests is no file of `a` when the module tree
+    // places `a` elsewhere (a `#[path]` attribute, a manifest-less tree).
+    // The module tree tier then binds it.
+    let own_module = language == Language::Rust
+        && callee
+            .strip_prefix("self::")
+            .unwrap_or(callee)
+            .strip_prefix(qualifier)
+            .and_then(|rest| rest.strip_prefix("::"))
+            == Some(member)
+        && decls
+            .call_decls(source, qualifier)
+            .any(|(_, kind)| kind == NodeKind::Module);
+    if own_module
+        && facts
+            .rust_module_file(source, &format!("self::{qualifier}"))
+            .is_some_and(|placed| placed.as_ref() != file)
+    {
+        return None;
+    }
     match stem {
         StemFile::DeclaringMember if !declares_member(file) => None,
         _ => facts.stored_file(file),
+    }
+}
+
+/// The file of the Rust module a `use` path names. Rust 2018: a path whose
+/// head is a `mod` the caller's file declares (`mod other; use other::m;`)
+/// is `self::other::m`; the plain path is tried first.
+fn rust_use_module_file<F: QualifierFacts>(
+    facts: &F,
+    source: &str,
+    module_path: &str,
+) -> Option<F::Module> {
+    if let Some(file) = facts.rust_module_file(source, module_path) {
+        return Some(file);
+    }
+    let head = module_path.split("::").next().unwrap_or_default();
+    let declared_child = !matches!(head, "crate" | "self" | "super")
+        && facts
+            .decls()
+            .call_decls(source, head)
+            .any(|(_, kind)| kind == NodeKind::Module);
+    if declared_child {
+        facts.rust_module_file(source, &format!("self::{module_path}"))
+    } else {
+        None
     }
 }
 
@@ -1227,9 +1564,9 @@ pub struct QualifiedSite<'s> {
 ///
 /// A Rust path (`crate::x::parse`) binds a method only when the qualifier
 /// is its owning type (`K::st`): a module path never names a method
-/// ([`rust_path_may_bind`]). Nor does it bind through a qualifier the file
-/// declares twice ([`declares_twin_qualifiers`]), unless it is the caller's
-/// own type.
+/// ([`rust_path_may_bind`]). Nor does it bind a member at another path than
+/// the one it spells ([`rust_path_spells`]), unless the qualifier is the
+/// caller's own type.
 pub fn qualified_member<F: QualifierFacts>(
     facts: &F,
     site: QualifiedSite<'_>,
@@ -1264,16 +1601,10 @@ pub fn qualified_member<F: QualifierFacts>(
     .or_else(|| caller_type.then(|| facts.stored_file(source)).flatten())?;
     let file = file.as_ref();
     let heritage: &[String] = if caller_type { heritage } else { &[] };
-    // `crate::a::b::f()` beside an `outer::a::b`: the file holds two `b`s,
-    // and the owner name cannot say whose `f` the path names. The caller's
-    // own type keeps its `impl` block rule ([`prefer_owned`]).
-    if language == Language::Rust
-        && callee.contains("::")
-        && !caller_type
-        && owner_key(qualifier).is_some_and(|key| declares_twin_qualifiers(decls, file, key))
-    {
-        return None;
-    }
+    // `crate::a::b::f()` beside an `outer::a::b`: the owner name cannot say
+    // whose `f` the path names, the holders can. The caller's own type
+    // keeps its `impl` block rule ([`prefer_owned`]).
+    let exact_path = language == Language::Rust && callee.contains("::") && !caller_type;
     let pick = decls.first_decl_in_file(file, member, target)?;
     // Only Rust's `impl_only` reads it once `caller_type` holds.
     let declares_type = (!caller_type || language == Language::Rust)
@@ -1320,7 +1651,8 @@ pub fn qualified_member<F: QualifierFacts>(
     (rust_path_may_bind(decls, site, id)
         && !(qualifier_names_type && rust_type_path_misses(decls, site, id))
         && !(impl_only && !impl_may_reach(id))
-        && !decls.hidden_member(id))
+        && !decls.hidden_member(id)
+        && !(exact_path && !rust_path_spells(decls, file, site, id)))
     .then_some(id)
 }
 
@@ -1777,18 +2109,30 @@ fn anchored_mod_path(mod_path: &[String], segs: &[&str]) -> Option<Vec<String>> 
 /// `module_path` (`super::util`) names from `caller`, read from the tree of
 /// each target that declares the caller: `crate` in a module of
 /// `src/main.rs` is `main.rs`, and `super` in a `#[path]` file is the module
-/// that declares it. `None` when no target declares the caller, when one of
-/// them does not place the module, or when they place it at different files
-/// (a module both the lib and a bin declare). The caller then falls back to
-/// the file layout, as the index does.
+/// that declares it. A caller in no crate (a manifest-less tree) reads its
+/// own tree ([`module_tree_module`]), so a `#[path]` module is never
+/// guessed from the layout. `None` when no target declares a caller of a
+/// crate, when one of the targets does not place
+/// the module, or when they place it at different files (a module both the
+/// lib and a bin declare). The caller then falls back to the file layout,
+/// as the index does.
 pub fn anchored_module_file<F: ModuleTreeFacts>(
     facts: &F,
     caller: &str,
     module_path: &str,
 ) -> Option<F::File> {
+    let targets = facts.declaring_targets(caller);
+    // A caller in no crate roots a manifest-less tree; a file of a crate no
+    // target declares stays unplaced.
+    if targets.is_empty() {
+        return match facts.caller_crate(caller) {
+            Some(_) => None,
+            None => facts.module_file(module_tree_module(facts, caller, module_path)?),
+        };
+    }
     let segs: Vec<&str> = module_path.split("::").collect();
     let mut found: Option<F::File> = None;
-    for (target, mod_path) in facts.declaring_targets(caller) {
+    for (target, mod_path) in targets {
         let key = anchored_mod_path(&mod_path, &segs)?;
         let file = facts.target_module(target, &key)?;
         if found.as_ref().is_some_and(|f| f.as_ref() != file.as_ref()) {
@@ -1811,14 +2155,16 @@ pub fn anchored_module_file<F: ModuleTreeFacts>(
 /// type's file never bind. [`qualified`] then applies the method rule
 /// ([`rust_path_may_bind`]). A path with segments past the item
 /// ([`TreePlace::past`]) binds only when the file confirms each of them but
-/// the member: the item names a module or a type the file declares (an
-/// `impl` block counts), every middle segment one declared inside the
-/// segment before it, and the member is picked from the last of them.
+/// the member, walked parent -> child on [`PickFacts::container`]: the item
+/// names a module or a type the file declares at file level ([`path_item`]),
+/// every middle segment one
+/// declared directly inside the segment before it ([`qualifier_child`]),
+/// and the member is one the last of them holds ([`declaring_type`]).
 /// `a::missing::top()` and `a::m::S::new()` (no `S` inside `m`) then bind
-/// nothing, never the `top` or `S::new` of `a`'s file. Nor does a path
-/// through a module or type that the file declares twice
-/// ([`declares_twin_qualifiers`]): `api::v2::Config::new()` beside a
-/// `v1::Config` never binds `v1`'s `new`.
+/// nothing, never the `top` or `S::new` of `a`'s file; `api::v2::Config::new()`
+/// beside a `v1::Config` binds `v2`'s `new`, never `v1`'s. Two candidates
+/// with one container (`#[cfg(unix)] mod sys` beside `#[cfg(windows)] mod
+/// sys`) leave the path no edge.
 pub fn module_tree_member<F: ModuleTreeFacts, D: ResolveFacts>(
     facts: &F,
     decls: &D,
@@ -1860,21 +2206,18 @@ pub fn module_tree_member<F: ModuleTreeFacts, D: ResolveFacts>(
     let wanted = target.kind_predicate();
     let is_type = ResolveTarget::Type.kind_predicate();
     // The segments the walk did not consume stand for inline `mod`s and a
-    // type's associated items. Each one past the item must be declared
-    // inside the one before it, and the member is picked from the last
-    // (`qualifier`), so `a::m::S::new()` never reaches the `S` beside `m`.
-    // A turbofish segment (`S::<u8>::new`) names none of them.
+    // type's associated items. The item and each segment past it are found
+    // parent -> child, and the member is picked from the last (`holder`),
+    // so `a::m::S::new()` never reaches the `S` beside `m`. A turbofish
+    // segment (`S::<u8>::new`) names none of them.
     let mut qualifier = item.as_str();
-    let mut nested: Option<u32> = None;
+    let mut holder: Option<u32> = None;
+    let mut nested = false;
     if past > 0 {
-        // The Rust parser files no node for a `union`, only its `impl`
-        // blocks, so an `Impl` also names the item as a type.
-        if !decls
-            .call_decls(file, qualifier)
-            .any(|(_, kind)| kind.is_qualifier() || kind == NodeKind::Impl)
-        {
+        let Child::One(id) = path_item(decls, file, qualifier) else {
             return None;
-        }
+        };
+        holder = Some(id);
         let segs: Vec<&str> = callee.split("::").collect();
         let middle = &segs[segs.len().saturating_sub(past)..segs.len().saturating_sub(1)];
         for &seg in middle {
@@ -1882,19 +2225,24 @@ pub fn module_tree_member<F: ModuleTreeFacts, D: ResolveFacts>(
             if name.is_empty() {
                 continue;
             }
-            let outer = owner_key(qualifier)?;
-            if declares_twin_qualifiers(decls, file, outer) {
+            let Child::One(id) = qualifier_child(decls, file, Some(holder?), name) else {
                 return None;
-            }
-            let (id, _) = decls.call_decls(file, name).find(|&(id, kind)| {
-                kind.is_qualifier() && decls.owner(id).and_then(owner_key) == Some(outer)
-            })?;
+            };
             qualifier = name;
-            nested = Some(id);
+            holder = Some(id);
+            nested = true;
         }
     }
-    let item_is_type = match nested {
-        Some(id) => is_type(decls.kind(id)),
+    let item_is_type = match holder {
+        Some(id) => {
+            let kind = decls.kind(id);
+            if !nested && wanted(kind) {
+                if let Some(id) = module_item(decls, id) {
+                    return Some(id);
+                }
+            }
+            is_type(kind)
+        }
         None => {
             let mut item_is_type = false;
             for (id, kind) in decls.call_decls(file, &item) {
@@ -1926,19 +2274,35 @@ pub fn module_tree_member<F: ModuleTreeFacts, D: ResolveFacts>(
     if !item_is_type && past == 0 {
         return Some(pick);
     }
-    let item_key = owner_key(qualifier)?;
-    if declares_twin_qualifiers(decls, file, item_key) {
-        return None;
+    if holder.is_none() {
+        match path_item(decls, file, qualifier) {
+            Child::One(id) => holder = Some(id),
+            _ => return None,
+        }
     }
-    let owned_by_item =
-        |id: u32| usable(id) && decls.owner(id).and_then(owner_key) == Some(item_key);
+    let item_key = owner_key(qualifier)?;
+    let named_by_item = |id: u32| decls.owner(id).and_then(owner_key) == Some(item_key);
+    // A member at file level whose owner names the item stands for a side
+    // that records no container: no Rust member the item holds is at file
+    // level. A member of an `impl` block whose type the block's scope does
+    // not declare (`mod imp { impl super::S { .. } }`) has no holder.
+    let held = |id: u32| match (holder, holder_of(decls, id)) {
+        (None, _) | (Some(_), Ok(None)) => named_by_item(id),
+        (Some(h), Ok(Some(of))) => of == h,
+        (Some(_), Err(())) => false,
+    };
+    let owned_by_item = |id: u32| usable(id) && held(id);
     let owned = candidates
         .iter()
         .find_map(|&id| past_body_local(decls, id, owned_by_item));
-    // An inline `mod` (or a `union`'s `impl`) holds its members itself.
+    // An inline `mod` holds its members itself.
     if owned.is_some() || !item_is_type {
         return owned;
     }
+    // The pick by owner name may land on a twin's member (`v1::Config`'s
+    // `new` for `v2::Config`): a member named by the item's name that the
+    // item does not hold is no member of the item.
+    let twin_member = |id: u32| named_by_item(id) && !held(id);
     prefer_owned(
         decls,
         file,
@@ -1955,7 +2319,7 @@ pub fn module_tree_member<F: ModuleTreeFacts, D: ResolveFacts>(
     )
     .and_then(|id| {
         past_body_local(decls, id, |id| {
-            decls.owner(id).is_some() && !decls.is_body_local(id)
+            decls.owner(id).is_some() && !decls.is_body_local(id) && !twin_member(id)
         })
     })
 }
@@ -2223,6 +2587,9 @@ pub struct CallVerdict<'s> {
 ///    lexical scope hides ([`Resolution::Shadowed`]) skips every name tier:
 ///    only the import tiers and the constructor fallback run
 ///    (`import_only`).
+///    Then an unproven member site ([`CallSite::UnprovenMember`]) ends as
+///    [`NoEdge::ReceiverUnproven`] where [`unproven_binds_guess`] is false;
+///    where it is true, it goes on as an untyped member call.
 /// 1. Normalize the site (R2-R5). A Python from-imported submodule and a
 ///    mapped Go package settle the call ahead of the ladder; a Go value or
 ///    unmapped package re-classifies the site. A C#, Swift, Kotlin or Dart
@@ -2271,6 +2638,19 @@ pub fn call<'s, F: CallFacts<'s>>(
             };
         }
         _ => {}
+    }
+    // A receiver whose paths disagree, or that the receiver
+    // core could not follow, is the tagged guess in a duck-typed language
+    // and no edge elsewhere. No tier, retry or constructor fallback runs.
+    if let CallSite::UnprovenMember(member) = site {
+        if !unproven_binds_guess(language) {
+            return CallVerdict {
+                resolution: Resolution::NoEdge(NoEdge::ReceiverUnproven),
+                site,
+                typed: false,
+            };
+        }
+        site = CallSite::UntypedMember(member);
     }
     let imports = || cx.imports.iter().map(ImportRef::from);
     let mut resolution = Resolution::Unknown;
@@ -2405,11 +2785,13 @@ pub fn call<'s, F: CallFacts<'s>>(
 }
 
 /// Whether an untyped member call that binds a method by its name alone is a
-/// guess in `language`. These parsers type the receivers they can, so an
-/// untyped receiver is mostly a library value (`vec.retain()`) and the one
-/// project method of that name a false hit. Python, Ruby, PHP and
-/// JavaScript are duck-typed: the name is the main signal there. C# and
-/// Kotlin never bind an untyped member by name, so they never reach it.
+/// guess in `language`. The static-typed parsers type the receivers they
+/// can, so an untyped receiver is mostly a library value (`vec.retain()`)
+/// and the one project method of that name a false hit. In duck-typed PHP,
+/// Python, Ruby and JavaScript the name is the main signal, but still no
+/// proof of the receiver's type, so the bind is tagged
+/// there too. C# never binds an untyped member by name; C and Kotlin keep
+/// the tier's confidence.
 pub const fn untyped_bind_is_guess(language: Language) -> bool {
     matches!(
         language,
@@ -2420,6 +2802,21 @@ pub const fn untyped_bind_is_guess(language: Language) -> bool {
             | Language::Dart
             | Language::Cpp
             | Language::TypeScript
+            | Language::Php
+            | Language::Python
+            | Language::Ruby
+            | Language::JavaScript
+    )
+}
+
+/// Whether a [`CallSite::UnprovenMember`] site binds as the tagged guess in
+/// `language`: the duck-typed languages, where a name is the usual signal.
+/// Every other language binds nothing ([`NoEdge::ReceiverUnproven`]): a
+/// receiver its paths type apart is no evidence for any one method.
+pub const fn unproven_binds_guess(language: Language) -> bool {
+    matches!(
+        language,
+        Language::Php | Language::Python | Language::Ruby | Language::JavaScript
     )
 }
 
@@ -2440,7 +2837,10 @@ fn import_only<'s, F: CallFacts<'s>>(
     cx: &CallContext<'_>,
     site: CallSite<'s>,
 ) -> Resolution {
-    if matches!(site, CallSite::UntypedMember(_)) {
+    if matches!(
+        site,
+        CallSite::UntypedMember(_) | CallSite::UnprovenMember(_)
+    ) {
         return Resolution::Unknown;
     }
     let language = cx.language;
@@ -2628,6 +3028,13 @@ mod tests {
         supertypes: Vec<(u32, Vec<u32>)>,
         /// Every `first_decl_in_file` probe, as `(file, name)`.
         probes: RefCell<Vec<(String, String)>>,
+        /// Per id, its container; empty records none, as a side without
+        /// the column.
+        containers: Vec<Option<u32>>,
+        /// Ids inside a function body ([`PickFacts::is_body_local`]).
+        body_local: Vec<u32>,
+        /// `(first, later declarations)`: a later one is in no name table.
+        later: Vec<(u32, Vec<u32>)>,
     }
 
     impl Fake {
@@ -2643,6 +3050,9 @@ mod tests {
                 scoped: Vec::new(),
                 supertypes: Vec::new(),
                 probes: RefCell::default(),
+                containers: Vec::new(),
+                body_local: Vec::new(),
+                later: Vec::new(),
             }
         }
 
@@ -2650,9 +3060,10 @@ mod tests {
             0..self.decls.len() as u32
         }
 
-        /// `file`'s declarations of `name`, scoped ones included.
+        /// `file`'s declarations of `name`, scoped ones included and later
+        /// declarations left out, as a name table holds them.
         fn in_file(&self, file: &str, name: &str) -> Vec<u32> {
-            match self.layout {
+            let mut ids = match self.layout {
                 Layout::Index => self
                     .by_file
                     .iter()
@@ -2665,7 +3076,9 @@ mod tests {
                         f == file && n == name
                     })
                     .collect(),
-            }
+            };
+            ids.retain(|id| !self.later.iter().any(|(_, later)| later.contains(id)));
+            ids
         }
 
         fn meta(&self, id: u32) -> FileMeta {
@@ -2717,6 +3130,217 @@ mod tests {
                 .find(|(t, _)| *t == ty)
                 .map_or_else(Vec::new, |(_, bases)| bases.clone())
         }
+        fn container(&self, id: u32) -> Option<u32> {
+            self.containers.get(id as usize).copied().flatten()
+        }
+        fn is_body_local(&self, id: u32) -> bool {
+            self.body_local.contains(&id) || self.is_lexically_scoped(id)
+        }
+        fn later_overloads(&self, first: u32) -> Cow<'_, [u32]> {
+            self.later
+                .iter()
+                .find(|(f, _)| *f == first)
+                .map_or(Cow::Borrowed(&[]), |(_, later)| {
+                    Cow::Borrowed(later.as_slice())
+                })
+        }
+    }
+
+    const TWIN_LIB: &str = "src/lib.rs";
+
+    /// `mod outer { mod a { mod b { fn wrong } } }` beside
+    /// `mod a { mod b { fn right } }` in one file, with their containers.
+    fn twin_modules(layout: Layout) -> Fake {
+        const MODULE: NodeKind = NodeKind::Module;
+        const F: NodeKind = NodeKind::Function;
+        let decls: [Decl; 7] = [
+            (TWIN_LIB, "outer", MODULE, None),
+            (TWIN_LIB, "a", MODULE, Some("outer")),
+            (TWIN_LIB, "b", MODULE, Some("a")),
+            (TWIN_LIB, "wrong", F, Some("b")),
+            (TWIN_LIB, "a", MODULE, None),
+            (TWIN_LIB, "b", MODULE, Some("a")),
+            (TWIN_LIB, "right", F, Some("b")),
+        ];
+        let mut fake = Fake::new(layout, &decls);
+        fake.containers = vec![None, Some(0), Some(1), Some(2), None, Some(4), Some(5)];
+        fake
+    }
+
+    /// Stands for (C4.4): a path walks parent -> child, so `a` at file level
+    /// is the top `a`, and each `b` is the one inside its own `a`; a name no
+    /// parent holds is missing.
+    #[test]
+    fn test_qualifier_child_twin_modules_walk_parent_to_child() {
+        for layout in [Layout::Index, Layout::Overlay] {
+            let fake = twin_modules(layout);
+            assert!(matches!(
+                qualifier_child(&fake, TWIN_LIB, None, "a"),
+                Child::One(4)
+            ));
+            assert!(matches!(
+                qualifier_child(&fake, TWIN_LIB, Some(4), "b"),
+                Child::One(5)
+            ));
+            assert!(matches!(
+                qualifier_child(&fake, TWIN_LIB, Some(1), "b"),
+                Child::One(2)
+            ));
+            assert!(matches!(
+                qualifier_child(&fake, TWIN_LIB, Some(4), "missing"),
+                Child::Missing
+            ));
+            assert!(matches!(
+                qualifier_child(&fake, TWIN_LIB, Some(4), "right"),
+                Child::Missing
+            ));
+        }
+    }
+
+    /// Stands for (M08 variant 2): two same-named modules of one container
+    /// leave the segment ambiguous; a name no file-level row holds falls back
+    /// to its one row anywhere in the file, and two such rows are ambiguous.
+    #[test]
+    fn test_path_item_same_container_twins_and_nested_names() {
+        let decls: [Decl; 2] = [
+            (TWIN_LIB, "sys", NodeKind::Module, None),
+            (TWIN_LIB, "sys", NodeKind::Module, None),
+        ];
+        let cfg = Fake::new(Layout::Index, &decls);
+        assert!(matches!(path_item(&cfg, TWIN_LIB, "sys"), Child::Ambiguous));
+        let fake = twin_modules(Layout::Index);
+        assert!(matches!(path_item(&fake, TWIN_LIB, "outer"), Child::One(0)));
+        assert!(matches!(path_item(&fake, TWIN_LIB, "b"), Child::Ambiguous));
+        assert!(matches!(
+            path_item(&fake, TWIN_LIB, "absent"),
+            Child::Missing
+        ));
+    }
+
+    /// Stands for (A13): a Rust path names a member only at the holders it
+    /// spells. `crate::a::b::right` agrees with `right`'s holders `b`, `a`;
+    /// `crate::a::b::wrong` does not with `wrong`'s `b`, `a`, `outer`.
+    #[test]
+    fn test_rust_path_spells_exact_path_binds_twin_path_does_not() {
+        let fake = twin_modules(Layout::Index);
+        let path = |callee| site(TWIN_LIB, callee, None);
+        assert!(rust_path_spells(
+            &fake,
+            TWIN_LIB,
+            path("crate::a::b::right"),
+            6
+        ));
+        assert!(!rust_path_spells(
+            &fake,
+            TWIN_LIB,
+            path("crate::a::b::wrong"),
+            3
+        ));
+        assert!(rust_path_spells(
+            &fake,
+            TWIN_LIB,
+            path("crate::outer::a::b::wrong"),
+            3
+        ));
+        let names = holder_path(&fake, 3).expect("a readable path").names;
+        assert_eq!(names, ["b", "a", "outer"]);
+    }
+
+    /// A `super` / `self` anchor spells only the segments inside it: from
+    /// inside `outer::a`, `super::a::b::wrong` and `self::b::wrong` name
+    /// `wrong`; `super::c::wrong` names a module `wrong` is not in.
+    #[test]
+    fn test_rust_path_spells_relative_anchor_checks_inner_segments_only() {
+        let fake = twin_modules(Layout::Index);
+        let path = |callee| site(TWIN_LIB, callee, None);
+        assert!(rust_path_spells(
+            &fake,
+            TWIN_LIB,
+            path("super::a::b::wrong"),
+            3
+        ));
+        assert!(rust_path_spells(&fake, TWIN_LIB, path("self::b::wrong"), 3));
+        assert!(!rust_path_spells(
+            &fake,
+            TWIN_LIB,
+            path("super::c::wrong"),
+            3
+        ));
+    }
+
+    /// Dependency down: a side that records no container reads every row at
+    /// file level, so the rule keeps the pick it had.
+    #[test]
+    fn test_rust_path_spells_side_without_containers_keeps_pick() {
+        let mut fake = twin_modules(Layout::Index);
+        fake.containers.clear();
+        assert!(rust_path_spells(
+            &fake,
+            TWIN_LIB,
+            site(TWIN_LIB, "crate::a::b::wrong", None),
+            3
+        ));
+    }
+
+    const TWIN_M: &str = "src/m.rs";
+
+    /// `fn setup() { struct Foo; }` before the module-level `struct Foo` and
+    /// its `impl Foo { fn new }`. The container column skips the body, so
+    /// both `Foo`s sit at file level, and the module-level one is a later
+    /// declaration of the body-local first.
+    fn body_local_first_foo() -> Fake {
+        let decls: [Decl; 5] = [
+            (TWIN_M, "setup", NodeKind::Function, None),
+            (TWIN_M, "Foo", NodeKind::Struct, None),
+            (TWIN_M, "Foo", NodeKind::Struct, None),
+            (TWIN_M, "Foo", NodeKind::Impl, None),
+            (TWIN_M, "new", NodeKind::Method, Some("Foo")),
+        ];
+        let mut fake = Fake::new(Layout::Index, &decls);
+        fake.containers = vec![None, None, None, None, Some(3)];
+        fake.body_local = vec![1];
+        fake.later = vec![(1, vec![2])];
+        fake
+    }
+
+    /// Stands for the module-level twin of a body-local type: a path step
+    /// sees the module-level `Foo` past the body-local first, `new`'s holder
+    /// is that `Foo`, and the body-local `Foo` is no `#[cfg]` twin of it, so
+    /// `crate::m::Foo::new()` spells `new`.
+    #[test]
+    fn test_path_walk_body_local_first_type_binds_module_level_later() {
+        let fake = body_local_first_foo();
+        assert!(matches!(
+            qualifier_child(&fake, TWIN_M, None, "Foo"),
+            Child::One(2)
+        ));
+        assert!(matches!(path_item(&fake, TWIN_M, "Foo"), Child::One(2)));
+        assert!(!has_cfg_twin(&fake, 1));
+        let path = holder_path(&fake, 4).expect("a readable path");
+        assert_eq!((path.holder, path.twin), (Some(2), false));
+        assert!(rust_path_spells(
+            &fake,
+            TWIN_M,
+            site(TWIN_M, "crate::m::Foo::new", None),
+            4
+        ));
+    }
+
+    /// The other order: a body-local `Foo` after the module-level first is no
+    /// `#[cfg]` twin; two module-level `Foo`s of one container are.
+    #[test]
+    fn test_has_cfg_twin_body_local_later_is_no_twin_module_level_later_is() {
+        let decls: [Decl; 2] = [
+            (TWIN_M, "Foo", NodeKind::Struct, None),
+            (TWIN_M, "Foo", NodeKind::Struct, None),
+        ];
+        let mut fake = Fake::new(Layout::Index, &decls);
+        fake.containers = vec![None, None];
+        fake.later = vec![(0, vec![1])];
+        assert!(has_cfg_twin(&fake, 0));
+        fake.body_local = vec![1];
+        assert!(!has_cfg_twin(&fake, 0));
+        assert!(matches!(path_item(&fake, TWIN_M, "Foo"), Child::One(0)));
     }
 
     impl TypeFacts for Fake {
@@ -3192,6 +3816,118 @@ mod tests {
         }
     }
 
+    const I: NodeKind = NodeKind::Interface;
+
+    /// The a15a fixture: `class Owner {}`, `interface Cat { id; name }`,
+    /// `class Dog { name }` in one file, in that order.
+    fn cat_before_dog() -> [Fake; 2] {
+        let decls: [Decl; 6] = [
+            ("a.ts", "Owner", C, None),
+            ("a.ts", "Cat", I, None),
+            ("a.ts", "id", P, Some("Cat")),
+            ("a.ts", "name", P, Some("Cat")),
+            ("a.ts", "Dog", C, None),
+            ("a.ts", "name", P, Some("Dog")),
+        ];
+        both(&decls).map(|mut fake| {
+            fake.containers = vec![None, None, Some(1), Some(1), None, Some(4)];
+            fake
+        })
+    }
+
+    /// Stands for: an interface property is a contract, not storage, so the
+    /// bare read `d.name` binds the class's `name` that comes after it.
+    #[test]
+    fn test_field_read_interface_property_first_class_second_binds_class() {
+        for facts in cat_before_dog() {
+            assert_eq!(
+                field_read(&facts, "a.ts", "name"),
+                FieldRead::Bound(Hit {
+                    id: 5,
+                    confidence: 1.0,
+                    tier: Some(Tier::SameFile),
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn test_field_read_only_interface_property_leaves_tier1() {
+        for facts in cat_before_dog() {
+            assert_eq!(field_read(&facts, "a.ts", "id"), FieldRead::Global);
+        }
+    }
+
+    /// Stands for: the Contract rule is the field read's alone, so a plain
+    /// same-file lookup of the name keeps the first `Property` in source
+    /// order.
+    #[test]
+    fn test_same_file_name_lookup_interface_property_keeps_first() {
+        for facts in cat_before_dog() {
+            assert_eq!(
+                same_file(&facts, "a.ts", "name", ResolveTarget::Field, None, &[]),
+                bound(3, Tier::SameFile)
+            );
+        }
+    }
+
+    /// Stands for: the Tier 3 of a bare read admits through the
+    /// `GlobalFieldRead` gate. The read names no receiver type, so an
+    /// interface property in one file and a class's namesake in another stay
+    /// ambiguous: binding the class would claim a `User` the reader may never
+    /// touch. An interface property alone binds nothing.
+    #[test]
+    fn test_global_field_read_interface_and_class_in_two_files_is_ambiguous() {
+        let decls: [Decl; 5] = [
+            ("cat.ts", "Cat", I, None),
+            ("cat.ts", "name", P, Some("Cat")),
+            ("cat.ts", "id", P, Some("Cat")),
+            ("dog.ts", "Dog", C, None),
+            ("dog.ts", "name", P, Some("Dog")),
+        ];
+        for mut facts in both(&decls) {
+            facts.containers = vec![None, Some(0), Some(0), None, Some(3)];
+            let caller = FileMeta::from_path("use.ts");
+            let run = |name: &str, form: SiteForm| {
+                let gate = Gate::new(
+                    &facts,
+                    Site {
+                        caller,
+                        caller_file: "use.ts",
+                        caller_owner: None,
+                        heritage: &[],
+                        form,
+                        name,
+                        imports: &[],
+                    },
+                );
+                let candidates = facts.named(name);
+                gate.settle(global(
+                    &facts,
+                    "use.ts",
+                    caller,
+                    ResolveTarget::Field,
+                    false,
+                    || gate.admitted(candidates.iter().copied()),
+                    |_| false,
+                ))
+            };
+            assert_eq!(
+                run("name", SiteForm::GlobalFieldRead),
+                Resolution::NoEdge(NoEdge::Ambiguous(2))
+            );
+            assert_eq!(
+                run("id", SiteForm::GlobalFieldRead),
+                Resolution::NoEdge(NoEdge::Unresolved)
+            );
+            assert_eq!(
+                run("name", SiteForm::Value),
+                Resolution::NoEdge(NoEdge::Ambiguous(2)),
+                "a name lookup keeps both candidates"
+            );
+        }
+    }
+
     /// The lexical tier binds first at Tier 1's confidence and asks no name
     /// tier; a name the project never declares binds nothing.
     #[test]
@@ -3224,6 +3960,87 @@ mod tests {
         assert_eq!(asked.get(), 0, "an undeclared name reads no name tier");
         assert_eq!(run("helper", None), Some((0, 1.0)));
         assert_eq!(asked.get(), 1);
+    }
+
+    /// `name_ref` in `main.cpp` when the name tiers bind `bound` for every
+    /// lookup, as a side's tiers do after the C / C++ canonical step.
+    fn cpp_value_ref(facts: &Fake, name: &'static str, bound: u32) -> Option<(u32, f32)> {
+        name_ref(
+            facts,
+            &call_fake(&[]),
+            "main.cpp",
+            Language::Cpp,
+            &[],
+            None,
+            NameRef {
+                name,
+                kind: crate::analyzer::types::NameRefKind::Function,
+            },
+            None,
+            |_: &str, _| vec![(bound, 0.9)],
+            |_: &str, _| Vec::new(),
+        )
+    }
+
+    const CPP_NS: Decl = ("types.hpp", "ns", NodeKind::Namespace, None);
+    const CPP_INST: Decl = ("types.hpp", "Inst", NodeKind::Struct, Some("ns"));
+    const CPP_INST_DECL: Decl = ("types.hpp", "cb_ns", M, Some("Inst"));
+    const CPP_INST_DEF: Decl = ("cb.cpp", "cb_ns", M, Some("Inst"));
+
+    /// Stands for (A15f): `&ns::Inst::cb_ns` binds the out-of-line
+    /// definition `void ns::Inst::cb_ns() {}` the name tiers settle the
+    /// in-class declaration to, though `cb.cpp` declares neither `Inst` nor
+    /// `ns`. The declaration itself still binds; a path that does not
+    /// enclose the declaration binds nothing.
+    #[test]
+    fn test_ladder_name_ref_cpp_out_of_line_member_path_binds_definition() {
+        let decls = [CPP_NS, CPP_INST, CPP_INST_DECL, CPP_INST_DEF];
+        for facts in both(&decls) {
+            assert_eq!(cpp_value_ref(&facts, "ns.Inst.cb_ns", 3), Some((3, 0.9)));
+            assert_eq!(cpp_value_ref(&facts, "ns.Inst.cb_ns", 2), Some((2, 0.9)));
+            assert_eq!(cpp_value_ref(&facts, "other.Inst.cb_ns", 3), None);
+        }
+    }
+
+    /// Two classes `ns::Inst` and `other::Inst` that both declare `cb_ns`:
+    /// the definition records only `Inst`, so its path is unknown and binds
+    /// nothing. Each declaration still binds through its own path.
+    #[test]
+    fn test_ladder_name_ref_cpp_out_of_line_member_two_owner_classes_binds_nothing() {
+        let decls = [
+            CPP_NS,
+            CPP_INST,
+            CPP_INST_DECL,
+            CPP_INST_DEF,
+            ("other.hpp", "other", NodeKind::Namespace, None),
+            ("other.hpp", "Inst", NodeKind::Struct, Some("other")),
+            ("other.hpp", "cb_ns", M, Some("Inst")),
+        ];
+        for facts in both(&decls) {
+            assert_eq!(cpp_value_ref(&facts, "ns.Inst.cb_ns", 3), None);
+            assert_eq!(cpp_value_ref(&facts, "ns.Inst.cb_ns", 2), Some((2, 0.9)));
+            assert_eq!(cpp_value_ref(&facts, "other.Inst.cb_ns", 6), Some((6, 0.9)));
+        }
+    }
+
+    /// No class declares the member (the header holds `Inst` without
+    /// `cb_ns`), and a member of a type outside C++ (`Cb.java`): neither
+    /// path reads another file, so neither binds.
+    #[test]
+    fn test_ladder_name_ref_out_of_line_member_without_declaration_binds_nothing() {
+        for facts in both(&[CPP_NS, CPP_INST, CPP_INST_DEF]) {
+            assert_eq!(cpp_value_ref(&facts, "ns.Inst.cb_ns", 2), None);
+        }
+        let java = [
+            ("a/Types.java", "ns", NodeKind::Namespace, None),
+            ("a/Types.java", "Inst", NodeKind::Class, Some("ns")),
+            ("a/Types.java", "cb_ns", M, Some("Inst")),
+            ("a/Cb.java", "cb_ns", M, Some("Inst")),
+        ];
+        for facts in both(&java) {
+            assert_eq!(cpp_value_ref(&facts, "ns.Inst.cb_ns", 3), None);
+            assert_eq!(cpp_value_ref(&facts, "ns.Inst.cb_ns", 2), Some((2, 0.9)));
+        }
     }
 
     /// Every verdict of the bare-variant pick, for the store layouts of
@@ -3804,6 +4621,8 @@ mod tests {
     struct Quals {
         fake: Fake,
         files: Vec<&'static str>,
+        /// `(module path, file)` pairs [`QualifierFacts::rust_module_file`] places.
+        rust_modules: Vec<(&'static str, &'static str)>,
     }
 
     impl Quals {
@@ -3814,6 +4633,7 @@ mod tests {
             Self {
                 fake: Fake::new(Layout::Index, decls),
                 files,
+                rust_modules: Vec::new(),
             }
         }
     }
@@ -3879,8 +4699,11 @@ mod tests {
         fn holds_import(&self, _file: &str, _imported: &str, _default_import: bool) -> bool {
             false
         }
-        fn rust_module_file(&self, _source: &str, _module_path: &str) -> Option<&'static str> {
-            None
+        fn rust_module_file(&self, _source: &str, module_path: &str) -> Option<&'static str> {
+            self.rust_modules
+                .iter()
+                .find(|&&(path, _)| path == module_path)
+                .map(|&(_, file)| file)
         }
         fn crate_module(
             &self,
@@ -3921,6 +4744,137 @@ mod tests {
                 ids => TypeCandidates::Set(ids.to_vec(), name),
             }
         }
+    }
+
+    const MOD: NodeKind = NodeKind::Module;
+
+    fn use_glob(source: &str) -> RawImport {
+        RawImport {
+            source: source.to_string(),
+            imported_name: "*".to_string(),
+            alias: None,
+            binding_kind: None,
+        }
+    }
+
+    fn use_named(source: &str, name: &str) -> RawImport {
+        RawImport {
+            source: source.to_string(),
+            imported_name: name.to_string(),
+            alias: None,
+            binding_kind: None,
+        }
+    }
+
+    /// `src/lib.rs` declares `mod other;` and `mod more;`; each module file
+    /// holds a module `registry` under a name the file-stem step cannot find.
+    fn glob_fixture() -> Quals {
+        let decls: [Decl; 5] = [
+            ("src/lib.rs", "other", MOD, None),
+            ("src/lib.rs", "more", MOD, None),
+            ("src/lib.rs", "run", F, None),
+            ("src/other/reg_a.rs", "lookup", F, None),
+            ("src/more/reg_b.rs", "lookup", F, None),
+        ];
+        let mut facts = Quals::new(&decls);
+        facts.rust_modules = vec![
+            ("self::other::registry", "src/other/reg_a.rs"),
+            ("self::more::registry", "src/more/reg_b.rs"),
+        ];
+        facts
+    }
+
+    fn registry_file(
+        facts: &Quals,
+        imports: &[RawImport],
+        callee: &'static str,
+    ) -> Option<&'static str> {
+        let (qualifier, member) = split_qualifier(callee).expect("a qualified callee");
+        qualifier_file(
+            facts,
+            "src/lib.rs",
+            FileMeta::from_path("src/lib.rs"),
+            imports,
+            (Some(callee), qualifier, member),
+            CALLABLE,
+            StemFile::Any,
+        )
+    }
+
+    /// Stands for A15c: `mod other; use other::*; registry::lookup()` places
+    /// `registry` at `other::registry` (Rust 2018: the head is a declared `mod`).
+    #[test]
+    fn test_qualifier_file_rust_glob_places_qualifier_in_glob_module() {
+        let facts = glob_fixture();
+        let imports = [use_glob("other")];
+        assert_eq!(
+            registry_file(&facts, &imports, "registry::lookup"),
+            Some("src/other/reg_a.rs")
+        );
+    }
+
+    /// Stands for: an absent `use` list, and a glob of a module with no such
+    /// item, place nothing.
+    #[test]
+    fn test_qualifier_file_rust_glob_without_such_item_or_without_imports_binds_nothing() {
+        let facts = glob_fixture();
+        assert_eq!(registry_file(&facts, &[], "registry::lookup"), None);
+        assert_eq!(
+            registry_file(&facts, &[use_glob("other")], "missing::lookup"),
+            None
+        );
+    }
+
+    /// Stands for: two globs that place different files are ambiguous; two
+    /// that place one file are not.
+    #[test]
+    fn test_qualifier_file_rust_two_globs_bind_only_when_they_place_one_file() {
+        let facts = glob_fixture();
+        let ambiguous = [use_glob("other"), use_glob("more")];
+        assert_eq!(registry_file(&facts, &ambiguous, "registry::lookup"), None);
+        let same = [use_glob("other"), use_glob("self::other")];
+        assert_eq!(
+            registry_file(&facts, &same, "registry::lookup"),
+            Some("src/other/reg_a.rs")
+        );
+    }
+
+    /// Stands for: an explicit `use` names the qualifier, so a glob that
+    /// would place it elsewhere is not consulted.
+    #[test]
+    fn test_qualifier_file_rust_explicit_use_beside_glob_wins() {
+        let facts = glob_fixture();
+        let imports = [use_glob("other"), use_named("more", "registry")];
+        assert_eq!(
+            registry_file(&facts, &imports, "registry::lookup"),
+            Some("src/more/reg_b.rs")
+        );
+    }
+
+    /// Stands for: a glob stands for the qualifier only when no module path
+    /// precedes it; `x::registry::lookup()` is not `other::registry`.
+    #[test]
+    fn test_qualifier_file_rust_glob_ignores_qualifier_with_module_path() {
+        let facts = glob_fixture();
+        assert_eq!(
+            registry_file(&facts, &[use_glob("other")], "x::registry::lookup"),
+            None
+        );
+    }
+
+    /// Stands for A15c control: `use other::registry;` with `mod other;`
+    /// declared by the caller is `self::other::registry`.
+    #[test]
+    fn test_qualifier_file_rust_named_use_of_declared_mod_places_self_relative() {
+        let facts = glob_fixture();
+        assert_eq!(
+            registry_file(
+                &facts,
+                &[use_named("other", "registry")],
+                "registry::lookup"
+            ),
+            Some("src/other/reg_a.rs")
+        );
     }
 
     fn site<'s>(source: &'s str, callee: &'s str, call: Option<CallPick<'s>>) -> QualifiedSite<'s> {
@@ -4937,6 +5891,8 @@ mod tests {
     /// Python another module's function; it refuses a function of the
     /// caller's module, a member of the caller's own type, and in Go any
     /// free function. Two classes' namesakes stay the ladder's no edge.
+    /// Python is a guess language, so a kept target binds
+    /// as the tagged guess `Tier::UntypedName`, not at the ladder's tier.
     #[test]
     fn test_call_untyped_member_post_filter_admits_member_or_other_module_function() {
         let mut fake = call_fake(&[
@@ -4955,7 +5911,7 @@ mod tests {
             fake.ladder = vec![(name, Resolution::bound(id, Tier::Global))];
             let verdict = call(&fake, python, CallSite::UntypedMember(name));
             let want = match admitted {
-                true => Resolution::bound(id, Tier::Global),
+                true => Resolution::bound(id, Tier::UntypedName),
                 false => Resolution::Unknown,
             };
             assert_eq!(verdict.resolution, want, "{name}");
@@ -4994,6 +5950,10 @@ mod tests {
             Language::Dart,
             Language::Cpp,
             Language::TypeScript,
+            Language::Php,
+            Language::Python,
+            Language::Ruby,
+            Language::JavaScript,
         ] {
             assert!(untyped_bind_is_guess(language), "{language:?}");
             for resolution in found {
@@ -5009,20 +5969,14 @@ mod tests {
         }
     }
 
-    /// Rule U (U1): a duck-typed language keeps the name as its main signal,
-    /// and C, Kotlin and C# are outside the rule: the bind keeps the
-    /// confidence of the tier that found it.
+    /// Rule U (U1): C, Kotlin and C# are outside the rule: the bind keeps
+    /// the confidence of the tier that found it. PHP, Python, Ruby and
+    /// JavaScript left this list for the guess
+    /// languages, so a duck-typed bind by name alone is the tagged guess.
     #[test]
     fn test_call_untyped_member_other_language_keeps_tier_confidence() {
-        let mut fake = call_fake(&[("lib/dirty.py", "retain", M, Some("Dirty"))]);
-        for language in [
-            Language::Python,
-            Language::Ruby,
-            Language::Php,
-            Language::JavaScript,
-            Language::Kotlin,
-            Language::C,
-        ] {
+        let mut fake = call_fake(&[("lib/dirty.kt", "retain", M, Some("Dirty"))]);
+        for language in [Language::Kotlin, Language::C] {
             assert!(!untyped_bind_is_guess(language), "{language:?}");
             for tier in [Tier::Global, Tier::SameFile] {
                 fake.ladder = vec![("retain", bound(0, tier))];
@@ -5035,6 +5989,188 @@ mod tests {
             }
         }
         assert!(!untyped_bind_is_guess(Language::CSharp));
+    }
+
+    /// An unproven receiver (paths that disagree, an escape,
+    /// an unsupported construct, the budget) binds nothing outside the
+    /// duck-typed languages, and asks no tier, no bare-member retry and no
+    /// import tier on the way, whatever the ladder would bind.
+    #[test]
+    fn test_call_unproven_member_static_language_binds_no_edge() {
+        let mut fake = call_fake(&[("lib/dirty.x", "retain", M, Some("Dirty"))]);
+        fake.ladder = vec![("retain", bound(0, Tier::Global))];
+        fake.bare = vec![("retain", (0, 0.95))];
+        fake.imported = vec![("retain", ResolveTarget::Callable, (0, 0.95))];
+        for language in [
+            Language::Rust,
+            Language::Go,
+            Language::Java,
+            Language::Swift,
+            Language::Dart,
+            Language::Cpp,
+            Language::TypeScript,
+            Language::Kotlin,
+            Language::C,
+            Language::CSharp,
+        ] {
+            assert!(!unproven_binds_guess(language), "{language:?}");
+            let verdict = call(
+                &fake,
+                cx("app/main", language, &[]),
+                CallSite::UnprovenMember("retain"),
+            );
+            assert_eq!(
+                verdict.resolution,
+                Resolution::NoEdge(NoEdge::ReceiverUnproven),
+                "{language:?}"
+            );
+            assert!(!verdict.typed);
+        }
+        assert!(fake.seen.borrow().is_empty());
+        assert!(fake.imported_seen.borrow().is_empty());
+        assert_eq!(fake.bare_calls.get(), 0);
+        assert!(fake.unresolved.borrow().is_empty());
+    }
+
+    /// In PHP, Python, Ruby and JavaScript an unproven
+    /// receiver reads as an untyped member call: the ladder runs with no
+    /// `this` and no bases, R21 filters its target, and the bind is the
+    /// tagged guess, whichever tier found it. A refused target (the
+    /// caller's own type), an ambiguous name and an empty member bind
+    /// nothing, as for an untyped site.
+    #[test]
+    fn test_call_unproven_member_duck_typed_language_binds_tagged_guess() {
+        let heritage = vec!["Base".to_owned()];
+        let mut fake = call_fake(&[
+            ("lib/dirty.x", "retain", M, Some("Dirty")),
+            ("lib/caller.x", "own", M, Some("Caller")),
+        ]);
+        for language in [
+            Language::Php,
+            Language::Python,
+            Language::Ruby,
+            Language::JavaScript,
+        ] {
+            assert!(unproven_binds_guess(language), "{language:?}");
+            assert!(untyped_bind_is_guess(language), "{language:?}");
+            let caller = cx("app/main", language, &heritage);
+            for found in [bound(0, Tier::Global), bound(0, Tier::SameFile)] {
+                fake.ladder = vec![("retain", found)];
+                fake.seen.borrow_mut().clear();
+                let verdict = call(&fake, caller, CallSite::UnprovenMember("retain"));
+                assert_eq!(
+                    verdict.resolution,
+                    bound(0, Tier::UntypedName),
+                    "{language:?}"
+                );
+                assert_eq!(verdict.resolution.edge(), Some((0, 0.55)));
+                assert_eq!(verdict.site, CallSite::UntypedMember("retain"));
+                assert_eq!(
+                    fake.seen.borrow().as_slice(),
+                    [("retain".to_owned(), true, false, 0)],
+                    "{language:?}"
+                );
+            }
+            fake.ladder = vec![("own", bound(1, Tier::Global))];
+            let own = call(&fake, caller, CallSite::UnprovenMember("own"));
+            assert_eq!(own.resolution.edge(), None, "{language:?} own type");
+            fake.ladder = vec![("retain", Resolution::NoEdge(NoEdge::Ambiguous(2)))];
+            let two = call(&fake, caller, CallSite::UnprovenMember("retain"));
+            assert_eq!(two.resolution, Resolution::NoEdge(NoEdge::Ambiguous(2)));
+            let empty = call(&fake, caller, CallSite::UnprovenMember(""));
+            assert_eq!(empty.resolution.edge(), None, "{language:?} empty member");
+        }
+    }
+
+    /// A member read binds as the `NameRef::Function "T.m"`
+    /// lookup does, then the target decides the edge. A property accessor
+    /// is a read, another method a reference whatever the intent; a
+    /// `Property`, an unresolved name and an absent decorator list follow
+    /// the table. The decorators are asked only of a method target.
+    #[test]
+    fn test_resolve_member_read_target_kind_decides_edge() {
+        use crate::analyzer::name_ref::{resolve_member_read, MemberReadEdge};
+        use crate::analyzer::types::{MemberRead, ReadIntent};
+        let facts = Fake::new(
+            Layout::Index,
+            &[
+                ("cart.py", "Cart", C, None),
+                ("cart.py", "total", M, Some("Cart")),
+                ("cart.py", "helper", M, Some("Cart")),
+                ("cart.py", "count", NodeKind::Property, Some("Cart")),
+            ],
+        );
+        let asked = RefCell::new(Vec::new());
+        let run = |language: Language, member: &'static str, intent: ReadIntent| {
+            resolve_member_read(
+                &facts,
+                "use.py",
+                language,
+                &[],
+                None,
+                MemberRead {
+                    receiver_type: "Cart",
+                    member,
+                    intent,
+                },
+                |name: &str, _| match name {
+                    "Cart.total" => vec![(1, 0.85)],
+                    "Cart.helper" => vec![(2, 0.85)],
+                    "Cart.count" => vec![(3, 0.85)],
+                    _ => Vec::new(),
+                },
+                |_: &str, _| Vec::new(),
+                |id| {
+                    asked.borrow_mut().push(id);
+                    match id {
+                        1 => vec!["property"],
+                        _ => vec![],
+                    }
+                },
+            )
+        };
+        for intent in [ReadIntent::Unknown, ReadIntent::MethodValue] {
+            assert_eq!(
+                run(Language::Python, "total", intent),
+                Some((1, 0.85, MemberReadEdge::Read)),
+                "{intent:?}"
+            );
+            assert_eq!(
+                run(Language::Python, "helper", intent),
+                Some((2, 0.85, MemberReadEdge::Reference)),
+                "{intent:?}"
+            );
+            assert_eq!(run(Language::Python, "count", intent), None, "{intent:?}");
+            assert_eq!(run(Language::Python, "missing", intent), None, "{intent:?}");
+        }
+        assert!(!asked.borrow().contains(&3), "a Property asks no decorator");
+        assert_eq!(
+            run(Language::TypeScript, "total", ReadIntent::Unknown),
+            Some((1, 0.85, MemberReadEdge::Reference)),
+            "a Python decorator marks no TS accessor"
+        );
+    }
+
+    /// The unproven rule runs after the lexical verdict, as an untyped site
+    /// does: a lexical bind stands, and a shadowed name asks no import tier.
+    #[test]
+    fn test_call_unproven_member_after_lexical_verdict() {
+        let mut fake = call_fake(&[("src/main.ts", "helper", F, None)]);
+        fake.imported = vec![("helper", ResolveTarget::Callable, (8, 0.95))];
+        let lexical = lexical_cx(
+            Resolution::bound(0, Tier::Lexical),
+            "src/main.ts",
+            Language::TypeScript,
+        );
+        let bound_verdict = call(&fake, lexical, CallSite::UnprovenMember("helper"));
+        assert_eq!(
+            bound_verdict.resolution,
+            Resolution::bound(0, Tier::Lexical)
+        );
+        let shadowed = lexical_cx(Resolution::Shadowed, "src/main.js", Language::JavaScript);
+        let verdict = call(&fake, shadowed, CallSite::UnprovenMember("helper"));
+        assert_eq!(verdict.resolution, Resolution::Unknown);
+        assert!(fake.imported_seen.borrow().is_empty());
     }
 
     /// Rule U (U1) edge states: the nearest-copy bind keeps its own tag

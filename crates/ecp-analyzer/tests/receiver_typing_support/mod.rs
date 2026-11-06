@@ -92,6 +92,50 @@ pub fn callee_files(graph: &ZeroCopyGraph, caller: &str, callee: &str) -> Vec<St
         .collect()
 }
 
+/// `(target file, target name, reason, confidence)` of every `Calls` edge out
+/// of a node named `caller`, sorted. The full row, so a test tells a typed
+/// `call` from the tagged guess `call:untyped-member`.
+pub fn call_rows(graph: &ZeroCopyGraph, caller: &str) -> Vec<(String, String, String, f32)> {
+    let pool = graph.string_pool.as_slice();
+    let mut rows: Vec<_> = graph
+        .edges
+        .iter()
+        .filter(|e| e.rel_type == RelType::Calls)
+        .filter(|e| graph.nodes[e.source as usize].name.resolve(pool) == caller)
+        .map(|e| {
+            let target = &graph.nodes[e.target as usize];
+            let file = if target.has_owning_file() {
+                graph.files[target.file_idx as usize]
+                    .path
+                    .resolve(pool)
+                    .to_string()
+            } else {
+                String::new()
+            };
+            (
+                file,
+                target.name.resolve(pool).to_string(),
+                e.reason.resolve(pool).to_string(),
+                e.confidence,
+            )
+        })
+        .collect();
+    rows.sort_by(|a, b| a.partial_cmp(b).expect("a confidence is never NaN"));
+    rows
+}
+
+/// The rows of [`call_rows`] that name the method `method`.
+pub fn call_rows_to(
+    graph: &ZeroCopyGraph,
+    caller: &str,
+    method: &str,
+) -> Vec<(String, String, String, f32)> {
+    call_rows(graph, caller)
+        .into_iter()
+        .filter(|row| row.1 == method)
+        .collect()
+}
+
 /// The shared scenario: the binder types the receiver (`typed_callee`), and
 /// the graph holds exactly one `Calls` edge from `caller` to `method`, into
 /// `base_file` (not the decoy).
@@ -119,7 +163,8 @@ pub fn assert_single_call_into_base(
 // reads the `UntypedMember` site the same way whichever parser wrote it.
 
 /// The confidence and `reason` of a bind by the member name alone in a
-/// guess language (Rust, Go, Java, Swift, Dart, C++, TypeScript).
+/// guess language (Rust, Go, Java, Swift, Dart, C++, TypeScript, PHP, Python,
+/// Ruby, JavaScript).
 pub const UNTYPED_GUESS: (f32, &str) = (0.55, "call:untyped-member");
 
 /// Where the untyped member call and the methods it may reach sit.
@@ -272,9 +317,8 @@ pub fn assert_untyped_member_is_guess(ext: &str) {
     );
 }
 
-/// A language where the member name is the main signal (Python, Ruby, PHP,
-/// JavaScript), or one the rule never touches (Kotlin, C): the bind keeps
-/// the confidence of the tier that found the method, and the plain reason.
+/// A language the rule never touches (Kotlin, C): the bind keeps the
+/// confidence of the tier that found the method, and the plain reason.
 pub fn assert_untyped_member_keeps_tier_confidence(ext: &str) {
     let call = |confidence| vec![(confidence, "call".to_string())];
     assert_eq!(

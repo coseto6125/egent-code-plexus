@@ -30,7 +30,7 @@
 use crate::resolution::index::SymbolTable;
 use ecp_core::analyzer::ladder::{self, Namespace, Published, TreeItem};
 use ecp_core::analyzer::rust_pub_use::{
-    self, mod_steps, path_attrs, pub_use_entries, strip_comments, PubUseEntry,
+    self, loose_steps, mod_steps, path_attrs, pub_use_entries, strip_comments, PubUseEntry,
 };
 use ecp_core::contracts::workspace::{
     segment_wildcard, ConfigPresence, ConfigRead, Ecosystem, Membership, NameRank, Scope, ScopeId,
@@ -39,6 +39,7 @@ use ecp_core::contracts::workspace::{
 use ecp_core::registry::{os_path_to_slash, uid_path};
 use rustc_hash::FxHashMap;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 // ---------------------------------------------------------------------------
 // Module tree
@@ -79,6 +80,14 @@ pub struct RustWorkspaceModTree {
     /// Contract C2's Cargo rows, from the manifest parse above: one scope
     /// per workspace member, and the names that reach it.
     workspace: WorkspaceFacts,
+    /// With no Cargo scope row: every Rust file of the index's build input,
+    /// keyed by repo-relative path, with the tree its own `mod name;`
+    /// declarations walk (built on first use). The file is the walk's root,
+    /// so `crate` names nothing in it. The keys are also the files the walk
+    /// may step to, so it reads nothing the index did not hold.
+    loose: FxHashMap<String, OnceLock<ModTree>>,
+    /// The `pub use` map of a loose tree: empty, as `crate` is unknown.
+    loose_reexports: ReExportMap,
 }
 
 /// One Cargo target's modules, `mod_path → repo-relative file`.
@@ -95,6 +104,16 @@ impl RustWorkspaceModTree {
     /// Build the workspace module tree rooted at `workspace_root`.
     /// Silently skips missing / unreadable files.
     pub fn build(workspace_root: &Path) -> Self {
+        Self::build_with_files(workspace_root, std::iter::empty::<&str>())
+    }
+
+    /// [`Self::build`] where `files` are the repo-relative paths of the
+    /// index's build input: with no Cargo scope row, the Rust ones among them
+    /// are the files a manifest-less tree is made of.
+    pub fn build_with_files<'f>(
+        workspace_root: &Path,
+        files: impl IntoIterator<Item = &'f str>,
+    ) -> Self {
         let workspace_canon = workspace_root
             .canonicalize()
             .unwrap_or_else(|_| workspace_root.to_path_buf());
@@ -105,9 +124,12 @@ impl RustWorkspaceModTree {
             targets: Vec::new(),
             file_targets: FxHashMap::default(),
             workspace: WorkspaceFacts::default(),
+            loose: FxHashMap::default(),
+            loose_reexports: ReExportMap::default(),
         };
         let root_toml = workspace_root.join("Cargo.toml");
         let Some(raw) = read_file(&root_toml) else {
+            out.loose = rust_files(files);
             return out;
         };
 
@@ -175,7 +197,9 @@ impl RustWorkspaceModTree {
             out.crates.entry(alias).or_insert(entry);
         }
         out.workspace = rows.finish();
-
+        if !out.workspace.has_cargo_scope() {
+            out.loose = rust_files(files);
+        }
         out
     }
 
@@ -226,20 +250,26 @@ impl RustWorkspaceModTree {
     /// `self` / `super`-anchored, e.g. `super::util`) names from
     /// `caller_file`, read from the tree of each target that declares the
     /// caller: `crate` in a module of `src/main.rs` is `main.rs`, and
-    /// `super` in a `#[path]` file is the module that declares it. `None`
-    /// when no target declares the caller, or one of them does not place
-    /// the module, or they place it at different files (a module both the
-    /// lib and a bin declare).
+    /// `super` in a `#[path]` file is the module that declares it, and with
+    /// no Cargo scope the caller's own loose tree. `None` when one of the
+    /// targets does not place the module, or they place it at different
+    /// files (a module both the lib and a bin declare).
     pub fn anchored_module_file(&self, caller_file: &str, module_path: &str) -> Option<&str> {
         let file = ladder::anchored_module_file(
             &self.facts(&self.workspace_canon),
             caller_file,
             module_path,
         )?;
-        // Every module file of a target is a key of `file_targets`.
+        // Every module file of a target is a key of `file_targets`, and
+        // every file of a loose tree one of `loose`.
         self.file_targets
             .get_key_value(file.as_str())
             .map(|(key, _)| key.as_str())
+            .or_else(|| {
+                self.loose
+                    .get_key_value(file.as_str())
+                    .map(|(key, _)| key.as_str())
+            })
     }
 
     /// The tree and module path of `caller_file` when exactly one target
@@ -274,6 +304,23 @@ impl RustWorkspaceModTree {
             modules,
         });
         index
+    }
+
+    /// The relative-walk tree of `caller_file` when the Cargo rows hold no
+    /// Cargo scope (a manifest-less tree, or members that all sit outside
+    /// the repo root): `mod a;` in `F` proves `dir(F)/a.rs` or
+    /// `dir(F)/a/mod.rs` when `F` is `lib.rs` / `main.rs` / `mod.rs`, else
+    /// `dir(F)/stem(F)/a.rs`. `None` with a Cargo scope, or for a file the
+    /// build input does not hold.
+    fn loose_scope(&self, caller_file: &str) -> Option<TreeScope<'_>> {
+        let tree = self
+            .loose
+            .get(caller_file)?
+            .get_or_init(|| build_loose_tree(&self.workspace_canon, caller_file, &self.loose));
+        Some(TreeScope {
+            tree,
+            reexports: &self.loose_reexports,
+        })
     }
 
     /// Returns the canonical crate name for a caller file path.
@@ -383,6 +430,9 @@ impl<'t> ladder::ModuleTreeFacts for IndexModuleTree<'t> {
     /// A bin-only caller's bin, else the crate whose directory holds it with
     /// the module path a primary tree gives the caller.
     fn caller_module(&self, caller: &str) -> Option<(TreeScope<'t>, Vec<String>)> {
+        if let Some(scope) = self.tree.loose_scope(caller) {
+            return Some((scope, Vec::new()));
+        }
         if let Some((scope, mod_path)) = self.tree.bin_target(caller) {
             return Some((scope, mod_path.to_vec()));
         }
@@ -484,7 +534,8 @@ pub struct ResolvedFqn {
 // Mod-tree BFS
 // ---------------------------------------------------------------------------
 
-/// Walk from `entry` and build a `(ModTree, ReExportMap)` for the crate.
+/// Walk from `entry`, a crate root whose children sit beside it whatever its
+/// name, and build a `(ModTree, ReExportMap)` for the crate.
 fn build_mod_tree_and_reexports(entry: &Path) -> (ModTree, ReExportMap) {
     let mut tree: ModTree = FxHashMap::default();
     let mut reexports: ReExportMap = FxHashMap::default();
@@ -536,6 +587,50 @@ fn build_mod_tree_and_reexports(entry: &Path) -> (ModTree, ReExportMap) {
         );
     }
     (tree, reexports)
+}
+
+/// Each Rust file among `files`, the repo-relative paths of the index's build
+/// input, with an empty slot for its relative-walk tree.
+fn rust_files<'f>(
+    files: impl IntoIterator<Item = &'f str>,
+) -> FxHashMap<String, OnceLock<ModTree>> {
+    files
+        .into_iter()
+        .filter(|file| Path::new(file).extension().is_some_and(|ext| ext == "rs"))
+        .map(|file| (os_path_to_slash(file).into_owned(), OnceLock::new()))
+        .collect()
+}
+
+/// The tree `root_file` walks with no Cargo scope row: from each file, the
+/// steps [`loose_steps`] lists, as the index walks a crate, but where a step
+/// lands only on a file of `files` and the root's children sit in its module
+/// directory. Modules map to `workspace_canon` joined with the file's path,
+/// the form [`IndexModuleTree::module_file`] reads back.
+fn build_loose_tree(
+    workspace_canon: &Path,
+    root_file: &str,
+    files: &FxHashMap<String, OnceLock<ModTree>>,
+) -> ModTree {
+    let mut tree = ModTree::default();
+    tree.insert(Vec::new(), workspace_canon.join(root_file));
+    let mut visited = std::collections::HashSet::from([root_file.to_string()]);
+    let mut stack = vec![(Vec::new(), root_file.to_string())];
+    while let Some((mod_path, file)) = stack.pop() {
+        let Some(src) = read_file(&workspace_canon.join(&file)) else {
+            continue;
+        };
+        let clean = strip_comments(&src);
+        for (name, child) in loose_steps(&clean, &file, |p| files.contains_key(p)) {
+            if !visited.insert(child.clone()) {
+                continue;
+            }
+            let mut child_path = mod_path.clone();
+            child_path.push(name.to_string());
+            tree.insert(child_path.clone(), workspace_canon.join(&child));
+            stack.push((child_path, child));
+        }
+    }
+    tree
 }
 
 // ---------------------------------------------------------------------------
@@ -1311,6 +1406,226 @@ mod tests {
         let dir = make_tree(&[("src/lib.rs", "pub mod a;\n"), ("src/a.rs", "")]);
         let tree = RustWorkspaceModTree::build(dir.path());
         assert_eq!(tree.anchored_module_file("src/a.rs", "crate"), None);
+    }
+
+    /// `self::` paths of `caller` through the manifest-less tree, as the
+    /// `(file, item)` the module-tree rule places them at.
+    fn loose_place(files: &[(&str, &str)], caller: &str, path: &str) -> Option<(String, String)> {
+        loose_place_in(files, files, caller, path)
+    }
+
+    /// [`loose_place`] where the index holds `held` of the files on disk.
+    fn loose_place_in(
+        files: &[(&str, &str)],
+        held: &[(&str, &str)],
+        caller: &str,
+        path: &str,
+    ) -> Option<(String, String)> {
+        let dir = make_tree(files);
+        let tree =
+            RustWorkspaceModTree::build_with_files(dir.path(), held.iter().map(|(rel, _)| *rel));
+        match ladder::module_tree_item(&tree.facts(dir.path()), caller, path, Namespace::Type)? {
+            TreeItem::Found { file, item } => Some((file, item)),
+            TreeItem::Unknown => None,
+        }
+    }
+
+    fn found(file: &str, item: &str) -> Option<(String, String)> {
+        Some((file.to_string(), item.to_string()))
+    }
+
+    /// Stands for A15d: with no Cargo target, `mod a;` in `lib.rs` proves
+    /// `a.rs` or `a/mod.rs` beside it, and `a.rs` is the first probe.
+    #[test]
+    fn test_loose_tree_root_file_module_declaration_places_child_file() {
+        let files = [
+            ("src/lib.rs", "pub mod a;\npub mod b;\n"),
+            ("src/a/mod.rs", "pub fn top() {}\n"),
+            ("src/b.rs", "pub fn top() {}\n"),
+            ("src/b/mod.rs", "pub fn top() {}\n"),
+        ];
+        assert_eq!(
+            loose_place(&files, "src/lib.rs", "self::a::top"),
+            found("src/a/mod.rs", "top")
+        );
+        assert_eq!(
+            loose_place(&files, "src/lib.rs", "self::b::top"),
+            found("src/b.rs", "top")
+        );
+    }
+
+    /// Stands for A15d: a file that is not `lib.rs` / `main.rs` / `mod.rs`
+    /// keeps its children in `dir/stem/`, and walks nest.
+    #[test]
+    fn test_loose_tree_ordinary_file_children_live_in_stem_directory() {
+        let files = [
+            ("src/x.rs", "pub mod a;\n"),
+            ("src/x/a.rs", "pub mod b;\n"),
+            ("src/x/a/b.rs", "pub fn top() {}\n"),
+            ("src/a.rs", "pub fn top() {}\n"),
+        ];
+        assert_eq!(
+            loose_place(&files, "src/x.rs", "self::a::b::top"),
+            found("src/x/a/b.rs", "top")
+        );
+    }
+
+    /// Stands for A15d: `crate::` names no root, and a module the caller does
+    /// not declare is no proof, however the files are laid out.
+    #[test]
+    fn test_loose_tree_crate_path_and_undeclared_module_place_nothing_beyond_caller() {
+        let files = [
+            ("src/lib.rs", "pub fn run() {}\n"),
+            ("src/a/mod.rs", "pub fn top() {}\n"),
+        ];
+        assert_eq!(loose_place(&files, "src/lib.rs", "crate::a::top"), None);
+        assert_eq!(
+            loose_place(&files, "src/lib.rs", "self::a::top"),
+            found("src/lib.rs", "a")
+        );
+        assert_eq!(loose_place(&files, "src/lib.rs", "super::a::top"), None);
+    }
+
+    /// Stands for: a `#[path]` attribute on `mod` steps to that file; an empty
+    /// module file declares nothing; a file the workspace lacks is outside
+    /// every chain.
+    #[test]
+    fn test_loose_tree_path_attribute_empty_file_and_missing_caller_follow_the_walk() {
+        let files = [
+            ("src/lib.rs", "#[path = \"z.rs\"]\nmod a;\n"),
+            ("src/z.rs", "pub fn top() {}\n"),
+            ("src/empty.rs", ""),
+        ];
+        assert_eq!(
+            loose_place(&files, "src/lib.rs", "self::a::top"),
+            found("src/z.rs", "top")
+        );
+        assert_eq!(
+            loose_place(&files, "src/empty.rs", "self::a::top"),
+            found("src/empty.rs", "a")
+        );
+        assert_eq!(loose_place(&files, "src/gone.rs", "self::a::top"), None);
+    }
+
+    /// Stands for: a Cargo target switches the loose walk off; a file outside
+    /// the target's chain places nothing.
+    #[test]
+    fn test_loose_tree_with_manifest_is_not_consulted() {
+        let files = [
+            ("Cargo.toml", "[package]\nname = \"tool\"\n"),
+            ("src/lib.rs", "pub mod a;\n"),
+            ("src/a.rs", "pub fn top() {}\n"),
+            ("src/orphan.rs", "pub mod c;\n"),
+            ("src/orphan/c.rs", "pub fn top() {}\n"),
+        ];
+        assert_eq!(loose_place(&files, "src/orphan.rs", "self::c::top"), None);
+        assert_eq!(
+            loose_place(&files, "src/lib.rs", "self::a::top"),
+            found("src/a.rs", "top")
+        );
+    }
+
+    /// Stands for: the walk steps only onto files of the build input. A file
+    /// on disk the index did not hold (a gitignored one) is no module, and an
+    /// empty file list places nothing, not even the caller.
+    #[test]
+    fn test_loose_tree_unindexed_file_and_empty_file_list_place_nothing() {
+        let files = [
+            ("src/lib.rs", "pub mod a;\npub mod b;\n"),
+            ("src/a.rs", "pub fn top() {}\n"),
+            ("src/b.rs", "pub fn top() {}\n"),
+        ];
+        assert_eq!(
+            loose_place_in(&files, &files[..2], "src/lib.rs", "self::a::top"),
+            found("src/a.rs", "top")
+        );
+        assert_eq!(
+            loose_place_in(&files, &files[..2], "src/lib.rs", "self::b::top"),
+            found("src/lib.rs", "b")
+        );
+        assert_eq!(
+            loose_place_in(&files, &[], "src/lib.rs", "self::a::top"),
+            None
+        );
+        assert_eq!(
+            loose_place_in(&files, &files, "../outside.rs", "self::a::top"),
+            None
+        );
+    }
+
+    /// Stands for: a `#[path]` module steps to a file named through `..`, which
+    /// is a file of the build input only once the path is lexically reduced;
+    /// one that leaves the input places nothing.
+    #[test]
+    fn test_loose_tree_path_attribute_parent_component_reduces_to_held_file() {
+        let files = [
+            (
+                "src/lib.rs",
+                "#[path = \"../z.rs\"]\nmod a;\n#[path = \"../../gone.rs\"]\nmod b;\n",
+            ),
+            ("z.rs", "pub fn top() {}\n"),
+        ];
+        assert_eq!(
+            loose_place(&files, "src/lib.rs", "self::a::top"),
+            found("z.rs", "top")
+        );
+        assert_eq!(
+            loose_place(&files, "src/lib.rs", "self::b::top"),
+            found("src/lib.rs", "b")
+        );
+    }
+
+    /// A workspace whose one member sits outside the repo root registers a
+    /// target but stores no Cargo scope row. The overlay reads only the
+    /// stored rows, so the index lays the repo out as manifest-less too.
+    #[test]
+    fn test_loose_tree_member_outside_root_stores_no_scope_and_walks_loose() {
+        let outer = tempfile::tempdir().unwrap();
+        let repo = outer.path().join("repo");
+        let write = |path: &Path, text: &str| {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        let outside = outer.path().join("outside");
+        write(
+            &outside.join("Cargo.toml"),
+            "[package]\nname = \"outside\"\n",
+        );
+        write(&outside.join("src/lib.rs"), "pub fn f() {}\n");
+        write(
+            &repo.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"../outside\"]\n",
+        );
+        let held = [
+            ("src/lib.rs", "pub mod a;\n"),
+            ("src/a.rs", "pub fn top() {}\n"),
+        ];
+        for (rel, text) in held {
+            write(&repo.join(rel), text);
+        }
+        let tree = RustWorkspaceModTree::build_with_files(&repo, held.iter().map(|(rel, _)| *rel));
+        assert!(!tree.workspace_facts().has_cargo_scope());
+        let item = ladder::module_tree_item(
+            &tree.facts(&repo),
+            "src/lib.rs",
+            "self::a::top",
+            Namespace::Type,
+        );
+        assert!(
+            matches!(&item, Some(TreeItem::Found { file, item }) if file == "src/a.rs" && item == "top"),
+            "{item:?}"
+        );
+    }
+
+    /// The manifest-less file set keys each file by its `/` spelling, the
+    /// spelling every lookup of the walk uses, whatever the walker wrote.
+    #[cfg(windows)]
+    #[test]
+    fn test_rust_files_backslash_input_keys_slash_paths() {
+        let files = rust_files(["src\\lib.rs", "src\\a\\mod.rs", "src\\README.md"]);
+        let mut keys: Vec<&str> = files.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["src/a/mod.rs", "src/lib.rs"]);
     }
 
     /// `(name, rank, scope root)` of every name row, in table order.

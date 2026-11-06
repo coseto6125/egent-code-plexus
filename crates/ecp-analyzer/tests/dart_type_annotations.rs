@@ -145,3 +145,137 @@ fn test_field_annotation_binds_project_type_and_generic_argument() {
     assert_eq!(annotated(&g, "plain"), none, "builtin");
     assert_eq!(annotated(&g, "untyped"), none, "no annotation");
 }
+
+/// A10: a field type argument that names a class type parameter binds no
+/// project type, even when a project class shares the parameter's name.
+mod a10 {
+    use crate::name_ref_support::{annotated, graph};
+    use ecp_analyzer::dart::parser::DartProvider;
+    use ecp_core::graph::ZeroCopyGraph;
+
+    const FILE: &str = "lib/app.dart";
+
+    fn pair(name: &str) -> (String, String) {
+        (FILE.to_string(), name.to_string())
+    }
+
+    fn build(generic: Option<&str>, token: &str) -> ZeroCopyGraph {
+        let arg = generic.unwrap_or(token);
+        let params = generic.map_or(String::new(), |p| format!("<{p}>"));
+        let src = format!(
+            "class {token} {{}}\nclass Box{params} {{\n  List<{arg}> items = [];\n}}\nclass Holder {{\n  List<{token}> tokens = [];\n}}\n"
+        );
+        graph(&DartProvider::new().unwrap(), &[(FILE, src.as_str())])
+    }
+
+    fn names(g: &ZeroCopyGraph, source: &str) -> Vec<String> {
+        annotated(g, source).into_iter().map(|(_, n)| n).collect()
+    }
+
+    /// Stands for: a field whose type argument names a class type parameter
+    /// binds no project type although a project class has the same name; the
+    /// sibling field in an unparameterised holder (POSITIVE CONTROL) binds it.
+    #[test]
+    fn test_field_annotation_class_type_parameter_named_like_project_class_binds_nothing() {
+        let g = build(Some("Token"), "Token");
+        assert!(
+            !names(&g, "items").iter().any(|n| n == "Token"),
+            "{:?}",
+            annotated(&g, "items")
+        );
+        assert!(
+            annotated(&g, "tokens").contains(&pair("Token")),
+            "control: {:?}",
+            annotated(&g, "tokens")
+        );
+    }
+
+    /// Stands for: a generic argument in a holder with no type parameters
+    /// binds the project class it names.
+    #[test]
+    fn test_field_annotation_project_class_in_unparameterised_holder_binds_class() {
+        let g = build(Some("Token"), "Token");
+        assert!(annotated(&g, "tokens").contains(&pair("Token")));
+    }
+
+    /// Stands for (M07, rename the parameter): `Box<E>` / `List<E>` binds no
+    /// project edge, and `tokens` still binds `Token`.
+    #[test]
+    fn test_field_annotation_renamed_class_type_parameter_binds_nothing() {
+        let g = build(Some("E"), "Token");
+        assert!(!names(&g, "items").iter().any(|n| n == "Token"));
+        assert!(annotated(&g, "tokens").contains(&pair("Token")));
+    }
+
+    /// Stands for (M07, rename the project class): the project class is `Tok`
+    /// and the parameter stays `Token`; `items` binds neither.
+    #[test]
+    fn test_field_annotation_renamed_project_class_keeps_parameter_binding_nothing() {
+        let g = build(Some("Token"), "Tok");
+        assert!(!names(&g, "items")
+            .iter()
+            .any(|n| n == "Tok" || n == "Token"));
+        assert!(annotated(&g, "tokens").contains(&pair("Tok")));
+    }
+
+    /// Stands for (M07, remove the parameter): with no class type parameter
+    /// the same field binds the project class.
+    #[test]
+    fn test_field_annotation_without_class_type_parameter_binds_project_class() {
+        let g = build(None, "Token");
+        assert!(annotated(&g, "items").contains(&pair("Token")));
+    }
+}
+
+/// A15b: a top-level variable's annotation reduces like a field's.
+mod a15b {
+    use crate::name_ref_support::{annotated, graph};
+    use ecp_analyzer::dart::parser::DartProvider;
+    use ecp_core::graph::ZeroCopyGraph;
+
+    const SRC: &str = "class Item {}\n\nList<Item> items = [];\nList<int> numbers = [];\nItem single = Item();\nItem? maybe;\nint count = 0;\n\nclass C {\n  List<Item> field_items = [];\n}\n";
+
+    fn item() -> (String, String) {
+        ("lib/app.dart".to_string(), "Item".to_string())
+    }
+
+    fn build() -> ZeroCopyGraph {
+        graph(&DartProvider::new().unwrap(), &[("lib/app.dart", SRC)])
+    }
+
+    /// Stands for: `List<Item> items` at top level binds the argument `Item`
+    /// and never the wrapper `List`, as the field form does.
+    #[test]
+    fn test_top_level_variable_annotation_generic_binds_element_type_only() {
+        let g = build();
+        assert_eq!(annotated(&g, "items"), vec![item()]);
+        // POSITIVE CONTROL: the field form and the plain form.
+        assert_eq!(annotated(&g, "field_items"), vec![item()]);
+        assert_eq!(annotated(&g, "single"), vec![item()]);
+    }
+
+    /// Stands for: builtins (`List<int>`, `int`) bind no project type.
+    #[test]
+    fn test_top_level_variable_annotation_builtin_generic_binds_nothing() {
+        let g = build();
+        assert_eq!(annotated(&g, "numbers"), Vec::<(String, String)>::new());
+        assert_eq!(annotated(&g, "count"), Vec::<(String, String)>::new());
+        assert!(!annotated(&g, "items").iter().any(|(_, n)| n == "List"));
+    }
+
+    /// Stands for: a nullable top-level `Item? maybe` binds the project class.
+    #[test]
+    fn test_top_level_variable_annotation_nullable_binds_project_type() {
+        let g = build();
+        assert_eq!(annotated(&g, "maybe"), vec![item()]);
+    }
+
+    /// Stands for (M13): the same type text yields the same `annotated` set at
+    /// top level and as a class field.
+    #[test]
+    fn test_metamorphic_top_level_and_field_type_text_yield_same_edges() {
+        let g = build();
+        assert_eq!(annotated(&g, "items"), annotated(&g, "field_items"));
+        assert!(!annotated(&g, "items").is_empty());
+    }
+}

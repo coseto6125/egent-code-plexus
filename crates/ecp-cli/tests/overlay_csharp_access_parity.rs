@@ -18,7 +18,8 @@ use ecp_core::session::view::{
     CallGap, GAP_CS_ACCESS_DIRTY_TARGET, GAP_CS_EXTENSION_DIRTY_DECLARATION,
 };
 use parity::{
-    call_gaps_after_edit, calls_after_edit_in, edges_after_edit, provider_parse, CallEdge,
+    call_gaps_after_edit, call_gaps_after_edit_with, calls_after_edit_in, edges_after_edit,
+    provider_parse, CallEdge,
 };
 
 const JTOKEN: (&str, &str) = (
@@ -478,11 +479,12 @@ fn test_overlay_untyped_receiver_extension_keeps_heuristic_reason() {
     assert_eq!(twice(&parity.overlay), want);
 }
 
-/// A dirty file that declares the extension: the overlay cannot read its
-/// flags, binds no `Twice` where the reindex binds one, and reports the
-/// call ([`GAP_CS_EXTENSION_DIRTY_DECLARATION`]).
+/// A dirty file that declares the extension: the overlay reads its flags
+/// from the fresh parse and binds the `Twice` the reindex binds. A fragment
+/// with no flags (an older writer's) binds nothing and reports the call
+/// ([`GAP_CS_EXTENSION_DIRTY_DECLARATION`]).
 #[test]
-fn test_overlay_dirty_extension_declaration_untyped_receiver_reports_gap() {
+fn test_overlay_dirty_extension_declaration_untyped_receiver_matches_or_reports_gap() {
     let provider = CSharpProvider::new().unwrap();
     let lib = format!("\n{}", VALUE_LIB.1);
     let user = shifted(VALUE_USER.1);
@@ -491,8 +493,17 @@ fn test_overlay_dirty_extension_declaration_untyped_receiver_reports_gap() {
     let parity = calls_after_edit_in(&provider, &files, &edits, &|_, name| name == "Extension");
     let twice = |edges: &[CallEdge]| edges.iter().filter(|e| e.callee == "Twice").count();
     assert_eq!(twice(&parity.reindex), 1);
-    assert_eq!(twice(&parity.overlay), 0);
-    let gaps = call_gaps_after_edit(&provider_parse(&provider), &files, &edits);
+    assert_eq!(parity.overlay, parity.reindex);
+    assert_eq!(
+        call_gaps_after_edit(&provider_parse(&provider), &files, &edits),
+        vec![]
+    );
+    let gaps = call_gaps_after_edit_with(&provider_parse(&provider), &files, &edits, &|input| {
+        input
+            .symbols
+            .iter_mut()
+            .for_each(|symbol| symbol.flags = None)
+    });
     assert!(
         gaps.iter().any(|gap| gap.caller == "Extension"
             && gap.member == "Twice"

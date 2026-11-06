@@ -173,6 +173,64 @@ const LANGS: &[LangFixture] = &[
         ),
         row: ("run", "com/example/Cb.java", "print"),
     },
+    // A01: a sibling closure that only reads `$o` through `use (&$o)` keeps the
+    // array callable's edge. The bare side holds the sibling that writes `$o`
+    // (no edge), so "add the value" flips a stale-free base to the edge and
+    // "remove the value" must mask the base edge.
+    LangFixture {
+        lang: "PHP sibling by-ref capture",
+        files: &[(
+            "Cb.php",
+            "<?php\nclass Cb {\n    function cb_ptr(int $x) {}\n}\n",
+        )],
+        user: (
+            "Holder.php",
+            "<?php\nclass Holder {\n    function m(Cb $o, array $a) {\n        $f = function () use (&$o, $a) { return array_map([$o, 'cb_ptr'], $a); };\n        $g = function () use (&$o, $a) { $o = $a; };\n        return $f();\n    }\n}\n",
+            "<?php\nclass Holder {\n    function m(Cb $o, array $a) {\n        $f = function () use (&$o, $a) { return array_map([$o, 'cb_ptr'], $a); };\n        $g = function () use (&$o) { return $o; };\n        return $f();\n    }\n}\n",
+        ),
+        row: ("m", "Cb.php", "cb_ptr"),
+    },
+    // A01 with no sibling closure on the bare side.
+    LangFixture {
+        lang: "PHP by-ref capture, no sibling",
+        files: &[(
+            "Cb.php",
+            "<?php\nclass Cb {\n    function cb_ptr(int $x) {}\n}\n",
+        )],
+        user: (
+            "Holder.php",
+            "<?php\nclass Holder {\n    function m(Cb $o, array $a) {\n        return $a;\n    }\n}\n",
+            "<?php\nclass Holder {\n    function m(Cb $o, array $a) {\n        $f = function () use (&$o, $a) { return array_map([$o, 'cb_ptr'], $a); };\n        $g = function () use (&$o) { return $o; };\n        return $f();\n    }\n}\n",
+        ),
+        row: ("m", "Cb.php", "cb_ptr"),
+    },
+    // A08: a property read outside the class is no method value; the method
+    // handed on next to it keeps its edge.
+    LangFixture {
+        lang: "Python property read, typed receiver",
+        files: &[(
+            "cart.py",
+            "class Cart:\n    def helper(self, x):\n        return x\n\n    @property\n    def total(self):\n        return 1\n",
+        )],
+        user: (
+            "use.py",
+            "from cart import Cart\n\ndef read(c: Cart, xs):\n    t = c.total\n    return xs\n",
+            "from cart import Cart\n\ndef read(c: Cart, xs):\n    t = c.total\n    return list(map(c.helper, xs))\n",
+        ),
+        row: ("read", "cart.py", "helper"),
+    },
+    // A08, dirty class: dropping `@property` makes `self.total` a method value
+    // (the edge appears); adding it back must mask the base edge.
+    LangFixture {
+        lang: "Python property decorator toggled",
+        files: &[],
+        user: (
+            "cart.py",
+            "class Cart:\n    @property\n    def total(self):\n        return 1\n\n    def show(self):\n        t = self.total\n        return t\n",
+            "class Cart:\n    def total(self):\n        return 1\n\n    def show(self):\n        t = self.total\n        return t\n",
+        ),
+        row: ("show", "cart.py", "total"),
+    },
 ];
 
 /// The builder of `lang`'s fixture. Go gets a module at `root` with the

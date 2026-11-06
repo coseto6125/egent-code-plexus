@@ -10,9 +10,12 @@ use crate::analyzer::outcome::Tier;
 use crate::analyzer::reexport::ResolveTarget;
 use crate::analyzer::same_file_pick::prefer_free;
 use crate::analyzer::type_ladder::{self, Ownership};
-use crate::analyzer::types::{owner_key, CallSite, NameRef, NameRefKind, RawImport};
+use crate::analyzer::types::{
+    is_property_accessor, owner_key, CallSite, MemberRead, NameRef, NameRefKind, RawImport,
+    FUNCTION_REFERENCE_REASON, VALUE_READ_REASON,
+};
 use crate::file_category::Language;
-use crate::graph::NodeKind;
+use crate::graph::{NodeKind, RelType};
 
 /// Resolve one [`NameRef`] through the index's ordinary symbol tiers, at
 /// the [`Tier`] confidences.
@@ -222,6 +225,87 @@ where
     Some((id, confidence))
 }
 
+/// The edge a resolved [`MemberRead`] emits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemberReadEdge {
+    /// A method handed on as a value: `References`, `function_reference`.
+    Reference,
+    /// A property accessor read for its value: `ReadsField`, `value_read`.
+    Read,
+}
+
+impl MemberReadEdge {
+    pub const fn rel_type(self) -> RelType {
+        match self {
+            Self::Reference => RelType::References,
+            Self::Read => RelType::ReadsField,
+        }
+    }
+
+    pub const fn reason(self) -> &'static str {
+        match self {
+            Self::Reference => FUNCTION_REFERENCE_REASON,
+            Self::Read => VALUE_READ_REASON,
+        }
+    }
+}
+
+/// Resolve one [`MemberRead`] and decide its edge. The lookup is the one a
+/// `NameRef::Function "T.m"` entry takes ([`resolve_name_ref`]), so a
+/// parser that switches from that entry to a member read moves no
+/// method-value edge. Then the target decides: a property accessor
+/// ([`is_property_accessor`] over `decorators(target)`) is a read, any
+/// other callable a reference, anything else (a `Property`, a field) no
+/// edge, as the plain short-name `field_reads` path already reads those.
+/// The index passes `RawNode.decorators`, the overlay
+/// `OverlaySymbol.decorators` or the base `FunctionMeta.decorators`.
+///
+/// A member read has a typed receiver, never a package qualifier and never
+/// a scoped function, so neither the Go package lookup nor the lexical tier
+/// of [`crate::analyzer::ladder::name_ref`] applies.
+#[allow(clippy::too_many_arguments)]
+pub fn resolve_member_read<F, Resolve, ResolveImported, Decorators, D>(
+    facts: &F,
+    file: &str,
+    language: Language,
+    imports: &[RawImport],
+    owner: Option<&str>,
+    read: MemberRead<'_>,
+    resolve: Resolve,
+    resolve_imported: ResolveImported,
+    decorators: Decorators,
+) -> Option<(u32, f32, MemberReadEdge)>
+where
+    F: ResolveFacts,
+    Resolve: FnMut(&str, ResolveTarget) -> Vec<(u32, f32)>,
+    ResolveImported: FnMut(&str, ResolveTarget) -> Vec<(u32, f32)>,
+    Decorators: FnOnce(u32) -> D,
+    D: IntoIterator,
+    D::Item: AsRef<str>,
+{
+    let name = [read.receiver_type, ".", read.member].concat();
+    let name_ref = NameRef {
+        name: &name,
+        kind: NameRefKind::Function,
+    };
+    let (id, confidence) = resolve_name_ref(
+        facts,
+        file,
+        language,
+        imports,
+        owner,
+        name_ref,
+        resolve,
+        resolve_imported,
+    )?;
+    let edge = match facts.kind(id) {
+        NodeKind::Method if is_property_accessor(language, decorators(id)) => MemberReadEdge::Read,
+        kind if kind.is_callable() => MemberReadEdge::Reference,
+        _ => return None,
+    };
+    Some((id, confidence, edge))
+}
+
 /// Whether the qualifier path `qualifier` (`A.Helpers`, `A.Deep.Outer.Inner`)
 /// is the chain of types and namespaces that encloses `id`: from `id` out,
 /// each owner key names the path's next segment, and the one declaration of
@@ -231,7 +315,45 @@ where
 /// `com.example`). A missing or a repeated link encloses nothing:
 /// `System.Console.WriteLine` never binds a project `Console` that no
 /// `System` holds.
+///
+/// A C++ member defined out of line (`void ns::Inst::cb_ns() {}` in a
+/// `.cpp`) is where the name tiers settle its in-class declaration
+/// (`NameTierFacts::canonical_c_declaration`), yet its file declares
+/// neither `Inst` nor `ns`: its path is that declaration's
+/// ([`in_class_declaration`]).
 fn encloses<F: ResolveFacts>(facts: &F, id: u32, qualifier: &str) -> bool {
+    path_encloses(facts, id, qualifier)
+        || in_class_declaration(facts, id).is_some_and(|decl| path_encloses(facts, decl, qualifier))
+}
+
+/// The one in-class declaration of the C++ method `id`: a method of the
+/// same name and owner in another file of `id`'s scope that declares a type
+/// of the owner's name. The definition records only its owner's name, so
+/// two such classes (`a::Inst`, `b::Inst`) leave the path unknown, and a
+/// definition no class declares has none.
+fn in_class_declaration<F: ResolveFacts>(facts: &F, id: u32) -> Option<u32> {
+    let file = facts.file_of(id)?;
+    if facts.kind(id) != NodeKind::Method || facts.file_meta(file).language != Language::Cpp {
+        return None;
+    }
+    let owner = facts.owner(id)?;
+    let key = owner_key(owner)?;
+    let mut decls = facts
+        .owned_global(facts.name_of(id)?, owner, ResolveTarget::Method, file)
+        .into_iter()
+        .filter(|&decl| {
+            facts.file_of(decl).is_some_and(|decl_file| {
+                decl_file != file && facts.count_in_file(decl_file, key, ResolveTarget::Type) > 0
+            })
+        });
+    match (decls.next(), decls.next()) {
+        (Some(decl), None) => Some(decl),
+        _ => None,
+    }
+}
+
+/// [`encloses`] read from `id`'s own file.
+fn path_encloses<F: ResolveFacts>(facts: &F, id: u32, qualifier: &str) -> bool {
     let Some(file) = facts.file_of(id) else {
         return false;
     };

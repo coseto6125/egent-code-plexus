@@ -277,6 +277,7 @@ use crate::contracts::routing::ParsedLanguage;
 use crate::file_category::{FileMeta, Language};
 use crate::graph::{ArchivedZeroCopyGraph, NodeKind, RelType};
 use crate::registry::os_path_to_slash;
+use crate::session::import_scope::stored_file_meta;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::cell::RefCell;
 use std::sync::Arc;
@@ -712,7 +713,8 @@ pub struct CallGap {
     pub reason: String,
 }
 
-/// A dirty C# file declares a method named like the call's member
+/// A dirty C# method named like the call's member whose fragment carries no
+/// flags, so the overlay cannot tell whether it is an extension
 /// ([`GAP_CS_EXTENSION_DIRTY_DECLARATION`]).
 #[derive(Debug, Clone, Copy)]
 struct DirtyNamesake;
@@ -1438,7 +1440,10 @@ impl OverlayView {
 /// 16 (FU-2026-10-26-0ee756874fb8): the view stores a dirty file's
 /// `type_annotation` `Accesses` edges with one more reason, and masks the
 /// base ones; a 15 view has neither.
-pub const VIEW_CACHE_FORMAT: u32 = 16;
+/// 17: a dirty file resolves through the receiver core, the Rust module
+/// tree and the admission gate the index uses, so a 16 view holds edges a
+/// reindex no longer makes.
+pub const VIEW_CACHE_FORMAT: u32 = 17;
 
 /// The base edge kinds the record replay rebuilds, so masks at a re-parsed
 /// file's nodes. `HasProperty` has its own arm in
@@ -1917,7 +1922,11 @@ fn stale_extension_gaps(
         for decl in graph.nodes_by_name(name) {
             let extension = graph.nodes[decl as usize].name.resolve(pool) == name
                 && base_function_meta(graph, decl).is_some_and(|meta| {
-                    meta.flags.to_native() & csharp_extension::EXTENSION_FLAG != 0
+                    csharp_extension::is_extension(
+                        meta.flags.to_native(),
+                        stored_file_meta(graph, graph.nodes[decl as usize].file_idx.to_native())
+                            .language,
+                    )
                 });
             if !extension {
                 continue;

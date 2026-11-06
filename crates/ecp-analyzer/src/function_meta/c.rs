@@ -5,8 +5,11 @@
 //! - `is_static`: `static` storage class specifier on the function definition.
 //! - `is_abstract`: always false (C has no abstract concept).
 //! - `is_generator`: always false.
-//! - `is_extern`: `extern` storage class OR function declaration without body
-//!   (`declaration` at translation-unit level, not a `function_definition`).
+//! - `is_extern`: function declaration without body (`declaration` at
+//!   translation-unit level, not a `function_definition`). The `extern`
+//!   keyword on its own sets `FLAG_C_EXTERN_STORAGE`.
+//! - parameter form (bits 11-12): `f(int)` / `f(void)` prototype list, `f()`
+//!   empty parens, `f(a, b) int a;` K&R identifier list.
 //! - `is_test`: file in `tests/` directory (FileCategory::Test). C test frameworks
 //!   (Check / Unity / CMocka) vary too much for reliable name-based detection.
 //!   CAVEAT: this is file-path-only; framework-convention function names are not detected.
@@ -21,6 +24,9 @@ use super::{c_param_type, extract_with, node_text, ts_span};
 use ecp_core::analyzer::types::{RawFunctionMeta, RawNode};
 use ecp_core::graph::{FileCategory, FunctionMeta};
 use tree_sitter::Node;
+
+/// C89 gives a K&R parameter that no declaration types the type `int`.
+const KR_IMPLICIT_INT: bool = true;
 
 /// Both function_definition (with body) and declaration (prototype) map to Function nodes.
 const C_FN_KINDS: &[&str] = &["function_definition", "declaration"];
@@ -56,7 +62,7 @@ fn extract_one(
 ) -> Option<RawFunctionMeta> {
     let mut flags: u16 = 0;
 
-    // is_extern: declaration node (prototype) OR `extern` storage class specifier.
+    // is_extern: declaration node (prototype); `extern` is a storage class of its own.
     let is_decl_only = fn_node.kind() == "declaration";
     let mut has_extern_specifier = false;
     let mut has_static_specifier = false;
@@ -80,8 +86,11 @@ fn extract_one(
         }
     }
 
-    if is_decl_only || has_extern_specifier {
+    if is_decl_only {
         flags |= FunctionMeta::FLAG_EXTERN;
+    }
+    if has_extern_specifier {
+        flags |= FunctionMeta::FLAG_C_EXTERN_STORAGE;
     }
     if has_static_specifier {
         flags |= FunctionMeta::FLAG_STATIC;
@@ -96,7 +105,8 @@ fn extract_one(
     // (is_static covers translation-unit-local linkage separately above.)
 
     // Parameters.
-    let params = extract_params(fn_node, source);
+    let (params, param_form) = extract_params(fn_node, source);
+    flags |= param_form;
 
     // Return type: the `type` field of function_definition / declaration.
     let return_type = fn_node
@@ -208,20 +218,27 @@ fn collect_c_decorators(fn_node: &Node<'_>, source: &[u8], lines: &[&str]) -> Ve
 
 /// Extract flat `[name1, type1, name2, type2, ...]` from C function parameters.
 /// Handles named and unnamed parameters (`void` param list → empty) and a
-/// K&R identifier list.
-fn extract_params(fn_node: &Node<'_>, source: &[u8]) -> Vec<String> {
+/// K&R identifier list. The second value is the parameter-form bits of
+/// `FunctionMeta::flags`: `f()` and a K&R list differ from a prototype list.
+fn extract_params(fn_node: &Node<'_>, source: &[u8]) -> (Vec<String>, u16) {
     // Find the function_declarator inside the fn_node to get to parameters.
     let Some(decl_node) = find_function_declarator(*fn_node) else {
-        return vec![];
+        return (vec![], 0);
     };
     let Some(params_node) = decl_node.child_by_field_name("parameters") else {
-        return vec![];
+        return (vec![], 0);
     };
     let mut result = Vec::new();
+    let mut listed_any = false;
+    let mut old_style = false;
     let mut cursor = params_node.walk();
     if cursor.goto_first_child() {
         loop {
             let child = cursor.node();
+            listed_any |= matches!(
+                child.kind(),
+                "parameter_declaration" | "identifier" | "variadic_parameter"
+            );
             if child.kind() == "parameter_declaration" {
                 // Type: the `type` field (or entire source span minus the name).
                 // Name: `declarator` field — may be absent for unnamed params.
@@ -248,10 +265,14 @@ fn extract_params(fn_node: &Node<'_>, source: &[u8]) -> Vec<String> {
             } else if child.kind() == "identifier" {
                 // A K&R list (`int kr(a, b) int a; int b; { .. }`) names its
                 // parameters; their types come from the declarations before
-                // the body, and stay empty (unknown) when none declares one.
+                // the body, and are `int` (implicit, [`KR_IMPLICIT_INT`]) when none declares one.
                 let name = node_text(&child, source);
+                old_style = true;
                 result.push(name.to_string());
-                result.push(old_style_param_type(fn_node, name, source).unwrap_or_default());
+                result.push(
+                    old_style_param_type(fn_node, name, source)
+                        .unwrap_or_else(|| if KR_IMPLICIT_INT { "int" } else { "" }.to_string()),
+                );
             } else if child.kind() == "variadic_parameter" {
                 result.push("...".to_string());
                 result.push(String::new());
@@ -261,7 +282,14 @@ fn extract_params(fn_node: &Node<'_>, source: &[u8]) -> Vec<String> {
             }
         }
     }
-    result
+    let form = if old_style {
+        FunctionMeta::C_PARAM_FORM_OLD_STYLE
+    } else if listed_any {
+        0
+    } else {
+        FunctionMeta::C_PARAM_FORM_EMPTY_PARENS
+    };
+    (result, form)
 }
 
 /// The type that a K&R definition's parameter declarations (`int a;`

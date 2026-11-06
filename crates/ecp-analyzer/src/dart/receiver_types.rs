@@ -43,6 +43,11 @@ use tree_sitter::Node;
 type FnScope = (PosRange, HashMap<String, String>);
 type ClassScope = (PosRange, (String, Option<String>));
 
+/// A name a closure, a for-in loop or a catch clause binds with no type:
+/// it hides a same-named outer local, and its receiver keeps the path of a
+/// name no scope binds.
+const SHADOW: &str = "\u{0}shadow";
+
 /// A declared name whose type is unknown maps to `""` in its scope.
 #[derive(Debug, Default)]
 pub struct DartBindings {
@@ -226,6 +231,56 @@ fn collect_typed_dart_locals(fn_node: Node<'_>, source: &[u8], scopes: &mut Vec<
         {
             continue;
         }
+        // A closure parameter, a for-in variable and a catch variable hide
+        // a same-named outer local inside their own span; one with no type
+        // binds `SHADOW`.
+        match n.kind() {
+            "function_expression" => {
+                if let Some(params) = n.child_by_field_name("parameters") {
+                    let mut map = HashMap::new();
+                    collect_typed_dart_params(params, source, &mut map);
+                    for ty in map.values_mut().filter(|ty| ty.is_empty()) {
+                        *ty = SHADOW.to_string();
+                    }
+                    if !map.is_empty() {
+                        scopes.push((node_range(n), map));
+                    }
+                }
+            }
+            "for_statement" => {
+                if let Some(name) = n
+                    .child_by_field_name("name")
+                    .and_then(|name| name.utf8_text(source).ok())
+                {
+                    let mut c = n.walk();
+                    let ty = n
+                        .children(&mut c)
+                        .find(|child| child.kind() == "type")
+                        .and_then(|t| t.named_child(0))
+                        .filter(|ti| ti.kind() == "type_identifier")
+                        .and_then(|ti| ti.utf8_text(source).ok())
+                        .unwrap_or(SHADOW);
+                    scopes.push((
+                        node_range(n),
+                        HashMap::from([(name.to_string(), ty.to_string())]),
+                    ));
+                }
+            }
+            "catch_clause" => {
+                let block = n.next_named_sibling().filter(|b| b.kind() == "block");
+                let span = (node_range(n).0, node_range(block.unwrap_or(n)).1);
+                let map: HashMap<String, String> = ["exception", "stack_trace"]
+                    .into_iter()
+                    .filter_map(|field| n.child_by_field_name(field))
+                    .filter_map(|name| name.utf8_text(source).ok())
+                    .map(|name| (name.to_string(), SHADOW.to_string()))
+                    .collect();
+                if !map.is_empty() {
+                    scopes.push((span, map));
+                }
+            }
+            _ => {}
+        }
         if n.kind() == "initialized_variable_declaration" {
             let mut ty: Option<String> = None;
             let mut name: Option<String> = None;
@@ -360,7 +415,7 @@ fn dart_callee_name(
                 }
                 "identifier" => {
                     let var = obj.utf8_text(source).ok()?;
-                    match bindings.lookup_local(pos, var) {
+                    match bindings.lookup_local(pos, var).filter(|ty| *ty != SHADOW) {
                         Some("") => {}
                         Some(ty) => return Some(format!("{ty}.{method}")),
                         None if bindings.prefixes.contains(var)
@@ -436,7 +491,7 @@ fn method_value(
         "this" => bindings.enclosing_class(pos)?.0.as_str(),
         "identifier" => bindings
             .lookup_local(pos, object.utf8_text(source).ok()?)
-            .filter(|ty| !ty.is_empty())?,
+            .filter(|ty| !ty.is_empty() && *ty != SHADOW)?,
         _ => return None,
     };
     Some(format!("{ty}.{property}"))

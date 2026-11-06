@@ -1,10 +1,13 @@
 //! Explicit imports must choose their module even when another module has the same name.
 use crate::instantiation_calls_support;
+use crate::name_ref_support::function_refs;
+use crate::receiver_typing_support::call_rows_to;
 
 use ecp_analyzer::python::parser::PythonProvider;
 use ecp_analyzer::resolution::builder::GraphBuilder;
 use ecp_analyzer::typescript::TypeScriptProvider;
 use ecp_core::analyzer::provider::LanguageProvider;
+use ecp_core::graph::ZeroCopyGraph;
 use instantiation_calls_support::{calls_from, graph_of};
 use std::path::Path;
 
@@ -55,9 +58,14 @@ fn test_import_relative_cache_keeps_caller_directories_separate() {
     assert_eq!(calls_from(&graph, "second")[0].file, "b/util.py");
 }
 
+/// Stands for: a name a function assigns anywhere is local to the whole
+/// function, so `api.helper()` before `api = value` reads the unbound local
+/// (Python raises `UnboundLocalError`), never the imported module. Was: the
+/// module binding.
 #[test]
-fn test_import_assignment_after_call_keeps_module_binding() {
-    assert_python_call(
+fn test_import_name_assigned_later_in_function_binds_no_module_member() {
+    let graph = graph_of(
+        &PythonProvider::new().unwrap(),
         &[
             ("pkg/util.py", "def helper(): pass\n"),
             ("other.py", "def helper(): pass\n"),
@@ -66,10 +74,9 @@ fn test_import_assignment_after_call_keeps_module_binding() {
                 "import pkg.util as api\ndef go(value):\n    api.helper()\n    api = value\n",
             ),
         ],
-        "go",
-        "pkg/util.py",
-        "helper",
     );
+    let hits = calls_from(&graph, "go");
+    assert!(hits.iter().all(|hit| hit.file != "pkg/util.py"), "{hits:?}");
 }
 
 #[test]
@@ -631,4 +638,125 @@ fn test_resolve_call_from_imported_submodule_binds_module_function() {
         targets_of(&files, "run"),
         vec![target("pkg/mod.py", "", "f")]
     );
+}
+
+// ---- A03 / M01 / M10: a typed receiver binds its own language ----
+
+const XL_CLS_PY: (&str, &str) = (
+    "cls.py",
+    "class Cls:\n    def m(self, x):\n        return x\n",
+);
+const XL_CLS_TS: (&str, &str) = (
+    "cls.ts",
+    "export class Cls {\n  pad(): void {}\n  m(x: number): number {\n    return x;\n  }\n}\n",
+);
+const XL_USE_PY: (&str, &str) = (
+    "use.py",
+    "from cls import Cls\n\ndef call(obj: Cls):\n    return obj.m(1)\n\ndef call_ref(obj: Cls, xs):\n    return list(map(obj.m, xs))\n",
+);
+const XL_USE_TS: (&str, &str) = (
+    "use.ts",
+    "import { Cls } from './cls';\nexport function callTs(obj: Cls) {\n  return obj.m(1);\n}\n",
+);
+
+/// Every file in one graph, each parsed by the provider of its extension.
+fn mixed_graph(files: &[(&str, &str)]) -> ZeroCopyGraph {
+    let python = PythonProvider::new().unwrap();
+    let typescript = TypeScriptProvider::new().unwrap();
+    let mut builder = GraphBuilder::new();
+    for (path, source) in files {
+        let provider: &dyn LanguageProvider = if path.ends_with(".ts") {
+            &typescript
+        } else {
+            &python
+        };
+        builder.add_graph(
+            provider
+                .parse_file(Path::new(path), source.as_bytes())
+                .unwrap_or_else(|e| panic!("parse {path}: {e}")),
+        );
+    }
+    builder.build()
+}
+
+fn m_rows(g: &ZeroCopyGraph, caller: &str) -> Vec<(String, String, String, f32)> {
+    call_rows_to(g, caller, "m")
+}
+
+fn assert_typed_row(rows: &[(String, String, String, f32)], file: &str) {
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(
+        (rows[0].0.as_str(), rows[0].2.as_str()),
+        (file, "call"),
+        "{rows:?}"
+    );
+    assert!(rows[0].3 >= 0.7, "{rows:?}");
+}
+
+/// Stands for: a Python caller typed `Cls` binds the `Cls.m` of a Python file,
+/// never the same-named TypeScript class, and adding `cls.ts` does not change
+/// the verdict of the project without it (M01, Python row).
+#[test]
+fn test_calls_python_typed_receiver_with_ts_namesake_binds_python_method() {
+    let base = mixed_graph(&[XL_CLS_PY, XL_USE_PY]);
+    assert_typed_row(&m_rows(&base, "call"), "cls.py");
+    let both = mixed_graph(&[XL_CLS_PY, XL_CLS_TS, XL_USE_PY]);
+    assert_typed_row(&m_rows(&both, "call"), "cls.py");
+    assert_eq!(m_rows(&both, "call"), m_rows(&base, "call"));
+}
+
+/// Stands for: a TypeScript caller typed `Cls` keeps `cls.ts`, with or
+/// without a Python namesake (M01, TypeScript row, and the A03 control).
+#[test]
+fn test_calls_ts_typed_receiver_with_python_namesake_binds_ts_method() {
+    let base = mixed_graph(&[XL_CLS_TS, XL_USE_TS]);
+    assert_typed_row(&m_rows(&base, "callTs"), "cls.ts");
+    let both = mixed_graph(&[XL_CLS_PY, XL_CLS_TS, XL_USE_TS]);
+    assert_typed_row(&m_rows(&both, "callTs"), "cls.ts");
+    assert_eq!(m_rows(&both, "callTs"), m_rows(&base, "callTs"));
+}
+
+/// Stands for: the method value `map(obj.m, xs)` reaches the same language's
+/// `Cls.m` as the call does; with `cls.ts` present it never names `cls.ts`.
+#[test]
+fn test_bound_method_reference_python_typed_receiver_with_ts_namesake_binds_python_method() {
+    let both = mixed_graph(&[XL_CLS_PY, XL_CLS_TS, XL_USE_PY]);
+    let refs = function_refs(&both, "call_ref");
+    assert_eq!(refs.len(), 1, "{refs:?}");
+    assert_eq!((refs[0].0.as_str(), refs[0].1.as_str()), ("cls.py", "m"));
+    let base = mixed_graph(&[XL_CLS_PY, XL_USE_PY]);
+    assert_eq!(function_refs(&base, "call_ref"), refs);
+}
+
+/// Stands for (M10): the input order of the files changes neither the call
+/// nor the method-value verdict, so no first-in-file luck picks the target.
+#[test]
+fn test_calls_python_typed_receiver_input_order_permutations_bind_same_target() {
+    fn permutations(
+        items: &[(&'static str, &'static str)],
+    ) -> Vec<Vec<(&'static str, &'static str)>> {
+        if items.len() <= 1 {
+            return vec![items.to_vec()];
+        }
+        let mut out = Vec::new();
+        for i in 0..items.len() {
+            let mut rest = items.to_vec();
+            let head = rest.remove(i);
+            for mut tail in permutations(&rest) {
+                tail.insert(0, head);
+                out.push(tail);
+            }
+        }
+        out
+    }
+    let orders = permutations(&[XL_CLS_PY, XL_CLS_TS, XL_USE_PY]);
+    assert_eq!(orders.len(), 6);
+    for order in orders {
+        let g = mixed_graph(&order);
+        let names: Vec<_> = order.iter().map(|f| f.0).collect();
+        assert_typed_row(&m_rows(&g, "call"), "cls.py");
+        let refs = function_refs(&g, "call_ref");
+        assert_eq!(refs.len(), 1, "{names:?}: {refs:?}");
+        assert_eq!(refs[0].0, "cls.py", "{names:?}");
+    }
 }

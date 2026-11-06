@@ -47,3 +47,22 @@ fn test_jsdoc_nullable_return_emits_no_annotation_edge() {
     assert_eq!(annotated(&g, "maybe"), Vec::<(String, String)>::new());
     assert_eq!(annotated(&g, "union"), Vec::<(String, String)>::new());
 }
+
+/// A10 no-regression. Stands for: JavaScript declares no types, so a field
+/// assigned in the constructor binds nothing, and the class itself still parses.
+#[test]
+fn test_field_annotation_no_declared_types_binds_nothing() {
+    let g = graph(
+        &JavaScriptProvider::new().unwrap(),
+        &[(
+            "src/box.js",
+            "class Token {}\nclass Box { constructor() { this.items = []; } }\n",
+        )],
+    );
+    let pool = g.string_pool.as_slice();
+    assert!(
+        g.nodes.iter().any(|n| n.name.resolve(pool) == "Box"),
+        "non-vacuity: the fixture parses"
+    );
+    assert_eq!(annotated(&g, "items"), Vec::<(String, String)>::new());
+}

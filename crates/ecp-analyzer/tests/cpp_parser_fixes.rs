@@ -1347,3 +1347,151 @@ fn test_cpp_class_body_error_declaration_emits_variable() {
         ]
     );
 }
+
+// ── Function-pointer data members (A14) ─────────────────────────────────
+
+const OPS_HPP: &[u8] = b"struct Ops {\n    void (*open)(int value);\n    int (*close)(void);\n    void (*const frozen)(int);\n    void (**table)(int);\n    void (*cbs[4])(int);\n    static void (*sfp)(int);\n    void (Ops::*pm)(int);\n    int count;\n    void method(int);\n};\nstruct File { void open(int); };\nvoid run(Ops& o) { o.open(1); }\n";
+
+/// The names of the nodes of `kind` owned by `owner`, sorted.
+fn owned_names<'g>(g: &'g LocalGraph, kind: NodeKind, owner: &str) -> Vec<&'g str> {
+    let mut names: Vec<&str> = g
+        .nodes
+        .iter()
+        .filter(|n| n.kind == kind && n.owner_class.as_deref() == Some(owner))
+        .map(|n| n.name.as_str())
+        .collect();
+    names.sort_unstable();
+    names
+}
+
+/// Stands for: a data member of function-pointer type is a `Property` of
+/// its class, whatever the declarator shape around the name (pointer,
+/// `const` pointer, pointer to pointer, array of pointers, static). The
+/// pointer to member `pm` is optional: when it is emitted it is a Property
+/// of `Ops`, never a node under a wrong name.
+#[test]
+fn test_parse_file_cpp_function_pointer_members_emit_property_nodes() {
+    let g = parse("ops.hpp", OPS_HPP);
+    let mut properties = owned_names(&g, NodeKind::Property, "Ops");
+    properties.retain(|name| *name != "pm");
+    assert_eq!(
+        properties,
+        ["cbs", "close", "count", "frozen", "open", "sfp", "table"]
+    );
+}
+
+/// Stands for: a function-pointer member whose function returns a pointer
+/// (one or two levels) or a reference is a `Property` of its class too, and
+/// its parameter names stay no member.
+#[test]
+fn test_parse_file_cpp_function_pointer_member_pointer_or_reference_return_emits_property() {
+    let g = parse(
+        "alloc.hpp",
+        b"struct Alloc {\n    void *(*alloc)(int size);\n    char **(*argv)(void);\n    int &(*at)(int index);\n};\n",
+    );
+    assert_eq!(
+        owned_names(&g, NodeKind::Property, "Alloc"),
+        ["alloc", "argv", "at"]
+    );
+}
+
+/// Stands for: a name inside the pointer type's parameter list is no member:
+/// no Property is named `value`, nor after the parameter's type.
+#[test]
+fn test_parse_file_cpp_function_pointer_member_parameter_names_emit_no_property() {
+    let g = parse("ops.hpp", OPS_HPP);
+    let allowed = [
+        "cbs", "close", "count", "frozen", "open", "pm", "sfp", "table",
+    ];
+    for node in g.nodes.iter().filter(|n| n.kind == NodeKind::Property) {
+        assert!(
+            allowed.contains(&node.name.as_str()),
+            "stray Property `{}` owned by {:?}",
+            node.name,
+            node.owner_class
+        );
+    }
+    // Control: the plain field beside them is still emitted.
+    assert!(owned_names(&g, NodeKind::Property, "Ops").contains(&"count"));
+}
+
+/// Stands for: a member function stays a `Method` beside the pointer
+/// members, and `File::open` stays a Method too.
+#[test]
+fn test_parse_file_cpp_member_function_stays_method_beside_function_pointer() {
+    let g = parse("ops.hpp", OPS_HPP);
+    assert_eq!(owned_names(&g, NodeKind::Method, "Ops"), ["method"]);
+    assert_eq!(owned_names(&g, NodeKind::Method, "File"), ["open"]);
+    assert!(!owned_names(&g, NodeKind::Property, "Ops").contains(&"method"));
+}
+
+/// Stands for: a call through a function-pointer member of `Ops` binds no
+/// method of `File`, the unrelated class that happens to declare `open`.
+#[test]
+fn test_calls_cpp_function_pointer_member_call_binds_no_unrelated_method() {
+    use ecp_analyzer::resolution::builder::GraphBuilder;
+    let mut builder = GraphBuilder::new();
+    builder.add_graph(parse("ops.hpp", OPS_HPP));
+    let graph = builder.build();
+    let pool = graph.string_pool.as_slice();
+    let targets: Vec<(NodeKind, String, String)> = graph
+        .edges
+        .iter()
+        .filter(|e| e.rel_type == ecp_core::graph::RelType::Calls)
+        .filter(|e| graph.nodes[e.source as usize].name.resolve(pool) == "run")
+        .map(|e| {
+            let t = &graph.nodes[e.target as usize];
+            (
+                t.kind,
+                t.owner_class.resolve(pool).to_string(),
+                t.name.resolve(pool).to_string(),
+            )
+        })
+        .collect();
+    assert!(
+        targets
+            .iter()
+            .all(|(_, owner, name)| !(owner == "File" && name == "open")),
+        "o.open(1) with `Ops& o` never reaches File::open: {targets:?}"
+    );
+    // Control: the Property node exists, so the graph holds a node the
+    // member call can name instead of the unrelated method.
+    assert!(owned_names(&parse("ops.hpp", OPS_HPP), NodeKind::Property, "Ops").contains(&"open"));
+}
+
+/// Stands for (A14b, C sibling): C function-pointer data members are
+/// Property nodes of their struct too, and the parameter name is no member.
+#[test]
+fn test_parse_file_c_function_pointer_members_emit_property_nodes() {
+    let g = ecp_analyzer::c::parser::CProvider::new()
+        .expect("CProvider::new")
+        .parse_file(
+            Path::new("ops.h"),
+            b"struct Ops { void (*open)(int value); int (*close)(void); int count; };\n",
+        )
+        .expect("parse_file");
+    assert_eq!(
+        owned_names(&g, NodeKind::Property, "Ops"),
+        ["close", "count", "open"]
+    );
+    assert!(g
+        .nodes
+        .iter()
+        .all(|n| !(n.kind == NodeKind::Property && n.name == "value")));
+}
+
+// ── Namespace typedef owner (A15g) ──────────────────────────────────────
+
+/// Stands for: a `typedef` and a `using` alias inside `namespace ns` are
+/// owned by `ns`, as a namespace variable is, so the C family fallback never
+/// reads them as owner-less; a global typedef keeps no owner.
+#[test]
+fn test_parse_file_cpp_namespace_typedef_and_using_alias_carry_namespace_owner() {
+    let g = parse(
+        "types.hpp",
+        b"#include <utility>\nnamespace ns {\nstruct St { int x; };\nusing Al = std::pair<int,int>;\ntypedef std::pair<int,int> AlT;\n}\ntypedef int Gint;\n",
+    );
+    assert_eq!(named(&g, "Al").owner_class.as_deref(), Some("ns"));
+    assert_eq!(named(&g, "AlT").owner_class.as_deref(), Some("ns"));
+    assert_eq!(named(&g, "Gint").owner_class.as_deref(), None);
+}

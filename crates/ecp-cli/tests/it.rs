@@ -194,6 +194,7 @@ mod overlay_parsed_language;
 mod overlay_path_alias_barrel_parity;
 mod overlay_provider_set;
 mod overlay_qualified_call_parity;
+mod overlay_receiver_scope_parity;
 mod overlay_reexport_parity;
 mod overlay_removed_module;
 mod overlay_resolver_parity;

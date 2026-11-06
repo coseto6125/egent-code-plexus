@@ -853,6 +853,8 @@ fn test_overlay_rust_wildcard_import_unique_return_type_matches_reindex() {
     );
 }
 
+/// Stands for: a return type naming two project classes types no receiver,
+/// so both sides bind the one class with the member as the tagged guess (55).
 #[test]
 fn test_overlay_php_ambiguous_return_type_keeps_unique_member_fallback() {
     let php = PhpProvider::new().unwrap();
@@ -870,11 +872,11 @@ fn test_overlay_php_ambiguous_return_type_keeps_unique_member_fallback() {
         &[("app/config.php", &format!("\n{config}"))],
         &[
             ("app/config.php".into(), "make".into(), "".into(), 100),
-            ("src/two/Foo.php".into(), "bar".into(), "Foo".into(), 70),
+            ("src/two/Foo.php".into(), "bar".into(), "Foo".into(), 55),
         ],
         &[
             ("app/config.php".into(), "make".into(), "".into(), 100),
-            ("src/two/Foo.php".into(), "bar".into(), "Foo".into(), 70),
+            ("src/two/Foo.php".into(), "bar".into(), "Foo".into(), 55),
         ],
     );
 }
@@ -1093,9 +1095,10 @@ fn test_overlay_python_untyped_member_collision_matches_reindex() {
             ("other.py", "class Foo:\n    def foo(self): pass\n"),
         ],
         &[("app.py", "def foo(): pass\ndef run(x): x.foo()\n")],
-        // An untyped receiver never reaches the caller's own module's free
-        // function, and two owners elsewhere leave the global tier empty.
-        &[],
+        // Stands for: an untyped receiver never reaches the caller's own
+        // module's free function, so `Foo.foo` is the one candidate and binds
+        // as the duck-typed guess (decision A09).
+        &[("other.py".into(), "foo".into(), "Foo".into(), 55)],
     );
 }
 
@@ -2036,9 +2039,63 @@ fn test_overlay_rust_path_segment_not_declared_inside_previous_matches_reindex()
     );
 }
 
-// Stands for: a path through a module or type its file declares twice
-// (`v1::Config` beside `v2::Config`, `outer::a::b` beside `a::b`) binds
-// nothing, out of a dirty caller or a dirty target file as in a reindex.
+/// Asserts the reindex of `files` after `dirty` binds `caller` to exactly
+/// `want` (file, name), then that the overlay of `dirty` over the base
+/// agrees with it field for field. The expected tuples come from the
+/// reindex, so this helper never pins a confidence or a display owner.
+fn parity_binds(
+    caller: &str,
+    files: &[(&str, &str)],
+    dirty: &[(&str, &str)],
+    want: &[(&str, &str)],
+) {
+    let provider = RustProvider::new().unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let full = reindex(tmp.path(), &provider, files, dirty);
+    let got = targets(&full, caller);
+    let names: Vec<(&str, &str)> = got.iter().map(|t| (t.0.as_str(), t.1.as_str())).collect();
+    assert_eq!(names, want, "reindex of {dirty:?}");
+    parity_from(caller, &provider, files, dirty, &got);
+}
+
+/// Start lines of the `Calls` targets of `caller` in `graph`, and of every
+/// node named `name`, each sorted and deduplicated: tells apart two
+/// same-named members of one file.
+fn call_lines_and_member_lines(
+    graph: &ZeroCopyGraph,
+    caller: &str,
+    name: &str,
+) -> (Vec<u32>, Vec<u32>) {
+    let pool = &graph.string_pool;
+    let mut called: Vec<u32> = graph
+        .edges
+        .iter()
+        .filter(|e| {
+            e.rel_type == RelType::Calls
+                && graph.nodes[e.source as usize].name.resolve(pool) == caller
+        })
+        .map(|e| graph.nodes[e.target as usize].span.0)
+        .collect();
+    let mut declared: Vec<u32> = graph
+        .nodes
+        .iter()
+        .filter(|n| n.name.resolve(pool) == name)
+        .map(|n| n.span.0)
+        .collect();
+    called.sort_unstable();
+    called.dedup();
+    declared.sort_unstable();
+    declared.dedup();
+    (called, declared)
+}
+
+/// Stands for (A13 / A13b, contract change from "no edge"): a path through a
+/// module or type its file declares twice binds the member at the exact path
+/// the call spells, out of a dirty caller or a dirty target file as in a
+/// reindex. `v2::Config::new()` and `v1::Config::new()` each bind their own
+/// `new` (both lines are reached: the one target tuple `(file, new)` stands
+/// for two nodes, so the reindex lines are asserted). `crate::a::b::wrong()`
+/// names no declaration and binds nothing; `crate::a::b::right()` binds.
 #[test]
 fn test_overlay_rust_path_through_twin_qualifier_matches_reindex() {
     let twins = "pub mod v1 { pub struct Config; impl Config { pub fn new() {} } }\n\
@@ -2050,23 +2107,29 @@ fn test_overlay_rust_path_through_twin_qualifier_matches_reindex() {
         (twins, &[("src/lib.rs", caller)][..]),
         ("", &[("src/api/mod.rs", twins), ("src/lib.rs", caller)][..]),
     ] {
-        parity(
-            &RustProvider::new().unwrap(),
-            &[("src/lib.rs", bare), ("src/api/mod.rs", base_api)],
-            edits,
-            &[],
-        );
+        let files = [("src/lib.rs", bare), ("src/api/mod.rs", base_api)];
+        parity_binds("run", &files, edits, &[("src/api/mod.rs", "new")]);
+        let tmp = tempfile::tempdir().unwrap();
+        let full = reindex(tmp.path(), &RustProvider::new().unwrap(), &files, edits);
+        let (called, declared) = call_lines_and_member_lines(&full, "run", "new");
+        assert_eq!(declared.len(), 2, "one `new` per version: {declared:?}");
+        assert_eq!(called, declared, "each version's `new` is bound");
     }
     let nested = "mod outer { pub mod a { pub mod b { pub fn wrong() {} } } }\n\
                   mod a { pub mod b { pub fn right() {} } }\nfn run() {}";
-    parity(
-        &RustProvider::new().unwrap(),
+    let wrong = nested.replace("fn run() {}", "fn run() { crate::a::b::wrong(); }");
+    parity_binds(
+        "run",
         &[("src/lib.rs", nested)],
-        &[(
-            "src/lib.rs",
-            &nested.replace("fn run() {}", "fn run() { crate::a::b::wrong(); }"),
-        )],
+        &[("src/lib.rs", &wrong)],
         &[],
+    );
+    let right = nested.replace("fn run() {}", "fn run() { crate::a::b::right(); }");
+    parity_binds(
+        "run",
+        &[("src/lib.rs", nested)],
+        &[("src/lib.rs", &right)],
+        &[("src/lib.rs", "right")],
     );
 }
 
@@ -2312,11 +2375,12 @@ fn test_overlay_java_external_static_import_matches_reindex() {
     );
 }
 
-// `pkg` is an indexed directory, so the missing `pkg.Missing` may be local:
-// the index keeps the global tier (0.7). Was: the path-segment tier matched
-// the `helper/` directory at 0.95. A wrong suppression would return no edge.
+// `import static pkg.Missing.helper` names `Missing.helper`, so the Owner
+// rule refuses the unrelated `lib.helper.Tools.helper` and nothing binds.
+// Was: the global tier at 0.7, and before that the path-segment tier
+// matched the `helper/` directory at 0.95.
 #[test]
-fn test_overlay_java_indexed_first_segment_keeps_global_matches_reindex() {
+fn test_overlay_java_static_import_missing_class_binds_nothing_matches_reindex() {
     parity(
         &java(),
         &[
@@ -2337,12 +2401,7 @@ fn test_overlay_java_indexed_first_segment_keeps_global_matches_reindex() {
             "App.java",
             "import static pkg.Missing.helper; class App { void run() { helper(); } }",
         )],
-        &[(
-            "src/main/java/lib/helper/Tools.java".into(),
-            "helper".into(),
-            "Tools".into(),
-            70,
-        )],
+        &[],
     );
 }
 
@@ -2600,8 +2659,10 @@ fn test_overlay_kotlin_super_member_outside_imported_file_matches_reindex() {
 }
 
 // `import com.app.repository.*` binds no receiver, and a package wildcard
-// imports no class member: the call resolves by its member name (0.7). Was:
-// the receiver became `repository.fetchUsers`, which nothing resolves.
+// imports no class member; the `val repository` constructor property types
+// the receiver, so the call binds `UserRepository.fetchUsers` (0.85). Was:
+// the bare member name at 0.7 and then 0.55, and before that the receiver
+// became `repository.fetchUsers`, which nothing resolves.
 #[test]
 fn test_overlay_kotlin_wildcard_package_named_receiver_matches_reindex() {
     let vm = |body: &str| {
@@ -2624,7 +2685,7 @@ fn test_overlay_kotlin_wildcard_package_named_receiver_matches_reindex() {
             "src/main/kotlin/com/app/repository/UserRepository.kt".into(),
             "fetchUsers".into(),
             "UserRepository".into(),
-            70,
+            85,
         )],
     );
 }

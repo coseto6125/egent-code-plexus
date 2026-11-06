@@ -22,11 +22,46 @@ fn find<'a>(imports: &'a [RawImport], alias: &str) -> &'a RawImport {
         .unwrap_or_else(|| panic!("missing alias `{alias}` in {imports:#?}"))
 }
 
+/// Stands for: a typedef a C file declares is a local binding, never a
+/// module import of that file (it was an alias `RawImport`, which the graph
+/// turned into `Imports main.c -> main.c::cb_t`). Every declarator shape
+/// holds, and the file's `#include` still yields its own import.
 #[test]
-fn test_typedef_primitive_is_alias() {
-    let imports = parse("typedef int Counter;\n");
-    let i = find(&imports, "Counter");
-    assert_eq!(i.binding_kind, Some(BindingKind::Alias));
+fn test_extract_named_bindings_c_local_typedef_emits_no_import() {
+    let src = "#include \"t.h\"\n\
+        typedef int Counter;\n\
+        typedef void (*cb_t)(int *);\n\
+        typedef char **StrArray;\n\
+        typedef int IntArr[10];\n\
+        typedef struct { int a; } Al;\n\
+        typedef int A, *B;\n";
+    let imports = parse(src);
+    for alias in ["Counter", "cb_t", "StrArray", "IntArr", "Al", "A", "B"] {
+        assert!(
+            imports.iter().all(|i| i.alias.as_deref() != Some(alias)),
+            "typedef `{alias}` must emit no import: {imports:#?}"
+        );
+    }
+    assert_eq!(
+        imports.iter().filter(|i| i.alias.is_none()).count(),
+        1,
+        "the `#include` keeps its file import: {imports:#?}"
+    );
+}
+
+/// Stands for: the control of the typedef case: `#define` and `extern`
+/// declarations keep their alias imports, so only the typedef left.
+#[test]
+fn test_extract_named_bindings_c_define_and_extern_still_emit_alias_imports() {
+    let imports = parse("typedef int Counter;\n#define alloc malloc\nextern int g_counter;\n");
+    assert_eq!(
+        find(&imports, "alloc").binding_kind,
+        Some(BindingKind::Alias)
+    );
+    assert_eq!(
+        find(&imports, "g_counter").binding_kind,
+        Some(BindingKind::Alias)
+    );
 }
 
 #[test]

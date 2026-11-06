@@ -87,3 +87,225 @@ fn test_field_annotation_binds_project_type_and_generic_argument() {
     assert_eq!(annotated(&g, "tparam"), none, "type parameter");
     assert_eq!(annotated(&g, "strings"), none, "generic of builtins");
 }
+
+/// A10: a field type argument that names a class type parameter binds no
+/// project type, even when a project class shares the parameter's name.
+mod a10 {
+    use crate::name_ref_support::{annotated, graph};
+    use ecp_analyzer::java::parser::JavaProvider;
+    use ecp_core::graph::ZeroCopyGraph;
+
+    fn pair(file: &str, name: &str) -> (String, String) {
+        (file.to_string(), name.to_string())
+    }
+
+    /// Target names of every type-annotation edge out of `source`.
+    fn names(g: &ZeroCopyGraph, source: &str) -> Vec<String> {
+        annotated(g, source).into_iter().map(|(_, n)| n).collect()
+    }
+
+    fn token_file(token: &str) -> String {
+        format!("src/{token}.java")
+    }
+
+    fn build(generic: Option<&str>, token: &str) -> ZeroCopyGraph {
+        let arg = generic.unwrap_or(token);
+        let params = generic.map_or(String::new(), |p| format!("<{p}>"));
+        let _ = (&arg, &params);
+        let files = [
+            (token_file(token), format!("class {token} {{}}\n")),
+            (
+                "src/Box.java".to_string(),
+                format!(
+                    "import java.util.List;\nclass Box{params} {{\n    List<{arg}> items;\n}}\n"
+                ),
+            ),
+            (
+                "src/Holder.java".to_string(),
+                format!("import java.util.List;\nclass Holder {{\n    List<{token}> tokens;\n}}\n"),
+            ),
+        ];
+        let refs: Vec<(&str, &str)> = files
+            .iter()
+            .map(|(p, s)| (p.as_str(), s.as_str()))
+            .collect();
+        graph(&JavaProvider::new().unwrap(), &refs)
+    }
+
+    /// Stands for: a field whose type argument names a class type parameter
+    /// binds no project type, although a project class has the same name; the
+    /// sibling field in an unparameterised holder (POSITIVE CONTROL) binds it.
+    #[test]
+    fn test_field_annotation_class_type_parameter_named_like_project_class_binds_nothing() {
+        let g = build(Some("Token"), "Token");
+        assert!(
+            !names(&g, "items").iter().any(|n| n == "Token"),
+            "items binds a type parameter as a project class: {:?}",
+            annotated(&g, "items")
+        );
+        assert!(
+            annotated(&g, "tokens").contains(&pair(&token_file("Token"), "Token")),
+            "control: {:?}",
+            annotated(&g, "tokens")
+        );
+    }
+
+    /// Stands for: a generic argument in a holder with no type parameters
+    /// binds the project class it names.
+    #[test]
+    fn test_field_annotation_project_class_in_unparameterised_holder_binds_class() {
+        let g = build(Some("Token"), "Token");
+        assert!(
+            annotated(&g, "tokens").contains(&pair(&token_file("Token"), "Token")),
+            "{:?}",
+            annotated(&g, "tokens")
+        );
+    }
+
+    /// Stands for (M07, rename the parameter): `Box<E>` / `List<E>` binds no
+    /// project edge, and `tokens` still binds `Token`.
+    #[test]
+    fn test_field_annotation_renamed_class_type_parameter_binds_nothing() {
+        let g = build(Some("E"), "Token");
+        assert!(
+            !names(&g, "items").iter().any(|n| n == "Token"),
+            "{:?}",
+            annotated(&g, "items")
+        );
+        assert!(
+            annotated(&g, "tokens").contains(&pair(&token_file("Token"), "Token")),
+            "control: {:?}",
+            annotated(&g, "tokens")
+        );
+    }
+
+    /// Stands for (M07, rename the project class): the project class is `Tok`
+    /// and the parameter stays `Token`; `items` binds neither, `tokens` binds `Tok`.
+    #[test]
+    fn test_field_annotation_renamed_project_class_keeps_parameter_binding_nothing() {
+        let g = build(Some("Token"), "Tok");
+        let items = names(&g, "items");
+        assert!(
+            !items.iter().any(|n| n == "Tok" || n == "Token"),
+            "{:?}",
+            annotated(&g, "items")
+        );
+        assert!(
+            annotated(&g, "tokens").contains(&pair(&token_file("Tok"), "Tok")),
+            "control: {:?}",
+            annotated(&g, "tokens")
+        );
+    }
+
+    /// Stands for (M07, remove the parameter): with no class type parameter
+    /// the same field binds the project class `Token`.
+    #[test]
+    fn test_field_annotation_without_class_type_parameter_binds_project_class() {
+        let g = build(None, "Token");
+        assert!(
+            annotated(&g, "items").contains(&pair(&token_file("Token"), "Token")),
+            "{:?}",
+            annotated(&g, "items")
+        );
+    }
+
+    fn method_files() -> Vec<(String, String)> {
+        vec![
+            (token_file("Token"), "class Token {}\n".to_string()),
+            (
+                "src/Box.java".to_string(),
+                "import java.util.List;\nclass Box {\n    <Token> void put(List<Token> xs) {}\n}\n"
+                    .to_string(),
+            ),
+            (
+                "src/Holder.java".to_string(),
+                "import java.util.List;\nclass Holder {\n    void take(List<Token> xs) {}\n}\n"
+                    .to_string(),
+            ),
+        ]
+    }
+
+    /// Stands for: a method type parameter named like a project class binds
+    /// nothing for `put`; `take`, declared where no such parameter exists
+    /// (POSITIVE CONTROL), binds the project class.
+    #[test]
+    fn test_field_annotation_method_type_parameter_named_like_project_class_binds_nothing() {
+        let files = method_files();
+        let refs: Vec<(&str, &str)> = files
+            .iter()
+            .map(|(p, s)| (p.as_str(), s.as_str()))
+            .collect();
+        let g = graph(&JavaProvider::new().unwrap(), &refs);
+        assert!(
+            !names(&g, "put").iter().any(|n| n == "Token"),
+            "{:?}",
+            annotated(&g, "put")
+        );
+        assert!(
+            annotated(&g, "take").contains(&pair(&token_file("Token"), "Token")),
+            "control: {:?}",
+            annotated(&g, "take")
+        );
+    }
+
+    /// Stands for: an inner class's own type parameter shadows a project class
+    /// for its field, while the outer class's field (`tokens`, which sees no
+    /// `Token` parameter) binds the class.
+    #[test]
+    fn test_field_annotation_nested_class_type_parameter_shadows_outer_binds_nothing() {
+        let g = graph(
+            &JavaProvider::new().unwrap(),
+            &[
+                (token_file("Token").as_str(), "class Token {}\n"),
+                (
+                    "src/Outer.java",
+                    "import java.util.List;\nclass Outer<T> {\n    class Inner<Token> {\n        List<Token> items;\n    }\n    List<Token> tokens;\n}\n",
+                ),
+            ],
+        );
+        assert!(
+            !names(&g, "items").iter().any(|n| n == "Token"),
+            "{:?}",
+            annotated(&g, "items")
+        );
+        assert!(
+            annotated(&g, "tokens").contains(&pair(&token_file("Token"), "Token")),
+            "control: {:?}",
+            annotated(&g, "tokens")
+        );
+    }
+
+    /// Stands for (M12): a method type parameter beside a class type
+    /// parameter, both named `Token` or one named `E`, binds nothing for `put`.
+    #[test]
+    fn test_metamorphic_method_type_parameter_beside_class_type_parameter_binds_nothing() {
+        let g = graph(
+            &JavaProvider::new().unwrap(),
+            &[
+                (token_file("Token").as_str(), "class Token {}\n"),
+                (
+                    "src/Box.java",
+                    "import java.util.List;\nclass Box<Token> {\n    <Token> void put(List<Token> xs) {}\n}\n",
+                ),
+                (
+                    "src/Box2.java",
+                    "import java.util.List;\nclass Box2<E> {\n    <Token> void put(List<Token> xs) {}\n}\n",
+                ),
+                (
+                    "src/Holder.java",
+                    "import java.util.List;\nclass Holder {\n    void take(List<Token> xs) {}\n}\n",
+                ),
+            ],
+        );
+        assert!(
+            !names(&g, "put").iter().any(|n| n == "Token"),
+            "{:?}",
+            annotated(&g, "put")
+        );
+        assert!(
+            annotated(&g, "take").contains(&pair(&token_file("Token"), "Token")),
+            "control: {:?}",
+            annotated(&g, "take")
+        );
+    }
+}

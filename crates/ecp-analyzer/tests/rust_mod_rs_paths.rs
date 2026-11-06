@@ -325,12 +325,54 @@ const TWIN_CONFIGS: &str = "pub mod v1 {\n    pub struct Config;\n    \
                             pub mod v2 {\n    pub struct Config;\n    \
                             impl Config { pub fn new() -> Self { Config } }\n}\n";
 
-// Stands for: a member records its owner as a bare name, so a path through
-// a type the file declares twice (`v1::Config`, `v2::Config`) cannot name
-// one twin's member. Expected: no edge rather than the first `new` of the
-// file, for each spelling and each twin.
+/// `Calls` targets of `caller` as `(file, name, start line)`, sorted and
+/// deduplicated: tells apart two same-named members of one file.
+fn calls_at(graph: &ZeroCopyGraph, caller: &str) -> Vec<(String, String, u32)> {
+    let pool = graph.string_pool.as_slice();
+    let mut out: Vec<(String, String, u32)> = graph
+        .edges
+        .iter()
+        .filter(|e| e.rel_type == RelType::Calls)
+        .filter(|e| graph.nodes[e.source as usize].name.resolve(pool) == caller)
+        .map(|e| {
+            let target = &graph.nodes[e.target as usize];
+            let file = if target.has_owning_file() {
+                graph.files[target.file_idx as usize]
+                    .path
+                    .resolve(pool)
+                    .to_string()
+            } else {
+                String::new()
+            };
+            (file, target.name.resolve(pool).to_string(), target.span.0)
+        })
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Start lines of every node `name` declared in `file`, sorted.
+fn lines_of(graph: &ZeroCopyGraph, file: &str, name: &str) -> Vec<u32> {
+    let pool = graph.string_pool.as_slice();
+    let mut out: Vec<u32> = graph
+        .nodes
+        .iter()
+        .filter(|n| n.has_owning_file() && n.name.resolve(pool) == name)
+        .filter(|n| graph.files[n.file_idx as usize].path.resolve(pool) == file)
+        .map(|n| n.span.0)
+        .collect();
+    out.sort();
+    out
+}
+
+/// Stands for (A13b, contract change from "no edge"): a path through a type
+/// the file declares twice in two inline modules (`api::v1::Config`,
+/// `api::v2::Config`) binds the `new` of the module the path names, and never
+/// the other twin's `new` (the two `new` nodes share file and name, so the
+/// start line tells them apart).
 #[test]
-fn test_module_path_call_through_type_declared_twice_in_file_records_no_edge() {
+fn test_module_path_call_to_type_in_one_of_two_versioned_modules_binds_that_version() {
     let files = [
         (
             "src/lib.rs",
@@ -342,16 +384,20 @@ fn test_module_path_call_through_type_declared_twice_in_file_records_no_edge() {
         ("src/api/mod.rs", TWIN_CONFIGS),
     ];
     let g = crate_graph(&files, true);
-    for caller in ["use_v1", "use_v2", "use_v2_crate"] {
-        assert_eq!(targets(&g, caller), vec![], "{caller}");
-    }
+    let lines = lines_of(&g, "src/api/mod.rs", "new");
+    assert_eq!(lines.len(), 2, "one `new` per version: {lines:?}");
+    let at = |line: u32| vec![("src/api/mod.rs".to_string(), "new".to_string(), line)];
+    assert_eq!(calls_at(&g, "use_v1"), at(lines[0]), "use_v1");
+    assert_eq!(calls_at(&g, "use_v2"), at(lines[1]), "use_v2");
+    assert_eq!(calls_at(&g, "use_v2_crate"), at(lines[1]), "use_v2_crate");
 }
 
-// Stands for: a top-level type is still a twin of a same-named type inside
-// an inline `mod` of its file: their members share the owner name.
-// Expected: no edge for `a::Config::new()`.
+/// Stands for (A13, contract change from "no edge"): a top-level type and a
+/// same-named type inside an inline `mod` of one file are different
+/// declarations, so `a::Config::new()` binds the top-level `new` (the later
+/// line here) and never `v1::Config`'s `new`.
 #[test]
-fn test_module_path_call_to_top_level_type_with_nested_twin_records_no_edge() {
+fn test_module_path_call_to_top_level_type_with_nested_twin_binds_the_top_level_member() {
     let files = [
         (
             "src/lib.rs",
@@ -364,21 +410,257 @@ fn test_module_path_call_to_top_level_type_with_nested_twin_records_no_edge() {
         ),
     ];
     let g = crate_graph(&files, true);
-    assert_eq!(targets(&g, "r_top"), vec![]);
+    let lines = lines_of(&g, "src/a/mod.rs", "new");
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert_eq!(
+        calls_at(&g, "r_top"),
+        vec![("src/a/mod.rs".to_string(), "new".to_string(), lines[1])]
+    );
 }
 
-// Stands for: a path through an inline module the file declares twice
-// (`outer::a::b` beside `a::b`) cannot tell whose member it names, so
-// `crate::a::b::wrong()` never binds `outer::a::b::wrong`. A twin-free
-// path in the same file still binds.
+const TWIN_LIB: &str = "mod outer { pub mod a { pub mod b { pub fn wrong() {} } } }\n\
+                        mod a { pub mod b { pub fn right() {} } }\n\
+                        mod solo { pub fn one() {} }\n\
+                        fn caller() { crate::a::b::wrong(); }\n\
+                        fn caller2() { crate::a::b::right(); }\n\
+                        fn plain() { crate::solo::one(); }\n";
+
+/// Stands for (A13, contract change from "no edge"): an exact `crate::` path
+/// through a module name the file declares twice (`outer::a::b` beside
+/// `a::b`) binds the member at that exact path. `crate::a::b::wrong()` names
+/// no declaration (`wrong` lives at `crate::outer::a::b`), so it binds
+/// nothing. A twin-free path in the same file still binds.
 #[test]
-fn test_module_path_call_through_inline_module_declared_twice_records_no_edge() {
-    let lib = "mod outer { pub mod a { pub mod b { pub fn wrong() {} } } }\n\
-               mod a { pub mod b { pub fn right() {} } }\n\
-               mod solo { pub fn one() {} }\n\
-               fn caller() { crate::a::b::wrong(); }\n\
-               fn plain() { crate::solo::one(); }\n";
-    let g = crate_graph(&[("src/lib.rs", lib)], true);
+fn test_module_path_call_through_twin_modules_with_exact_path_binds_right_target() {
+    let g = crate_graph(&[("src/lib.rs", TWIN_LIB)], true);
+    assert_eq!(targets(&g, "caller2"), vec![to("src/lib.rs", "right")]);
     assert_eq!(targets(&g, "caller"), vec![]);
     assert_eq!(targets(&g, "plain"), vec![to("src/lib.rs", "one")]);
+}
+
+/// Stands for: an exact path through twin modules to a member the named
+/// module lacks binds nothing (neither twin's namesake is borrowed).
+#[test]
+fn test_module_path_call_through_twin_modules_to_missing_member_binds_nothing() {
+    let lib = "mod outer { pub mod a { pub mod b { pub fn missing() {} } } }\n\
+               mod a { pub mod b { pub fn right() {} } }\n\
+               fn caller() { crate::a::b::missing(); }\n";
+    let g = crate_graph(&[("src/lib.rs", lib)], true);
+    assert_eq!(targets(&g, "caller"), vec![]);
+}
+
+/// Stands for (control, M08 base): with no twin, the same exact path binds.
+#[test]
+fn test_module_path_call_without_twin_binds_right_target() {
+    let lib = "mod a { pub mod b { pub fn right() {} } }\n\
+               fn caller2() { crate::a::b::right(); }\n";
+    let g = crate_graph(&[("src/lib.rs", lib)], true);
+    assert_eq!(targets(&g, "caller2"), vec![to("src/lib.rs", "right")]);
+}
+
+/// Stands for (M08): adding a twin module leaves the verdict of the exact
+/// path `crate::a::b::right()` unchanged, and `crate::a::b::wrong()` has no
+/// edge in the variant. Variant 2: `#[cfg]` twins of one module path have no
+/// resolvable owner, so `crate::sys::f()` keeps "no edge".
+#[test]
+fn test_metamorphic_twin_module_added_keeps_exact_path_target() {
+    let base = "mod a { pub mod b { pub fn right() {} } }\n\
+                fn caller2() { crate::a::b::right(); }\n";
+    let g_base = crate_graph(&[("src/lib.rs", base)], true);
+    let g_twin = crate_graph(&[("src/lib.rs", TWIN_LIB)], true);
+    assert_eq!(targets(&g_base, "caller2"), vec![to("src/lib.rs", "right")]);
+    assert_eq!(targets(&g_twin, "caller2"), targets(&g_base, "caller2"));
+    assert_eq!(targets(&g_twin, "caller"), vec![]);
+
+    let cfg = "#[cfg(unix)]\nmod sys { pub fn f() {} }\n\
+               #[cfg(windows)]\nmod sys { pub fn f() {} }\n\
+               fn via_sys() { crate::sys::f(); }\n";
+    let g_cfg = crate_graph(&[("src/lib.rs", cfg)], true);
+    assert_eq!(targets(&g_cfg, "via_sys"), vec![]);
+}
+
+// ---- A11: a union inside an inline module
+
+const UNION_LIB: &str =
+    "pub mod a;\npub mod b;\npub fn r() { a::m::U::mk(); }\npub fn rs() { a::m::S::mk(); }\n";
+const UNION_A: &str = "pub mod m {\n    pub union U { pub x: u32 }\n    \
+                       impl U { pub fn mk() -> U { U { x: 0 } } }\n    \
+                       pub struct S { pub x: u32 }\n    \
+                       impl S { pub fn mk() -> S { S { x: 0 } } }\n}\n";
+const UNION_DECOY: &str =
+    "pub union U { pub x: u32 }\nimpl U { pub fn mk() -> U { U { x: 0 } } }\n";
+
+fn union_graph() -> ZeroCopyGraph {
+    crate_graph(
+        &[
+            ("src/lib.rs", UNION_LIB),
+            ("src/a/mod.rs", UNION_A),
+            ("src/b.rs", UNION_DECOY),
+        ],
+        true,
+    )
+}
+
+/// Stands for: a union inside an inline module is a confirmable middle
+/// segment, so `a::m::U::mk()` binds the union's `mk` (owner `U`).
+#[test]
+fn test_module_path_call_to_union_in_inline_module_binds_associated_function() {
+    let g = union_graph();
+    assert_eq!(targets(&g, "r"), vec![to("src/a/mod.rs", "mk")]);
+    assert_eq!(call_owners(&g, "r"), vec!["U".to_string()]);
+}
+
+/// Stands for: the decoy union of the same name in `b.rs` is never bound.
+#[test]
+fn test_module_path_call_to_union_in_inline_module_ignores_namesake_union_in_other_file() {
+    let g = union_graph();
+    assert!(
+        !targets(&g, "r").contains(&to("src/b.rs", "mk")),
+        "{:?}",
+        targets(&g, "r")
+    );
+    assert!(
+        !targets(&g, "rs").contains(&to("src/b.rs", "mk")),
+        "{:?}",
+        targets(&g, "rs")
+    );
+    // POSITIVE CONTROL: the union's own edge exists.
+    assert_eq!(targets(&g, "r"), vec![to("src/a/mod.rs", "mk")]);
+}
+
+/// Stands for (control): a struct in the same inline module binds its `mk`.
+#[test]
+fn test_module_path_call_to_struct_in_inline_module_binds_associated_function() {
+    let g = union_graph();
+    assert_eq!(targets(&g, "rs"), vec![to("src/a/mod.rs", "mk")]);
+    assert_eq!(call_owners(&g, "rs"), vec!["S".to_string()]);
+}
+
+/// Stands for: the same union in an inline module of `lib.rs` itself binds.
+#[test]
+fn test_module_path_call_to_union_in_inline_module_of_lib_binds_associated_function() {
+    let lib = "pub mod m {\n    pub union U { pub x: u32 }\n    \
+               impl U { pub fn mk() -> U { U { x: 0 } } }\n}\n\
+               pub fn r2() { m::U::mk(); }\n";
+    let g = crate_graph(&[("src/lib.rs", lib)], true);
+    assert_eq!(targets(&g, "r2"), vec![to("src/lib.rs", "mk")]);
+}
+
+/// Stands for: a union has a real type declaration node (a qualifier kind
+/// named `U`), so the `Impl` node no longer stands in for it.
+#[test]
+fn test_parse_file_rust_union_emits_declaration_node() {
+    let local = RustProvider::new()
+        .expect("RustProvider init")
+        .parse_file(Path::new("src/lib.rs"), b"pub union U { pub x: u32 }\n")
+        .expect("parse");
+    let declared: Vec<_> = local
+        .nodes
+        .iter()
+        .filter(|n| n.name == "U" && n.kind.is_qualifier())
+        .collect();
+    assert_eq!(declared.len(), 1, "nodes: {:?}", local.nodes);
+}
+
+// ---- A15c: a glob import
+
+const GLOB_OTHER_MOD: &str = "pub mod registry;\n";
+const GLOB_REGISTRY: &str = "pub fn lookup() {}\n";
+
+fn glob_files(lib: &str) -> [(&str, &str); 4] {
+    [
+        ("src/lib.rs", lib),
+        ("src/other/mod.rs", GLOB_OTHER_MOD),
+        ("src/other/registry.rs", GLOB_REGISTRY),
+        // not declared by any `mod`: not part of the crate, stem-matches `registry`
+        ("src/registry.rs", GLOB_REGISTRY),
+    ]
+}
+
+/// Stands for: `use other::*;` names no head, and the undeclared file
+/// `src/registry.rs` is no proof for `registry::lookup()`; the decoy never binds.
+#[test]
+fn test_module_path_call_through_glob_import_does_not_bind_undeclared_namesake_file() {
+    let lib = "mod other;\nuse other::*;\npub fn run() { registry::lookup(); }\n";
+    let g = crate_graph(&glob_files(lib), true);
+    assert!(
+        !targets(&g, "run").contains(&to("src/registry.rs", "lookup")),
+        "{:?}",
+        targets(&g, "run")
+    );
+}
+
+/// Stands for (section 00 decision): a glob import resolves its members, so
+/// `registry::lookup()` binds `src/other/registry.rs`.
+#[test]
+fn test_module_path_call_through_glob_import_binds_glob_member() {
+    let lib = "mod other;\nuse other::*;\npub fn run() { registry::lookup(); }\n";
+    let g = crate_graph(&glob_files(lib), true);
+    assert_eq!(
+        targets(&g, "run"),
+        vec![to("src/other/registry.rs", "lookup")]
+    );
+}
+
+/// Stands for (control): a named import stops the decoy and binds the
+/// imported module.
+#[test]
+fn test_module_path_call_through_named_import_binds_imported_module() {
+    let lib = "mod other;\nuse other::registry;\npub fn run() { registry::lookup(); }\n";
+    let g = crate_graph(&glob_files(lib), true);
+    assert_eq!(
+        targets(&g, "run"),
+        vec![to("src/other/registry.rs", "lookup")]
+    );
+}
+
+// ---- A15d: a bare path with no Cargo.toml
+
+fn bare_files() -> [(&'static str, &'static str); 4] {
+    [
+        ("src/lib.rs", MOD_RS_LIB),
+        ("src/a/mod.rs", MOD_RS_A),
+        ("src/a/b.rs", MOD_RS_B),
+        ("src/c/mod.rs", MOD_RS_C),
+    ]
+}
+
+/// Stands for: with no manifest, `pub mod a;` in `lib.rs` still proves
+/// module `a`, so `a::top()` binds `src/a/mod.rs`.
+#[test]
+fn test_bare_module_path_call_without_manifest_binds_declared_module() {
+    let g = crate_graph(&bare_files(), false);
+    assert_eq!(targets(&g, "run"), vec![to("src/a/mod.rs", "top")]);
+}
+
+/// Stands for: the same-named `top` of module `c` is never borrowed.
+#[test]
+fn test_bare_module_path_call_without_manifest_ignores_same_named_module_elsewhere() {
+    let g = crate_graph(&bare_files(), false);
+    assert!(
+        !targets(&g, "run").contains(&to("src/c/mod.rs", "top")),
+        "{:?}",
+        targets(&g, "run")
+    );
+    // POSITIVE CONTROL: the declared module's edge exists.
+    assert!(!targets(&g, "run").is_empty());
+}
+
+/// Stands for: with no `mod a;` declaration anywhere, a stray `src/a/mod.rs`
+/// is no proof; no edge at all.
+#[test]
+fn test_bare_module_path_call_without_manifest_or_mod_declaration_binds_nothing() {
+    let files = [
+        ("src/lib.rs", "pub fn run() { a::top(); }\n"),
+        ("src/a/mod.rs", MOD_RS_A),
+    ];
+    let g = crate_graph(&files, false);
+    assert_eq!(targets(&g, "run"), vec![]);
+}
+
+/// Stands for (control): the manifest build of the same fixture binds `a/mod.rs`.
+#[test]
+fn test_bare_module_path_call_with_manifest_binds_declared_module() {
+    let g = crate_graph(&bare_files(), true);
+    assert_eq!(targets(&g, "run"), vec![to("src/a/mod.rs", "top")]);
 }

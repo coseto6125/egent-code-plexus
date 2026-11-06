@@ -1,5 +1,6 @@
-//! Containment edges of one file's parse: scope `Defines` (File, Namespace,
-//! Module) and enum containment (Enum -> EnumVariant).
+//! Containment of one file's parse: scope `Defines` (File, Namespace,
+//! Module), enum containment (Enum -> EnumVariant), and each declaration's
+//! container ([`containers`]).
 //!
 //! The index's post-process passes (`ecp-analyzer` `post_process::scope_defines`
 //! and `post_process::enum_variant_defines`) and the overlay's per-file replay
@@ -8,7 +9,7 @@
 //! to its own node ids.
 
 use crate::analyzer::membership::span_area;
-use crate::analyzer::types::{span_contains, RawNode, Span};
+use crate::analyzer::types::{innermost_enclosing, span_contains, RawNode, Span};
 use crate::graph::NodeKind;
 use rustc_hash::FxHashMap;
 
@@ -120,6 +121,34 @@ pub fn scope_defines<'a, T>(
             emit(Scope::Container(c), i);
         }
     }
+}
+
+/// Whether a declaration of `kind` holds the declarations a path names
+/// through it: a qualifier ([`NodeKind::is_qualifier`]) or a Rust `impl`
+/// block.
+fn is_container(kind: NodeKind) -> bool {
+    kind.is_qualifier() || kind == NodeKind::Impl
+}
+
+/// For each row, the index of its innermost enclosing qualifier row
+/// (`NodeKind::is_qualifier()` or `Impl`), by span; `None` at file level.
+/// Same rule as [`innermost_enclosing`] (identical spans do not enclose); a
+/// function between the two is skipped. The index (`SymbolTable`, then
+/// `ZeroCopyGraph::containers`) and the overlay (a dirty file's symbols)
+/// both read it, so a path walks parent -> child alike on both sides.
+/// Cost: one sort of the file's spans.
+pub fn containers(rows: &[Row<'_>]) -> Vec<Option<usize>> {
+    let spans: Vec<Span> = rows.iter().map(|r| r.span).collect();
+    let enclosing = innermost_enclosing(&spans);
+    (0..rows.len())
+        .map(|i| {
+            let mut up = enclosing[i];
+            while let Some(j) = up.filter(|&j| !is_container(rows[j].kind)) {
+                up = enclosing[j];
+            }
+            up
+        })
+        .collect()
 }
 
 /// The Enum -> EnumVariant edges of one file, as `(enum, variant)` node ids
@@ -262,6 +291,50 @@ mod tests {
             row(NodeKind::Function, Some("  "), "f", (3, 0, 4, 0)),
         ];
         assert_eq!(scopes(&rows), [(Scope::File, 0), (Scope::Container(0), 1)]);
+    }
+
+    #[test]
+    fn test_containers_empty_file_returns_empty() {
+        assert!(containers(&[]).is_empty());
+    }
+
+    /// Stands for (C4.2): each row's container is its innermost enclosing
+    /// qualifier or `impl` row, past a function; twin modules hold their own
+    /// members, so `outer::a::b` and `a::b` stay apart.
+    #[test]
+    fn test_containers_twin_modules_hold_own_members() {
+        let rows = [
+            row(NodeKind::Module, None, "outer", (0, 0, 9, 0)),
+            row(NodeKind::Module, Some("outer"), "a", (1, 0, 8, 0)),
+            row(NodeKind::Function, Some("a"), "wrong", (2, 0, 2, 9)),
+            row(NodeKind::Module, None, "a", (10, 0, 19, 0)),
+            row(NodeKind::Function, Some("a"), "right", (11, 0, 11, 9)),
+            row(NodeKind::Function, None, "free", (20, 0, 20, 9)),
+        ];
+        assert_eq!(
+            containers(&rows),
+            [None, Some(0), Some(1), None, Some(3), None]
+        );
+    }
+
+    /// Stands for: an `impl` block holds its methods; a function between a
+    /// module and a nested struct is skipped, and identical spans do not
+    /// enclose (the `innermost_enclosing` rule).
+    #[test]
+    fn test_containers_impl_holds_methods_function_skipped_identical_spans_apart() {
+        let rows = [
+            row(NodeKind::Module, None, "m", (0, 0, 9, 0)),
+            row(NodeKind::Struct, Some("m"), "S", (1, 0, 1, 9)),
+            row(NodeKind::Impl, Some("m"), "S", (2, 0, 4, 0)),
+            row(NodeKind::Method, Some("S"), "new", (3, 0, 3, 9)),
+            row(NodeKind::Function, Some("m"), "f", (5, 0, 8, 0)),
+            row(NodeKind::Struct, None, "Local", (6, 0, 6, 9)),
+            row(NodeKind::Struct, None, "Same", (6, 0, 6, 9)),
+        ];
+        assert_eq!(
+            containers(&rows),
+            [None, Some(0), Some(0), Some(2), Some(0), Some(0), Some(0)]
+        );
     }
 
     /// The first row of each (name, kind, owner) stands for the declaration,

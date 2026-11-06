@@ -425,6 +425,8 @@ mod python_value_flow;
 mod python_variable_scope;
 mod reads_field_all_langs;
 mod reads_field_rust;
+mod receiver_budget_blind_spots;
+mod receiver_core;
 mod receiver_emission;
 mod resolver_fxhash_uid;
 mod resolver_owner_kinds;

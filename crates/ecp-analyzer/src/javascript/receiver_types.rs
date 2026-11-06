@@ -1,26 +1,31 @@
 //! Local-scope receiver-type binding for JavaScript.
 //!
-//! JavaScript has no static type annotations, so the only case where the receiver
-//! type is statically known is `this.method()` inside a class method body — the
-//! enclosing class name is the receiver type.
+//! JavaScript has no static type annotations, so the receiver type is statically
+//! known in two cases: `this.method()` inside a class method body (the enclosing
+//! class name), and `obj.method()` where the receiver core
+//! ([`super::receiver_lower`]) proves `obj` was built with `new C(..)` on every
+//! path (`C.method`).
 //!
-//! `obj.method()` where `obj` is a plain identifier is left as the qualified name
-//! `obj.method` (same as the previous `extract_calls` behaviour) — without type
-//! annotations we cannot commit to a type, per the spec's "only commit ✓ for cases
-//! that work without guessing" rule. The exception is a name bound by a literal
-//! dynamic load ([`DynamicImports`]): `m.run()` emits `@import<N>.run`, and a
-//! destructured `execute()` emits the export it holds, `@import<N>.run`.
+//! Any other `obj.method()` with a plain identifier `obj` is left as the qualified
+//! name `obj.method` (same as the previous `extract_calls` behaviour) — without
+//! type annotations we cannot commit to a type, per the spec's "only commit ✓ for
+//! cases that work without guessing" rule. The exception is a name bound by a
+//! literal dynamic load ([`DynamicImports`]): `m.run()` emits `@import<N>.run`, and
+//! a destructured `execute()` emits the export it holds, `@import<N>.run`.
 
 use super::path_literals::{build_raw_path_literal, strip_js_string_value, LiteralContext};
+use super::receiver_lower::JsLowering;
 use crate::calls::{
     attach_to_enclosing_span, new_expression_call, reference_function_span, start_pos,
     unparenthesized, CallSiteIndex,
 };
 use crate::dynamic_imports::DynamicImports;
 use crate::framework_helpers::{enclosing_class, node_span, Span};
+use crate::receiver::{analyze_file, FileReceivers, Receiver};
 use crate::typescript::receiver_types::bound_method_value;
-use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
+use ecp_core::analyzer::types::{BlindSpot, CallSite, RawNode, RawPathLiteral, RawSqlRef};
 use std::cell::OnceCell;
+use std::path::Path;
 use tree_sitter::Node;
 
 /// Walk the JavaScript AST once, attaching callees to enclosing
@@ -40,7 +45,17 @@ pub fn extract_js_calls_and_path_literals(
     nodes: &mut [RawNode],
     dynamic: &DynamicImports,
     call_sites: &mut CallSiteIndex,
+    path: &Path,
+    blind_spots: &mut Vec<BlindSpot>,
 ) -> (Vec<RawPathLiteral>, Vec<RawSqlRef>) {
+    // The only evidence is a `new C(..)` assignment: a file without a `new`
+    // has no binding worth lowering.
+    let mut receivers = if source.windows(3).any(|window| window == b"new") {
+        analyze_file(&JsLowering, &(), root, source, path)
+    } else {
+        FileReceivers::default()
+    };
+    blind_spots.append(&mut receivers.blind_spots);
     let mut path_literals: Vec<RawPathLiteral> = Vec::new();
     let mut sql_refs: Vec<RawSqlRef> = Vec::new();
     let mut constructions: Vec<(Span, String)> = Vec::new();
@@ -49,7 +64,7 @@ pub fn extract_js_calls_and_path_literals(
     while let Some((n, parent, context)) = stack.pop() {
         match n.kind() {
             "call_expression" => {
-                if let Some(callee) = js_callee_name(n, source, dynamic, nodes) {
+                if let Some(callee) = js_callee_name(n, source, dynamic, nodes, &receivers) {
                     if let Some(site) = attach_to_enclosing_span(node_span(&n), callee, nodes) {
                         call_sites.insert(n.id(), site);
                     }
@@ -114,6 +129,7 @@ fn js_callee_name(
     source: &[u8],
     dynamic: &DynamicImports,
     nodes: &[RawNode],
+    receivers: &FileReceivers,
 ) -> Option<String> {
     let function = unparenthesized(call.child_by_field_name("function")?);
     match function.kind() {
@@ -131,6 +147,11 @@ fn js_callee_name(
                 {
                     return Some(callee);
                 }
+                // Only a proven class replaces the qualified name: a receiver
+                // with no evidence, or one the paths disagree on, keeps it.
+                if let Some(Receiver::Known(class)) = receivers.receiver_at(obj) {
+                    return Some(format!("{}.{prop_name}", class.text));
+                }
             }
             if obj.kind() == "this" {
                 // `this.method()` — look up the enclosing class.
@@ -147,9 +168,9 @@ fn js_callee_name(
                 // receiver text of a long chain would make every site
                 // O(depth).
                 let inner = match obj.kind() {
-                    "call_expression" => {
-                        CallSite::nested_chain(|| js_callee_name(obj, source, dynamic, nodes))
-                    }
+                    "call_expression" => CallSite::nested_chain(|| {
+                        js_callee_name(obj, source, dynamic, nodes, receivers)
+                    }),
                     "new_expression" => new_expression_call(obj, source),
                     _ => None,
                 };

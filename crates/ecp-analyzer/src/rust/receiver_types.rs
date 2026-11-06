@@ -231,14 +231,14 @@ pub fn impl_trait_name(impl_node: &Node<'_>, source: &[u8]) -> Option<String> {
     node_text(trait_node, source)
 }
 
-/// Walk `node`'s parent chain to find the nearest enclosing `struct_item`
-/// or `enum_item` and return its name.  Used to set `owner_class` for
+/// Walk `node`'s parent chain to find the nearest enclosing `struct_item`,
+/// `enum_item` or `union_item` and return its name.  Used to set `owner_class` for
 /// struct-field `Property` nodes so that two structs with the same field
 /// name do not produce the same UID.
 pub fn enclosing_struct_type(node: Node<'_>, source: &[u8]) -> Option<String> {
     let mut current = node.parent();
     while let Some(n) = current {
-        if matches!(n.kind(), "struct_item" | "enum_item") {
+        if matches!(n.kind(), "struct_item" | "enum_item" | "union_item") {
             return n
                 .child_by_field_name("name")
                 .and_then(|nn| node_text(nn, source));

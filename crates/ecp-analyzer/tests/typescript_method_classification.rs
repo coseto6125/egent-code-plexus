@@ -137,16 +137,37 @@ fn const_arrow_fn_is_function_not_const() {
     );
 }
 
+/// Stands for: an interface property signature is a `Property` owned by its
+/// interface. Contract change: ref-gitnexus omits interface properties; ecp
+/// emits them so an LLM can see the contract field. `meow()` stays a `Method`
+/// (POSITIVE CONTROL for the unchanged part) and the class `Dog.name` is a
+/// separate node, never mixed with `Cat.name`.
 #[test]
-fn interface_property_signature_not_emitted() {
-    // Interface property signatures should NOT be emitted as Property —
-    // ref-gitnexus omits them; only public_field_definition and constructor
-    // parameter properties are emitted.
-    let g = parse("export interface Cat { readonly id: number; name: string; }");
-    assert_eq!(
-        kind_of(&g, "id"),
-        None,
-        "interface property_signature must not be emitted — nodes: {:?}",
+fn test_parse_file_typescript_interface_property_signature_emits_property() {
+    let g = parse(
+        "export class Owner {}\n\
+         export interface Cat {\n  readonly id: number;\n  name: string;\n  owner: Owner;\n  meow(): void;\n}\n\
+         export class Dog {\n  name: string = '';\n}\n",
+    );
+    let owned_by = |name: &str, owner: &str| {
         g.nodes
+            .iter()
+            .filter(|n| n.name == name && n.owner_class.as_deref() == Some(owner))
+            .map(|n| n.kind)
+            .collect::<Vec<_>>()
+    };
+    for field in ["id", "name", "owner"] {
+        assert_eq!(
+            owned_by(field, "Cat"),
+            vec![NodeKind::Property],
+            "interface property `{field}` — nodes: {:?}",
+            g.nodes
+        );
+    }
+    assert_eq!(owned_by("name", "Dog"), vec![NodeKind::Property], "control");
+    assert_eq!(
+        owned_by("meow", "Cat"),
+        vec![NodeKind::Method],
+        "control: a method signature stays a Method"
     );
 }

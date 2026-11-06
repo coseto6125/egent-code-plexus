@@ -194,12 +194,13 @@ fn test_c_driver_declarations_keep_query_order_and_fields() {
                 None,
                 s("color")
             ),
+            // C typedef: no import row; the Typedef node carries the aliased type.
             (
                 "counter_t",
                 NodeKind::Typedef,
                 (3, 0, 3, 32),
                 true,
-                None,
+                s("unsigned long"),
                 None
             ),
             (
@@ -207,11 +208,19 @@ fn test_c_driver_declarations_keep_query_order_and_fields() {
                 NodeKind::Typedef,
                 (4, 0, 4, 29),
                 true,
-                None,
+                s("struct point"),
                 None
             ),
-            // A function-pointer typedef is a Typedef node like the plain ones.
-            ("cmp_fn", NodeKind::Typedef, (5, 0, 5, 32), true, None, None),
+            // A function-pointer typedef is a Typedef node like the plain ones;
+            // its aliased type is the return type.
+            (
+                "cmp_fn",
+                NodeKind::Typedef,
+                (5, 0, 5, 32),
+                true,
+                s("int"),
+                None
+            ),
             // `const` on the object makes a Const, and file-scope `static`
             // has internal linkage (FU 9adc33b1cf3e, FU cb159240606e).
             (
@@ -266,15 +275,8 @@ fn test_c_driver_declarations_keep_query_order_and_fields() {
         calls_of(&g, "pick", (11, 0, 11, 39)),
         (vec![], vec!["\u{1}name GREEN", "\u{1}variant GREEN"])
     );
-    // Named-binding imports follow source order.
-    assert_eq!(
-        import_rows(&g),
-        [
-            binding("counter_t", "unsigned long", BindingKind::Alias),
-            binding("point_t", "struct point", BindingKind::Alias),
-            binding("cmp_fn", "int", BindingKind::Alias),
-        ]
-    );
+    // C typedef: no import row; the Typedef node carries the aliased type.
+    assert!(import_rows(&g).is_empty());
     let metas: Vec<FnMetaRow<'_>> = g
         .raw_function_metas
         .iter()
@@ -323,6 +325,24 @@ fn test_c_driver_fn_ptr_ops_struct_emits_indirect_call_metas() {
                 true,
                 None,
                 None
+            ),
+            // C struct function-pointer members: Property nodes owned by the
+            // struct, with no type annotation.
+            (
+                "open",
+                NodeKind::Property,
+                (0, 18, 0, 45),
+                true,
+                None,
+                s("file_ops")
+            ),
+            (
+                "close",
+                NodeKind::Property,
+                (0, 46, 0, 67),
+                true,
+                None,
+                s("file_ops")
             ),
             (
                 "my_open",
@@ -460,8 +480,7 @@ typedef int feature_t;
 #endif
 "#;
 
-/// Each `#define` body class, `extern`, and typedefs nested in preproc
-/// blocks become named-binding imports in source order. The include guard
+/// Each `#define` body class and `extern` become named-binding imports in source order. The include guard
 /// is neither a Macro node nor an import; the guarded declarations are
 /// nodes as at file scope.
 #[test]
@@ -505,12 +524,13 @@ fn test_c_driver_named_bindings_classify_and_skip_include_guard() {
                 None,
                 None
             ),
+            // C typedef: no import row; the Typedef node carries the aliased type.
             (
                 "str_arr",
                 NodeKind::Typedef,
                 (12, 0, 12, 23),
                 true,
-                None,
+                Some("char **"),
                 None
             ),
             (
@@ -518,12 +538,12 @@ fn test_c_driver_named_bindings_classify_and_skip_include_guard() {
                 NodeKind::Typedef,
                 (14, 0, 14, 22),
                 true,
-                None,
+                Some("int"),
                 None
             ),
         ]
     );
-    // Source order; a pointer typedef keeps its stars in the source.
+    // Source order; typedefs contribute no import row (their type is on the node).
     assert_eq!(
         import_rows(&g),
         [
@@ -537,8 +557,6 @@ fn test_c_driver_named_bindings_classify_and_skip_include_guard() {
             binding("NOBODY", "(x)", BindingKind::Macro),
             binding("g_counter", "external", BindingKind::Alias),
             binding("ext_fn", "external", BindingKind::Alias),
-            binding("str_arr", "char **", BindingKind::Alias),
-            binding("feature_t", "int", BindingKind::Alias),
         ]
     );
 }
