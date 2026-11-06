@@ -186,6 +186,7 @@ mod overlay_csharp_partial_parity;
 mod overlay_differential_parity;
 mod overlay_function_reference_parity;
 mod overlay_heritage_parity;
+mod overlay_initializer_call_parity;
 mod overlay_java_static_import_parity;
 mod overlay_nearest_copy_parity;
 mod overlay_own_member_parity;

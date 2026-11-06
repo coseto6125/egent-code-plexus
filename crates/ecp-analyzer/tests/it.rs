@@ -223,6 +223,7 @@ mod hcl_visibility;
 mod implements_emission;
 mod import_tier_language_parity;
 mod imports_edges_guess_confidence;
+mod initializer_call_holder;
 mod java_annotation;
 mod java_anonymous_callbacks;
 mod java_blind_spots;
