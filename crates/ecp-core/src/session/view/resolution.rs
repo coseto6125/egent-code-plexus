@@ -3060,10 +3060,10 @@ impl<'v, 'a> NameTierFacts for OverlayTiers<'v, 'a, '_> {
         target: ResolveTarget,
         call: Option<CallPick<'_>>,
         heritage: &[String],
+        form: SiteForm,
     ) -> Resolution {
         let facts = self.members.facts;
         let (nearest, free_only) = (call.is_some(), call.is_some_and(|call| call.free_only));
-        let form = SiteForm::of(name, call);
         let owner = call.and_then(|call| call.owner);
         // The key holds all this lookup reads of `call` and the site:
         // `global_tier` reads only `call.is_some()`, this method `free_only`,
@@ -6416,7 +6416,14 @@ pub(super) fn resolve_edges(
                         name_tiers(&tiers(), raw, &file.imports, policy).map(TierHit::edge)
                     }
                     FieldRead::Global => tiers()
-                        .global(raw, &file.imports, ResolveTarget::Field, None, &[])
+                        .global(
+                            raw,
+                            &file.imports,
+                            ResolveTarget::Field,
+                            None,
+                            &[],
+                            SiteForm::FieldRead,
+                        )
                         .edge(),
                 };
                 let Some((target, confidence)) = hit else {

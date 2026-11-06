@@ -802,6 +802,7 @@ impl<'r, 'a> NameTierFacts for IndexTiers<'r, 'a, '_> {
         target: ResolveTarget,
         call: Option<CallPick<'_>>,
         heritage: &[String],
+        form: SiteForm,
     ) -> Resolution {
         let table = self.facts.0.symbol_table;
         let free_only = call.is_some_and(|call| call.free_only);
@@ -813,7 +814,7 @@ impl<'r, 'a> NameTierFacts for IndexTiers<'r, 'a, '_> {
                 caller_file: self.source,
                 caller_owner: call.and_then(|call| call.owner),
                 heritage,
-                form: SiteForm::of(name, call),
+                form,
                 name,
                 imports,
             },
@@ -1811,7 +1812,14 @@ impl<'a> Resolver<'a> {
             FieldRead::Global => {
                 let language = self.symbol_table.file_language(&source_file_str);
                 self.tiers(source_file, &source_file_str, language)
-                    .global(name, raw_imports, ResolveTarget::Field, None, &[])
+                    .global(
+                        name,
+                        raw_imports,
+                        ResolveTarget::Field,
+                        None,
+                        &[],
+                        SiteForm::FieldRead,
+                    )
                     .edge()
                     .into_iter()
                     .collect()

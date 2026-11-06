@@ -18,6 +18,10 @@
 //! 3. **Form.** An untyped member call `o.m()` reaches a method or a type's
 //!    function, never a free function (Python: another module's function,
 //!    since a module is a value), as [`member_call_admits`] states.
+//! 4. **Contract.** A bare field read (`d.name` recorded as `name`, no
+//!    receiver type) reaches no property an interface declares
+//!    ([`declared_by_interface`]): an interface property is a contract, not
+//!    storage, so it neither binds the read nor makes the name ambiguous.
 //!
 //! The vendor barrier and the strict language rule of the global tier stay
 //! in [`FileMeta::admits`]; C / C++ internal linkage stays in
@@ -42,6 +46,11 @@ pub enum SiteForm {
     UnprovenMember,
     Construct,
     Value,
+    /// A bare field read ([`crate::analyzer::ladder::field_read`] and the
+    /// Tier 3 it hands to): no call site and no qualifier. [`Self::of`]
+    /// never yields it, so only a lookup that names it meets the Contract
+    /// rule.
+    FieldRead,
 }
 
 impl SiteForm {
@@ -80,6 +89,7 @@ pub enum Reject {
     Language,
     Owner,
     Form,
+    Contract,
 }
 
 /// The languages whose sources build together, so one names the other's
@@ -189,6 +199,9 @@ impl<'f, F: PickFacts + ?Sized> Gate<'f, F> {
         ) && !self.member_form_admits(id)
         {
             return Err(Reject::Form);
+        }
+        if self.site.form == SiteForm::FieldRead && declared_by_interface(self.facts, id) {
+            return Err(Reject::Contract);
         }
         Ok(())
     }
@@ -340,6 +353,15 @@ impl<'f, F: PickFacts + ?Sized> Gate<'f, F> {
     }
 }
 
+/// Whether the innermost enclosing qualifier of `id`
+/// ([`PickFacts::container`]) is an interface. A side that cannot read the
+/// container answers `false`, so the candidate stays.
+pub fn declared_by_interface<F: PickFacts + ?Sized>(facts: &F, id: u32) -> bool {
+    facts
+        .container(id)
+        .is_some_and(|container| facts.kind(container) == NodeKind::Interface)
+}
+
 /// Whether candidate `id` (declared in a file of `meta`) may be what `site`
 /// names. Runs before any uniqueness decision. A tier that reads several
 /// candidates of one site keeps one [`Gate`] instead.
@@ -375,6 +397,8 @@ mod tests {
         namespaces: Vec<&'static str>,
         /// `(type id, ancestors)`.
         ancestors: Vec<(u32, Vec<u32>)>,
+        /// `(id, container id)`; an id absent here has no known container.
+        containers: Vec<(u32, u32)>,
     }
 
     impl PickFacts for Decls {
@@ -416,6 +440,12 @@ mod tests {
                 .iter()
                 .find(|(t, _)| *t == ty)
                 .map_or_else(Vec::new, |(_, a)| a.clone())
+        }
+        fn container(&self, id: u32) -> Option<u32> {
+            self.containers
+                .iter()
+                .find(|(of, _)| *of == id)
+                .map(|&(_, container)| container)
         }
     }
 
@@ -786,6 +816,142 @@ mod tests {
             .collect();
         assert_eq!(first, vec![2, 4]);
         assert_eq!(first, second);
+    }
+
+    // ---- Contract ----
+
+    const P: NodeKind = NodeKind::Property;
+    const I: NodeKind = NodeKind::Interface;
+
+    /// The a15a shape: `interface Cat { name }` before `class Dog { name }`.
+    fn cat_and_dog(cat_file: &'static str, dog_file: &'static str) -> Decls {
+        Decls {
+            decls: vec![
+                ("Cat", I, None, cat_file),
+                ("name", P, Some("Cat"), cat_file),
+                ("Dog", C, None, dog_file),
+                ("name", P, Some("Dog"), dog_file),
+            ],
+            containers: vec![(1, 0), (3, 2)],
+            ..Decls::default()
+        }
+    }
+
+    fn field_read(caller_file: &'static str) -> Site<'static> {
+        Site {
+            name: "name",
+            ..site(caller_file, None, &[], SiteForm::FieldRead)
+        }
+    }
+
+    #[test]
+    fn test_admit_field_read_interface_property_rejects_contract_class_admits() {
+        let facts = cat_and_dog("a.ts", "a.ts");
+        let at = field_read("a.ts");
+        assert_eq!(admit(&facts, at, 1, meta("a.ts")), Err(Reject::Contract));
+        assert_eq!(admit(&facts, at, 3, meta("a.ts")), Ok(()));
+    }
+
+    /// Stands for: Tier 3 meets the interface in one file and the class in
+    /// another; only the class counts, so the read binds it.
+    #[test]
+    fn test_admitted_field_read_interface_and_class_in_two_files_keeps_class() {
+        let facts = cat_and_dog("cat.ts", "dog.ts");
+        let candidates = [(1, meta("cat.ts")), (3, meta("dog.ts"))];
+        let kept: Vec<u32> = admitted(&facts, field_read("use.ts"), candidates.into_iter())
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(kept, vec![3]);
+    }
+
+    #[test]
+    fn test_admitted_field_read_two_interface_properties_keeps_none() {
+        let facts = Decls {
+            decls: vec![
+                ("Cat", I, None, "cat.ts"),
+                ("name", P, Some("Cat"), "cat.ts"),
+                ("Pet", I, None, "pet.ts"),
+                ("name", P, Some("Pet"), "pet.ts"),
+            ],
+            containers: vec![(1, 0), (3, 2)],
+            ..Decls::default()
+        };
+        let candidates = [(1, meta("cat.ts")), (3, meta("pet.ts"))];
+        assert_eq!(
+            admitted(&facts, field_read("use.ts"), candidates.into_iter()).count(),
+            0
+        );
+    }
+
+    /// Stands for: Kotlin `interface Named { val name: String }` and C#
+    /// `interface INamed { string Name { get; } }` declare a contract too.
+    #[test]
+    fn test_admit_field_read_kotlin_and_csharp_interface_property_rejects_contract() {
+        for (decl_file, caller_file) in [("Named.kt", "Use.kt"), ("Named.cs", "Use.cs")] {
+            let facts = Decls {
+                decls: vec![
+                    ("Named", I, None, decl_file),
+                    ("name", P, Some("Named"), decl_file),
+                ],
+                containers: vec![(1, 0)],
+                ..Decls::default()
+            };
+            assert_eq!(
+                admit(&facts, field_read(caller_file), 1, meta(decl_file)),
+                Err(Reject::Contract),
+                "{decl_file}"
+            );
+        }
+    }
+
+    /// Stands for: a side that cannot read the container keeps the
+    /// candidate, as before the rule.
+    #[test]
+    fn test_admit_field_read_unknown_container_admits() {
+        let facts = Decls {
+            containers: Vec::new(),
+            ..cat_and_dog("a.ts", "a.ts")
+        };
+        assert_eq!(admit(&facts, field_read("a.ts"), 1, meta("a.ts")), Ok(()));
+    }
+
+    /// Stands for: only the innermost container counts: a class nested in
+    /// an interface holds storage.
+    #[test]
+    fn test_admit_field_read_class_nested_in_interface_property_admits() {
+        let facts = Decls {
+            decls: vec![
+                ("Api", I, None, "Api.java"),
+                ("Impl", C, Some("Api"), "Api.java"),
+                ("name", P, Some("Impl"), "Api.java"),
+            ],
+            containers: vec![(1, 0), (2, 1)],
+            ..Decls::default()
+        };
+        assert_eq!(
+            admit(&facts, field_read("Use.java"), 2, meta("Api.java")),
+            Ok(())
+        );
+    }
+
+    /// Stands for: the Contract rule is the field read's alone: a name ref,
+    /// a type lookup, a call and a qualified name keep their answers.
+    #[test]
+    fn test_admit_other_forms_interface_property_keeps_old_answer() {
+        let facts = cat_and_dog("a.ts", "a.ts");
+        for form in [
+            SiteForm::Value,
+            SiteForm::Bare,
+            SiteForm::Qualified,
+            SiteForm::TypedMember,
+            SiteForm::Construct,
+        ] {
+            let at = Site {
+                name: "name",
+                ..site("a.ts", None, &[], form)
+            };
+            assert_eq!(admit(&facts, at, 1, meta("a.ts")), Ok(()), "{form:?}");
+        }
     }
 
     #[test]

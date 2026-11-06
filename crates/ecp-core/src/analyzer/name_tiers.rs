@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 use serde::Serialize;
 
+use crate::analyzer::admission::SiteForm;
 use crate::analyzer::c_family;
 use crate::analyzer::import_binding::{
     fqn_language, import_member_fallback, plain_binding, MemberOwner,
@@ -190,7 +191,9 @@ pub trait NameTierFacts {
     /// ([`CallPick::free_only`]) never reaches a member. The side passes
     /// its candidates through the admission gate
     /// ([`crate::analyzer::admission::Gate`]) of the site that `call`, the
-    /// caller's `heritage` and `name` describe, ahead of any count.
+    /// caller's `heritage` and `name` describe, ahead of any count. `form`
+    /// is the gate's site form: [`SiteForm::of`] for a name lookup, and
+    /// [`SiteForm::FieldRead`] for the Tier 3 of a bare field read.
     fn global(
         &self,
         name: &str,
@@ -198,6 +201,7 @@ pub trait NameTierFacts {
         target: ResolveTarget,
         call: Option<CallPick<'_>>,
         heritage: &[String],
+        form: SiteForm,
     ) -> Resolution;
     /// The declaration a C / C++ caller reaches through the bodiless
     /// declaration `id` that a tier bound: the one definition that settles
@@ -546,7 +550,14 @@ fn tiers<F: NameTierFacts>(
     }
 
     facts
-        .global(name, imports, target, call, heritage)
+        .global(
+            name,
+            imports,
+            target,
+            call,
+            heritage,
+            SiteForm::of(name, call),
+        )
         .edge()
         .map(Into::into)
 }

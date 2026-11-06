@@ -383,11 +383,36 @@ pub fn same_file<F: ResolveFacts>(
     call: Option<CallPick<'_>>,
     heritage: &[String],
 ) -> Resolution {
+    same_file_at(
+        facts,
+        file,
+        name,
+        target,
+        call,
+        heritage,
+        SiteForm::of(name, call),
+    )
+}
+
+/// [`same_file`] for a site whose `form` the caller states: a bare field
+/// read ([`field_read`]) is [`SiteForm::FieldRead`], which no `call` maps to.
+fn same_file_at<F: ResolveFacts>(
+    facts: &F,
+    file: &str,
+    name: &str,
+    target: ResolveTarget,
+    call: Option<CallPick<'_>>,
+    heritage: &[String],
+    form: SiteForm,
+) -> Resolution {
     let free_only = call.is_some_and(|call| call.free_only);
-    let form = SiteForm::of(name, call);
-    // Only these two forms meet a rule a declaration of the caller's own
-    // file can fail, so the other sites skip the file-meta lookup.
-    let gate = matches!(form, SiteForm::Bare | SiteForm::UntypedMember).then(|| {
+    // Only these forms meet a rule a declaration of the caller's own file
+    // can fail, so the other sites skip the file-meta lookup.
+    let gate = matches!(
+        form,
+        SiteForm::Bare | SiteForm::UntypedMember | SiteForm::FieldRead
+    )
+    .then(|| {
         Gate::new(
             facts,
             Site {
@@ -637,7 +662,8 @@ pub enum FieldRead {
     /// A qualified read: the side's full name lookup of
     /// [`ResolveTarget::Field`] runs, and its qualifier tier settles it.
     Qualified,
-    /// A bare read that Tier 1 left: Tier 3 ([`global`]) with no call site.
+    /// A bare read that Tier 1 left: Tier 3 ([`global`]) with no call site,
+    /// whose admission gate the side builds with [`SiteForm::FieldRead`].
     Global,
 }
 
@@ -646,11 +672,22 @@ pub enum FieldRead {
 /// qualifier or not at all. No import tier runs, because an import binds a
 /// module's name, never the field a receiver reads. No call site: no owner
 /// narrows the pick, no base is probed, and Tier 3 binds no nearest copy.
+/// Both tiers admit their candidates as a [`SiteForm::FieldRead`], so a
+/// property an interface declares neither binds the read nor makes the
+/// name ambiguous (the gate's Contract rule).
 pub fn field_read<F: ResolveFacts>(facts: &F, file: &str, name: &str) -> FieldRead {
     if split_qualifier(name).is_some() {
         return FieldRead::Qualified;
     }
-    match same_file(facts, file, name, ResolveTarget::Field, None, &[]) {
+    match same_file_at(
+        facts,
+        file,
+        name,
+        ResolveTarget::Field,
+        None,
+        &[],
+        SiteForm::FieldRead,
+    ) {
         Resolution::Bound(hit) => FieldRead::Bound(hit),
         _ => FieldRead::Global,
     }
@@ -3703,6 +3740,114 @@ mod tests {
             for (name, want) in cases {
                 assert_eq!(field_read(&facts, "a.py", name), want, "{name:?}");
             }
+        }
+    }
+
+    const I: NodeKind = NodeKind::Interface;
+
+    /// The a15a fixture: `class Owner {}`, `interface Cat { id; name }`,
+    /// `class Dog { name }` in one file, in that order.
+    fn cat_before_dog() -> [Fake; 2] {
+        let decls: [Decl; 6] = [
+            ("a.ts", "Owner", C, None),
+            ("a.ts", "Cat", I, None),
+            ("a.ts", "id", P, Some("Cat")),
+            ("a.ts", "name", P, Some("Cat")),
+            ("a.ts", "Dog", C, None),
+            ("a.ts", "name", P, Some("Dog")),
+        ];
+        both(&decls).map(|mut fake| {
+            fake.containers = vec![None, None, Some(1), Some(1), None, Some(4)];
+            fake
+        })
+    }
+
+    /// Stands for: an interface property is a contract, not storage, so the
+    /// bare read `d.name` binds the class's `name` that comes after it.
+    #[test]
+    fn test_field_read_interface_property_first_class_second_binds_class() {
+        for facts in cat_before_dog() {
+            assert_eq!(
+                field_read(&facts, "a.ts", "name"),
+                FieldRead::Bound(Hit {
+                    id: 5,
+                    confidence: 1.0,
+                    tier: Some(Tier::SameFile),
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn test_field_read_only_interface_property_leaves_tier1() {
+        for facts in cat_before_dog() {
+            assert_eq!(field_read(&facts, "a.ts", "id"), FieldRead::Global);
+        }
+    }
+
+    /// Stands for: the Contract rule is the field read's alone, so a plain
+    /// same-file lookup of the name keeps the first `Property` in source
+    /// order.
+    #[test]
+    fn test_same_file_name_lookup_interface_property_keeps_first() {
+        for facts in cat_before_dog() {
+            assert_eq!(
+                same_file(&facts, "a.ts", "name", ResolveTarget::Field, None, &[]),
+                bound(3, Tier::SameFile)
+            );
+        }
+    }
+
+    /// Stands for: the Tier 3 of a bare read admits through the
+    /// `FieldRead` gate, so the interface in one file neither binds nor
+    /// makes the class's namesake in another ambiguous; an interface
+    /// property alone binds nothing.
+    #[test]
+    fn test_global_field_read_interface_and_class_in_two_files_binds_class() {
+        let decls: [Decl; 5] = [
+            ("cat.ts", "Cat", I, None),
+            ("cat.ts", "name", P, Some("Cat")),
+            ("cat.ts", "id", P, Some("Cat")),
+            ("dog.ts", "Dog", C, None),
+            ("dog.ts", "name", P, Some("Dog")),
+        ];
+        for mut facts in both(&decls) {
+            facts.containers = vec![None, Some(0), Some(0), None, Some(3)];
+            let caller = FileMeta::from_path("use.ts");
+            let run = |name: &str, form: SiteForm| {
+                let gate = Gate::new(
+                    &facts,
+                    Site {
+                        caller,
+                        caller_file: "use.ts",
+                        caller_owner: None,
+                        heritage: &[],
+                        form,
+                        name,
+                        imports: &[],
+                    },
+                );
+                let candidates = facts.named(name);
+                global(
+                    &facts,
+                    "use.ts",
+                    caller,
+                    ResolveTarget::Field,
+                    false,
+                    || gate.admitted(candidates.iter().copied()),
+                    |_| false,
+                )
+            };
+            assert_eq!(run("name", SiteForm::FieldRead), bound(4, Tier::Global));
+            assert_eq!(
+                run("id", SiteForm::FieldRead),
+                Resolution::NoEdge(NoEdge::Unresolved)
+            );
+            assert_eq!(
+                run("name", SiteForm::Value),
+                Resolution::NoEdge(NoEdge::Ambiguous(2)),
+                "a name lookup keeps both candidates"
+            );
         }
     }
 
