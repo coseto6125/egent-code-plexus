@@ -63,7 +63,7 @@ impl CCallable {
         let mut name = "";
         let mut len = 0usize;
         for text in params {
-            if len % 2 == 0 {
+            if len.is_multiple_of(2) {
                 name = text;
             } else if !text.trim().is_empty() {
                 hash_type(&mut hasher, text);
