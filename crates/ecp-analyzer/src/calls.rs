@@ -174,10 +174,7 @@ fn enclosing_container_span(
         .iter()
         .enumerate()
         .filter(|(_, node)| {
-            matches!(
-                node.kind,
-                NodeKind::Function | NodeKind::Method | NodeKind::Constructor
-            ) && crate::framework_helpers::span_contains(node.span, span)
+            is_container_kind(node.kind) && crate::framework_helpers::span_contains(node.span, span)
         })
         .min_by_key(|(_, node)| crate::framework_helpers::span_area(node.span))
         .map(|(i, _)| i)
@@ -231,10 +228,10 @@ pub fn reference_function_span(
     span: crate::framework_helpers::Span,
     name: &str,
     nodes: &mut [RawNode],
-) -> Option<usize> {
-    let holder = enclosing_container_span(span, nodes)?;
-    push_function_reference(holder, name, nodes);
-    Some(holder)
+) {
+    if let Some(holder) = enclosing_container_span(span, nodes) {
+        push_function_reference(holder, name, nodes);
+    }
 }
 
 fn push_function_reference(holder: usize, name: &str, nodes: &mut [RawNode]) {
@@ -332,7 +329,7 @@ fn field_reads_walk(
     while let Some(frame) = stack.pop() {
         let n = frame.node;
         let kind = memo.kind(n);
-        if kind & kind_flag::FIELD_ACCESS != 0 && !is_call_callee(n, frame.parent) {
+        if kind & kind_flag::FIELD_ACCESS != 0 && !is_direct_callee(n, frame.parent) {
             if let Some(name) = field_name_from(n, source) {
                 reads.push(PendingCall {
                     pos: start_pos(n),
@@ -454,18 +451,8 @@ impl LiteralKeyFacts {
     }
 }
 
-/// True when `access`, or a parenthesized wrapper of it (`(a.m)()`), is the
-/// callee of a call: `parent` (`access`'s parent) or the first
-/// non-parenthesized ancestor is a call/invocation whose `function` field is
-/// that node. Such nodes are method calls handled by `extract_calls`, not
-/// data-field reads or method values.
-pub(crate) fn is_call_callee(access: Node<'_>, parent: Option<Node<'_>>) -> bool {
-    let mut outer = access;
-    let mut parent = parent;
-    while let Some(wrapper) = parent.filter(|p| p.kind() == "parenthesized_expression") {
-        outer = wrapper;
-        parent = wrapper.parent();
-    }
+/// True when `parent` is a call/invocation whose `function` field is `callee`.
+fn is_function_of_call(callee: Node<'_>, parent: Option<Node<'_>>) -> bool {
     let Some(parent) = parent else {
         return false;
     };
@@ -476,7 +463,26 @@ pub(crate) fn is_call_callee(access: Node<'_>, parent: Option<Node<'_>>) -> bool
             | "function_call_expression"
             | "invocation_expression"
             | "call"
-    ) && parent.child_by_field_name("function").map(|f| f.id()) == Some(outer.id())
+    ) && parent.child_by_field_name("function").map(|f| f.id()) == Some(callee.id())
+}
+
+/// True when `access` is the direct callee of a call: such nodes are method
+/// calls handled by `extract_calls`, not data-field reads. A parenthesized
+/// callee `(self.f)(x)` is not direct: it still reads the field `f`.
+fn is_direct_callee(access: Node<'_>, parent: Option<Node<'_>>) -> bool {
+    is_function_of_call(access, parent)
+}
+
+/// [`is_direct_callee`] seen through parentheses (`(a.m)()`): the method-value
+/// arms skip such an access because a call already records it.
+pub(crate) fn is_call_callee(access: Node<'_>, parent: Option<Node<'_>>) -> bool {
+    let mut outer = access;
+    let mut parent = parent;
+    while let Some(wrapper) = parent.filter(|p| p.kind() == "parenthesized_expression") {
+        outer = wrapper;
+        parent = wrapper.parent();
+    }
+    is_function_of_call(outer, parent)
 }
 
 /// `node` with the parentheses around it removed: the callee `(a.m)` of

@@ -411,16 +411,8 @@ pub fn extract_swift_calls_and_path_literals(
     while let Some(n) = stack.pop() {
         match n.kind() {
             "call_expression" => {
-                if let Some(mut callee) = swift_callee_node(n) {
+                if let Some(callee) = swift_callee_node(n) {
                     callees.insert(callee.id());
-                    // `(c.m)(1)`: a parenthesized callee is a one-element tuple.
-                    while callee.kind() == "tuple_expression" && callee.named_child_count() == 1 {
-                        let Some(inner) = callee.named_child(0) else {
-                            break;
-                        };
-                        callee = inner;
-                        callees.insert(callee.id());
-                    }
                 }
                 if let Some(callee) = swift_callee_name(n, source, bindings, nodes) {
                     attach_to_enclosing(start_pos(n), callee, nodes);
@@ -489,7 +481,8 @@ fn method_value(navigation: Node<'_>, source: &[u8], bindings: &SwiftBindings) -
 /// argument list. tree-sitter-swift 0.7.4 attaches a prefix or binary
 /// operator to the callee, so `!a.m(x)` parses as `(!a.m)(x)` and
 /// `a + b.m(x)` as `(a + b.m)(x)`; a trailing closure does the same through
-/// `??`, a ternary and a range. The implicit member `.m(x)` is also a
+/// `??`, a ternary and a range. A parenthesized callee `(c.m)(1)` is a
+/// one-element tuple and unwraps to its element. The implicit member `.m(x)` is also a
 /// `prefix_expression` and stays opaque: it names no callable by itself.
 fn swift_callee_node(call: Node<'_>) -> Option<Node<'_>> {
     let mut target = first_named_where(call, |ch| ch.kind() != "call_suffix")?;
@@ -501,6 +494,7 @@ fn swift_callee_node(call: Node<'_>) -> Option<Node<'_>> {
         "nil_coalescing_expression" => target.child_by_field_name("if_nil"),
         "ternary_expression" => target.child_by_field_name("if_false"),
         "range_expression" => target.child_by_field_name("end"),
+        "tuple_expression" if target.named_child_count() == 1 => target.named_child(0),
         _ => target.child_by_field_name("rhs"),
     } {
         target = inner;

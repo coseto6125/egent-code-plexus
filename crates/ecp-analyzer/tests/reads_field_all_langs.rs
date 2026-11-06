@@ -165,6 +165,20 @@ func readTimeout(c Config) int { return c.Timeout }
     assert_reads_field(&build(&p, "a.go", src), "Timeout");
 }
 
+/// Stands for: a parenthesized callee `(s.f)(1)` calls a field's value, so it
+/// reads the field `f`. (C++ `(o->fp)(1)` has no test: a function-pointer
+/// member `int (*fp)(int)` yields no Property node to read.)
+#[test]
+fn go_parenthesized_field_call_reads_field() {
+    let p = ecp_analyzer::go::parser::GoProvider::new().unwrap();
+    let src = r#"
+package main
+type S struct { f func(int) }
+func fire(s S) { (s.f)(1) }
+"#;
+    assert_reads_field(&build(&p, "a.go", src), "f");
+}
+
 #[test]
 fn rust_reads_field() {
     let p = ecp_analyzer::rust::parser::RustProvider::new().unwrap();

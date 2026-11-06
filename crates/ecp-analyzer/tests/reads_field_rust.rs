@@ -97,3 +97,22 @@ fn driver(c: &Config) -> u32 {
         "method call `compute` must not produce a ReadsField edge"
     );
 }
+
+/// Stands for: a parenthesized callee `(self.callback)(x)` calls a field's
+/// value, so it reads the field `callback`; a method call `self.m(x)` does not.
+#[test]
+fn rust_parenthesized_field_call_emits_reads_field_edge() {
+    let src = r#"
+pub struct Hook { pub callback: fn(u32) }
+impl Hook {
+    pub fn fire(&self, x: u32) { (self.callback)(x) }
+}
+"#;
+    let g = build_graph("hook.rs", src);
+    let read = g.edges.iter().any(|e| {
+        e.rel_type == RelType::ReadsField
+            && node_name(&g, e.source) == "fire"
+            && node_name(&g, e.target) == "callback"
+    });
+    assert!(read, "`(self.callback)(x)` reads the field `callback`");
+}

@@ -734,6 +734,11 @@ fn method_group(
     .ok()?;
     let receiver = access.child_by_field_name("expression")?;
     let pos = start_pos(access);
+    if is_call_callee(access, parent)
+        || parent.is_some_and(|parent| is_same_kind_field(access, parent, "expression"))
+    {
+        return None;
+    }
     // Classify only a receiver whose type a lookup holds: the member scan
     // of an unknown name walks every node, and an access is far more
     // frequent than a call. `this.P` of a field or property the type
@@ -746,11 +751,6 @@ fn method_group(
         _ => false,
     };
     if !known {
-        return None;
-    }
-    if is_call_callee(access, parent)
-        || parent.is_some_and(|parent| is_same_kind_field(access, parent, "expression"))
-    {
         return None;
     }
     match classify_receiver(receiver, pos, source, locals, nodes)? {

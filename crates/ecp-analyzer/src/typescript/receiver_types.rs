@@ -29,7 +29,8 @@ use crate::dynamic_imports::{
     DynamicImports,
 };
 use crate::framework_helpers::{
-    enclosing_class, js_ts_first_arg_is_literal_string, node_span, span_area, span_contains, Span,
+    enclosing_class, innermost_class, is_class_like, js_ts_first_arg_is_literal_string, node_span,
+    Span,
 };
 use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
 use ecp_core::graph::NodeKind;
@@ -125,6 +126,13 @@ pub fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
                 bindings.push((fn_span, names));
             }
         }
+        if let Some(declaration) = statement_declaration(n) {
+            let mut names: HashSet<String> = HashSet::new();
+            insert_pattern_names(declaration, source, &mut names);
+            if !names.is_empty() {
+                bindings.push((node_range(n), names));
+            }
+        }
         let mut c = n.walk();
         for child in n.children(&mut c) {
             stack.push(child);
@@ -205,20 +213,40 @@ fn collect_typed_vars(
     }
 }
 
-/// Every name a destructuring pattern (`{ a, b: c }`, `[d, ...e]`, `...f`) binds.
+/// Every name a destructuring pattern (`{ a, b: c }`, `[d, ...e]`, `...f`)
+/// binds. A default (`{ y = obj }`) binds only its left side and a computed
+/// key (`{ [k]: v }`) only its value pattern: the default expression and the
+/// key expression read names, they declare none.
 fn insert_pattern_names(pattern: Node<'_>, source: &[u8], out: &mut HashSet<String>) {
     let mut stack = vec![pattern];
     while let Some(n) = stack.pop() {
-        if matches!(
-            n.kind(),
-            "identifier" | "shorthand_property_identifier_pattern"
-        ) {
-            if let Ok(name) = n.utf8_text(source) {
-                out.insert(name.to_string());
+        match n.kind() {
+            "identifier" | "shorthand_property_identifier_pattern" => {
+                if let Ok(name) = n.utf8_text(source) {
+                    out.insert(name.to_string());
+                }
+            }
+            "object_assignment_pattern" | "assignment_pattern" => {
+                stack.extend(n.child_by_field_name("left"));
+            }
+            "pair_pattern" => stack.extend(n.child_by_field_name("value")),
+            _ => {
+                let mut c = n.walk();
+                stack.extend(n.named_children(&mut c));
             }
         }
-        let mut c = n.walk();
-        stack.extend(n.named_children(&mut c));
+    }
+}
+
+/// The declaration a statement opens for the names it scopes to itself:
+/// `for (const x of xs)` and `catch (x)`.
+fn statement_declaration(n: Node<'_>) -> Option<Node<'_>> {
+    match n.kind() {
+        "for_in_statement" => n
+            .child_by_field_name("kind")
+            .and(n.child_by_field_name("left")),
+        "catch_clause" => n.child_by_field_name("parameter"),
+        _ => None,
     }
 }
 
@@ -679,12 +707,7 @@ impl ThisFacts {
                 .collect(),
             classes: nodes
                 .iter()
-                .filter(|n| {
-                    matches!(
-                        n.kind,
-                        NodeKind::Class | NodeKind::Struct | NodeKind::Trait | NodeKind::Interface
-                    )
-                })
+                .filter(|n| is_class_like(n.kind))
                 .map(|n| (n.name.clone(), n.span))
                 .collect(),
         }
@@ -692,11 +715,13 @@ impl ThisFacts {
 
     /// The innermost class holding `inner`, as `enclosing_class` finds it.
     fn class_at(&self, inner: Span) -> Option<&str> {
-        self.classes
-            .iter()
-            .filter(|(_, span)| span_contains(*span, inner))
-            .min_by_key(|(_, span)| span_area(*span))
-            .map(|(name, _)| name.as_str())
+        innermost_class(
+            self.classes
+                .iter()
+                .map(|(name, span)| (name.as_str(), *span)),
+            inner,
+        )
+        .map(|(name, _)| name)
     }
 }
 
@@ -734,8 +759,9 @@ fn this_class<'f>(member: Node<'_>, facts: &'f ThisFacts) -> Option<&'f str> {
 
 /// `obj.m` in value position (`xs.forEach(obj.m)`, `const f = this.m`,
 /// `xs.forEach(this.m.bind(this))`) where `obj` is `this` or, given `locals`,
-/// a parameter or local annotated with a class `T`: the method `T.m` (the
-/// enclosing class's for `this`), typed as the call `obj.m()` is. The name
+/// a parameter or local annotated with a class `T`: the method `T.m` (for
+/// `this`, the class [`this_class`] finds by its nearest-method rule), typed as
+/// the call `obj.m()` is. The name
 /// scan drops `obj.m`, as `obj` is a local, and records no `this.m`. A
 /// callee (parenthesized or not), the object of a longer member expression
 /// (`.bind` aside), an assignment target, a data member read through `this`,
@@ -790,10 +816,10 @@ pub(crate) fn bound_method_value(
             }
             this_class(member, facts)?.to_string()
         }
-        "identifier" => locals?
+        // The guard above admits only `this` and an identifier.
+        _ => locals?
             .lookup_visible(start_pos(member), object.utf8_text(source).ok()?)?
             .to_string(),
-        _ => return None,
     };
     Some(format!("{ty}.{property}"))
 }

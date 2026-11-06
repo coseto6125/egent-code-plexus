@@ -216,17 +216,34 @@ pub fn enclosing_fn_idx_by_span(nodes: &[RawNode], row: u32, col: u32) -> Option
 /// (module-level fn/call). Accepts `Class | Struct | Trait | Interface`
 /// since the parity-14-langs work split Rust `struct` into its own variant.
 pub fn enclosing_class(nodes: &[RawNode], inner_span: Span) -> Option<(String, Span)> {
-    nodes
-        .iter()
-        .filter(|n| {
-            matches!(
-                n.kind,
-                NodeKind::Class | NodeKind::Struct | NodeKind::Trait | NodeKind::Interface
-            )
-        })
-        .filter(|n| span_contains(n.span, inner_span))
-        .min_by_key(|n| span_area(n.span))
-        .map(|n| (n.name.clone(), n.span))
+    innermost_class(
+        nodes
+            .iter()
+            .filter(|n| is_class_like(n.kind))
+            .map(|n| (n.name.as_str(), n.span)),
+        inner_span,
+    )
+    .map(|(name, span)| (name.to_string(), span))
+}
+
+/// Whether `kind` is a class-like container: `Class | Struct | Trait | Interface`.
+pub fn is_class_like(kind: NodeKind) -> bool {
+    matches!(
+        kind,
+        NodeKind::Class | NodeKind::Struct | NodeKind::Trait | NodeKind::Interface
+    )
+}
+
+/// The smallest of `classes` (name and span) holding `inner_span`. A caller
+/// that asks many times snapshots its classes once and calls this on them.
+pub fn innermost_class<'a>(
+    classes: impl IntoIterator<Item = (&'a str, Span)>,
+    inner_span: Span,
+) -> Option<(&'a str, Span)> {
+    classes
+        .into_iter()
+        .filter(|(_, span)| span_contains(*span, inner_span))
+        .min_by_key(|(_, span)| span_area(*span))
 }
 
 /// Span-containment owner_class stamping for 12 languages whose parser captures

@@ -112,6 +112,7 @@ fn test_bound_method_reference_java_this_receiver_binds_enclosing_class() {
     assert_one_cross_file(&found, "Cls.java", "m");
 }
 
+/// Stands for: handing one method on twice from one function is one edge.
 #[test]
 fn test_bound_method_reference_java_same_reference_twice_returns_one_edge() {
     let found = java_refs("xs.forEach(c::m);\n        xs.forEach(c::m);");
@@ -189,6 +190,13 @@ fn kotlin_graph(body: &str) -> ZeroCopyGraph {
 #[test]
 fn test_bound_method_reference_kotlin_parameter_receiver_binds_its_type() {
     let g = kotlin_graph("xs.forEach(c::m)");
+    assert_one_cross_file(&function_refs(&g, "run"), "Cls.kt", "m");
+}
+
+/// Stands for: handing one method on twice from one function is one edge.
+#[test]
+fn test_bound_method_reference_kotlin_same_reference_twice_returns_one_edge() {
+    let g = kotlin_graph("xs.forEach(c::m)\n    xs.forEach(c::m)");
     assert_one_cross_file(&function_refs(&g, "run"), "Cls.kt", "m");
 }
 
@@ -275,12 +283,15 @@ fn test_bound_method_reference_go_call_keeps_calls_edge_only() {
     assert_call_only(&g, "run", "types.go", "M");
 }
 
+/// Stands for: a parenthesized callee `(c.m)(1)` is a call, never a method
+/// value, and records the `Calls` edge `c.m(1)` records.
 #[test]
 fn test_bound_method_reference_go_parenthesized_call_keeps_calls_edge_only() {
     let g = go_graph("func run(t T) {\n\t(t.M)(1)\n}");
     assert_call_only(&g, "run", "types.go", "M");
 }
 
+/// Stands for: handing one method on twice from one function is one edge.
 #[test]
 fn test_bound_method_reference_go_same_reference_twice_returns_one_edge() {
     let g = go_graph("func run(t T) {\n\tapply(t.M)\n\tapply(t.M)\n}");
@@ -340,12 +351,19 @@ fn test_bound_method_reference_swift_call_keeps_calls_edge_only() {
     assert_call_only(&g, "run", "Cls.swift", "m");
 }
 
-// Stands for: a parenthesized callee `(c.m)(1)` is a call, never a method
-// value. Its Calls edge is not asserted: only the absent References is.
+/// Stands for: a parenthesized callee `(c.m)(1)` is a call, never a method
+/// value, and records the `Calls` edge `c.m(1)` records.
 #[test]
-fn test_bound_method_reference_swift_parenthesized_call_returns_no_edge() {
+fn test_bound_method_reference_swift_parenthesized_call_keeps_calls_edge_only() {
     let g = swift_graph("(c.m)(1)");
-    assert_eq!(function_refs(&g, "run"), none());
+    assert_call_only(&g, "run", "Cls.swift", "m");
+}
+
+/// Stands for: handing one method on twice from one function is one edge.
+#[test]
+fn test_bound_method_reference_swift_same_reference_twice_returns_one_edge() {
+    let g = swift_graph("xs.forEach(c.m)\n    xs.forEach(c.m)");
+    assert_one_cross_file(&function_refs(&g, "run"), "Cls.swift", "m");
 }
 
 #[test]
@@ -406,11 +424,12 @@ fn test_bound_method_reference_dart_call_keeps_calls_edge_only() {
 /// Stands for: a parenthesized callee `(c.m)(1)` is a call, never a method
 /// value, and records the `Calls` edge `c.m(1)` records.
 #[test]
-fn test_bound_method_reference_dart_parenthesized_call_returns_no_edge() {
+fn test_bound_method_reference_dart_parenthesized_call_keeps_calls_edge_only() {
     let g = dart_graph("(c.m)(1);");
     assert_call_only(&g, "run", "cls.dart", "m");
 }
 
+/// Stands for: handing one method on twice from one function is one edge.
 #[test]
 fn test_bound_method_reference_dart_same_reference_twice_returns_one_edge() {
     let g = dart_graph("xs.forEach(c.m);\n  xs.forEach(c.m);");
@@ -484,12 +503,15 @@ fn test_bound_method_reference_csharp_call_keeps_calls_edge_only() {
     assert_call_only(&g, "Run", "Cls.cs", "M");
 }
 
+/// Stands for: a parenthesized callee `(c.m)(1)` is a call, never a method
+/// value, and records the `Calls` edge `c.m(1)` records.
 #[test]
 fn test_bound_method_reference_csharp_parenthesized_call_keeps_calls_edge_only() {
     let g = csharp_graph("(c.M)(1);");
     assert_call_only(&g, "Run", "Cls.cs", "M");
 }
 
+/// Stands for: handing one method on twice from one function is one edge.
 #[test]
 fn test_bound_method_reference_csharp_same_reference_twice_returns_one_edge() {
     let g = csharp_graph("xs.ForEach(c.M);\n        xs.ForEach(c.M);");
@@ -560,11 +582,12 @@ fn test_bound_method_reference_python_call_keeps_calls_edge_only() {
 /// Stands for: a parenthesized callee `(obj.m)(1)` is a call, never a method
 /// value, and records the `Calls` edge `obj.m(1)` records.
 #[test]
-fn test_bound_method_reference_python_parenthesized_call_returns_no_edge() {
+fn test_bound_method_reference_python_parenthesized_call_keeps_calls_edge_only() {
     let g = python_graph("(obj.m)(1)");
     assert_call_only(&g, "run", "cls.py", "m");
 }
 
+/// Stands for: handing one method on twice from one function is one edge.
 #[test]
 fn test_bound_method_reference_python_same_reference_twice_returns_one_edge() {
     let g = python_graph("list(map(obj.m, xs))\n    list(map(obj.m, xs))");
@@ -647,18 +670,21 @@ fn test_bound_method_reference_typescript_call_keeps_calls_edge_only() {
 /// Stands for: a parenthesized callee `(obj.m)(1)` / `(this.m)()` is a call,
 /// never a method value, and records the `Calls` edge `obj.m(1)` records.
 #[test]
-fn test_bound_method_reference_typescript_parenthesized_call_returns_no_edge() {
+fn test_bound_method_reference_typescript_parenthesized_call_keeps_calls_edge_only() {
     let g = ts_graph("(obj.m)(1);");
     assert_call_only(&g, "run", "cls.ts", "m");
 }
 
+/// Stands for: a parenthesized `(this.m)()` is a call and records its `Calls`
+/// edge, never a method value.
 #[test]
-fn test_bound_method_reference_typescript_parenthesized_this_call_returns_no_edge() {
+fn test_bound_method_reference_typescript_parenthesized_this_call_keeps_calls_edge_only() {
     let src = "class C {\n  m(): void {}\n  run(): void {\n    (this.m)();\n  }\n}\n";
     let g = graph(&TypeScriptProvider::new().unwrap(), &[("c.ts", src)]);
     assert_call_only(&g, "run", "c.ts", "m");
 }
 
+/// Stands for: handing one method on twice from one function is one edge.
 #[test]
 fn test_bound_method_reference_typescript_same_reference_twice_returns_one_edge() {
     let g = ts_graph("xs.forEach(obj.m);\n  xs.forEach(obj.m);");
@@ -717,13 +743,16 @@ fn test_bound_method_reference_javascript_call_keeps_calls_edge_only() {
     assert_call_only(&js_graph(), "callIt", "cls.js", "m");
 }
 
+/// Stands for: a parenthesized callee `(c.m)(1)` is a call, never a method
+/// value, and records the `Calls` edge `c.m(1)` records.
 #[test]
-fn test_bound_method_reference_javascript_parenthesized_this_call_returns_no_edge() {
+fn test_bound_method_reference_javascript_parenthesized_this_call_keeps_calls_edge_only() {
     let src = "export class C {\n  m() {}\n  run() {\n    (this.m)();\n  }\n}\n";
     let g = graph(&JavaScriptProvider::new().unwrap(), &[("c.js", src)]);
     assert_call_only(&g, "run", "c.js", "m");
 }
 
+/// Stands for: handing one method on twice from one function is one edge.
 #[test]
 fn test_bound_method_reference_javascript_same_reference_twice_returns_one_edge() {
     let src = "export class C {\n  m() {}\n  run(xs) {\n    xs.forEach(this.m);\n    xs.forEach(this.m);\n  }\n}\n";
@@ -752,6 +781,18 @@ fn ruby_graph() -> ZeroCopyGraph {
 #[test]
 fn test_bound_method_reference_ruby_constructed_receiver_binds_its_type() {
     assert_one_cross_file(&function_refs(&ruby_graph(), "built"), "cls.rb", "m");
+}
+
+/// Stands for: handing one method on twice from one function is one edge.
+#[test]
+fn test_bound_method_reference_ruby_same_reference_twice_returns_one_edge() {
+    let twice =
+        "def twice(xs)\n  xs.each(&Cls.new.method(:m))\n  xs.each(&Cls.new.method(:m))\nend\n";
+    let g = graph(
+        &RubyProvider::new().unwrap(),
+        &[("cls.rb", RB_CLS), ("use.rb", twice)],
+    );
+    assert_one_cross_file(&function_refs(&g, "twice"), "cls.rb", "m");
 }
 
 #[test]
@@ -866,6 +907,91 @@ fn test_bound_method_reference_typescript_inner_local_declaration_returns_no_edg
 fn test_bound_method_reference_typescript_inner_function_without_own_binding_keeps_outer_type() {
     let g = ts_graph("const k = () => xs.forEach(obj.m);");
     assert_one_cross_file(&function_refs(&g, "k"), "cls.ts", "m");
+}
+
+/// Stands for: a lambda parameter, a comprehension variable, a `for` target
+/// and a `with ... as` name each declare `obj` anew, so the outer `obj: Cls`
+/// does not type the receiver. HEAD binds `Cls.m` for each.
+#[test]
+fn test_bound_method_reference_python_lambda_parameter_shadows_outer_type_returns_no_edge() {
+    let g = python_graph("f = lambda obj: list(map(obj.m, xs))");
+    assert_eq!(function_refs(&g, "run"), none());
+}
+
+#[test]
+fn test_bound_method_reference_python_comprehension_variable_shadows_outer_type_returns_no_edge() {
+    let g = python_graph("return [list(map(obj.m, xs)) for obj in loose]");
+    assert_eq!(function_refs(&g, "run"), none());
+}
+
+#[test]
+fn test_bound_method_reference_python_for_target_shadows_outer_type_returns_no_edge() {
+    let g = python_graph(
+        "def inner():\n        for obj in loose:\n            list(map(obj.m, xs))\n    return inner",
+    );
+    assert_eq!(function_refs(&g, "inner"), none());
+}
+
+#[test]
+fn test_bound_method_reference_python_with_as_name_shadows_outer_type_returns_no_edge() {
+    let g = python_graph(
+        "def inner():\n        with loose as obj:\n            list(map(obj.m, xs))\n    return inner",
+    );
+    assert_eq!(function_refs(&g, "inner"), none());
+}
+
+/// Stands for: a lambda or comprehension that binds another name leaves the
+/// outer `obj: Cls` typing the receiver.
+#[test]
+fn test_bound_method_reference_python_lambda_and_comprehension_of_other_name_keep_outer_type() {
+    let g = python_graph("f = lambda y: list(map(obj.m, xs))");
+    assert_one_cross_file(&function_refs(&g, "run"), "cls.py", "m");
+    let g = python_graph("return [list(map(obj.m, xs)) for y in loose]");
+    assert_one_cross_file(&function_refs(&g, "run"), "cls.py", "m");
+}
+
+/// Stands for: a destructuring default `{ y = obj }` and a computed key
+/// `{ [obj]: v }` read `obj`, they do not declare it, so the outer
+/// `obj: Cls` still types `obj.m`. HEAD loses the edge.
+#[test]
+fn test_bound_method_reference_typescript_destructuring_default_keeps_outer_type() {
+    let g = ts_graph("function inner({ y = obj }: any) {\n    return xs.forEach(obj.m);\n  }");
+    assert_one_cross_file(&function_refs(&g, "inner"), "cls.ts", "m");
+}
+
+#[test]
+fn test_bound_method_reference_typescript_destructuring_computed_key_keeps_outer_type() {
+    let g = ts_graph("const c = ({ [obj]: v }: any) => xs.forEach(obj.m);");
+    assert_one_cross_file(&function_refs(&g, "c"), "cls.ts", "m");
+}
+
+/// Stands for: a destructuring default's own left name is a binding, so
+/// `({ obj = 1 })` rebinds `obj`.
+#[test]
+fn test_bound_method_reference_typescript_destructuring_default_left_name_returns_no_edge() {
+    let g = ts_graph("const d = ({ obj = 1 }: any) => xs.forEach(obj.m);");
+    assert_eq!(function_refs(&g, "d"), none());
+}
+
+/// Stands for: `for (const obj of ...)` and `catch (obj)` declare `obj` anew.
+/// HEAD binds `Cls.m` for both.
+#[test]
+fn test_bound_method_reference_typescript_for_of_variable_shadows_outer_type_returns_no_edge() {
+    let g = ts_graph("for (const obj of loose) {\n    xs.forEach(obj.m);\n  }");
+    assert_eq!(function_refs(&g, "run"), none());
+}
+
+#[test]
+fn test_bound_method_reference_typescript_catch_parameter_shadows_outer_type_returns_no_edge() {
+    let g = ts_graph("try {\n    xs.length;\n  } catch (obj) {\n    xs.forEach(obj.m);\n  }");
+    assert_eq!(function_refs(&g, "run"), none());
+}
+
+/// Stands for: a `for ... of` over another name leaves the outer typing.
+#[test]
+fn test_bound_method_reference_typescript_for_of_other_variable_keeps_outer_type() {
+    let g = ts_graph("for (const z of loose) {\n    xs.forEach(obj.m);\n  }");
+    assert_one_cross_file(&function_refs(&g, "run"), "cls.ts", "m");
 }
 
 // Stands for: `this` is the class only in a method of its body (or a field

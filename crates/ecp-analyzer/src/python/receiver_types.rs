@@ -49,8 +49,9 @@ pub struct LocalTypes {
     shadows: Vec<FunctionBindings>,
 }
 
-/// The names one function binds: a parameter at 0, an assignment at its
-/// byte offset.
+/// The names one scope binds (a function, lambda or comprehension): a
+/// parameter or comprehension variable at 0, an assignment, `for` target or
+/// `with ... as` name at its byte offset.
 #[derive(Debug)]
 struct FunctionBindings {
     bytes: (usize, usize),
@@ -72,7 +73,12 @@ enum ImportedBinding {
 
 impl LocalTypes {
     fn lookup(&self, pos: Pos, var: &str) -> Option<&str> {
-        let mut best: Option<&str> = None;
+        self.nearest_typed(pos, var).map(|(_, ty)| ty)
+    }
+
+    /// The start of the smallest scope around `pos` that types `var`, and the type.
+    fn nearest_typed(&self, pos: Pos, var: &str) -> Option<(Pos, &str)> {
+        let mut best: Option<(Pos, &str)> = None;
         let mut best_width = (u32::MAX, i64::MAX);
         for ((start, end), map) in &self.scopes {
             if *start <= pos && pos <= *end {
@@ -80,7 +86,7 @@ impl LocalTypes {
                     let w = range_width((*start, *end));
                     if w < best_width {
                         best_width = w;
-                        best = Some(t.as_str());
+                        best = Some((*start, t.as_str()));
                     }
                 }
             }
@@ -89,24 +95,11 @@ impl LocalTypes {
     }
 
     /// [`LocalTypes::lookup`] for a receiver in a value position: the type
-    /// stands only when no function nearer than the one that typed `var`
-    /// rebinds the name (`def inner(x): return x.m` inside `def outer(x: A)`).
+    /// stands only when no scope nearer than the one that typed `var` rebinds
+    /// the name (`def inner(x): return x.m` inside `def outer(x: A)`, or a
+    /// lambda, comprehension, `for` or `with ... as` that binds it).
     fn lookup_visible(&self, receiver: Node<'_>, var: &str) -> Option<&str> {
-        let pos = start_pos(receiver);
-        let mut typed: Option<(Pos, &str)> = None;
-        let mut best_width = (u32::MAX, i64::MAX);
-        for ((start, end), map) in &self.scopes {
-            if *start <= pos && pos <= *end {
-                if let Some(t) = map.get(var) {
-                    let w = range_width((*start, *end));
-                    if w < best_width {
-                        best_width = w;
-                        typed = Some((*start, t.as_str()));
-                    }
-                }
-            }
-        }
-        let (typed_start, ty) = typed?;
+        let (typed_start, ty) = self.nearest_typed(start_pos(receiver), var)?;
         let rebound_nearer = self
             .shadows
             .iter()
@@ -153,6 +146,9 @@ pub fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
         if matches!(n.kind(), "import_statement" | "import_from_statement") {
             collect_import_bindings(n, source, &mut imported);
         }
+        if let Some(bindings) = inline_scope_bindings(n, source) {
+            shadows.push(bindings);
+        }
         if n.kind() == "function_definition" {
             let fn_span = node_range(n);
             let mut map: HashMap<String, String> = HashMap::new();
@@ -189,16 +185,18 @@ pub fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
                     ) {
                         continue;
                     }
-                    if matches!(
-                        node.kind(),
-                        "assignment" | "augmented_assignment" | "named_expression"
-                    ) {
-                        if let Some(left) = node
+                    let target = match node.kind() {
+                        "assignment"
+                        | "augmented_assignment"
+                        | "named_expression"
+                        | "for_statement" => node
                             .child_by_field_name("left")
-                            .or_else(|| node.child_by_field_name("name"))
-                        {
-                            collect_shadow_names(left, source, node.start_byte(), &mut names);
-                        }
+                            .or_else(|| node.child_by_field_name("name")),
+                        "as_pattern" => node.child_by_field_name("alias"),
+                        _ => None,
+                    };
+                    if let Some(target) = target {
+                        collect_shadow_names(target, source, node.start_byte(), &mut names);
                     }
                     let mut cursor = node.walk();
                     pending.extend(node.named_children(&mut cursor));
@@ -228,6 +226,49 @@ pub fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
     }
 }
 
+/// The names a lambda (its parameters) or a comprehension (its `for`
+/// variables) binds, visible across the whole expression.
+fn inline_scope_bindings(n: Node<'_>, source: &[u8]) -> Option<FunctionBindings> {
+    let mut names = HashMap::new();
+    match n.kind() {
+        "lambda" => {
+            let params = n.child_by_field_name("parameters")?;
+            let mut cursor = params.walk();
+            for parameter in params.named_children(&mut cursor) {
+                let binding = match parameter.kind() {
+                    "default_parameter" | "typed_default_parameter" => {
+                        parameter.child_by_field_name("name")
+                    }
+                    _ => Some(parameter),
+                };
+                if let Some(binding) = binding {
+                    collect_shadow_names(binding, source, 0, &mut names);
+                }
+            }
+        }
+        "list_comprehension"
+        | "set_comprehension"
+        | "dictionary_comprehension"
+        | "generator_expression" => {
+            let mut cursor = n.walk();
+            for clause in n
+                .named_children(&mut cursor)
+                .filter(|clause| clause.kind() == "for_in_clause")
+            {
+                if let Some(left) = clause.child_by_field_name("left") {
+                    collect_shadow_names(left, source, 0, &mut names);
+                }
+            }
+        }
+        _ => return None,
+    }
+    (!names.is_empty()).then(|| FunctionBindings {
+        bytes: (n.start_byte(), n.end_byte()),
+        start: node_range(n).0,
+        names,
+    })
+}
+
 fn collect_shadow_names(
     node: Node<'_>,
     source: &[u8],
@@ -246,6 +287,9 @@ fn collect_shadow_names(
         "pattern_list"
         | "tuple_pattern"
         | "list_pattern"
+        | "tuple"
+        | "list"
+        | "as_pattern_target"
         | "list_splat_pattern"
         | "dictionary_splat_pattern" => {
             let mut cursor = node.walk();
