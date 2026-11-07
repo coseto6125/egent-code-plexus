@@ -776,6 +776,38 @@ fn test_value_read_rust_macro_turbofish_type_path_returns_no_edge() {
     assert_eq!(value_reads(&g, "show"), none());
 }
 
+/// Nested generics close with one `>>` token; the `::` after it still makes
+/// `Wrap` a path.
+#[test]
+fn test_value_read_rust_macro_nested_turbofish_type_path_returns_no_edge() {
+    let g = graph(
+        &RustProvider::new().unwrap(),
+        &[(
+            "src/lib.rs",
+            "pub const Wrap: u8 = 1;\npub fn show() { println!(\"{}\", Wrap::<Vec<u8>>::BAR); }\n",
+        )],
+    );
+    assert_eq!(value_reads(&g, "show"), none());
+}
+
+/// A turbofish that closed ends at the next token: a later `<T>::NAME`
+/// does not make `handle` a path.
+#[test]
+fn test_function_reference_rust_macro_closed_turbofish_keeps_function_value() {
+    let g = graph(
+        &RustProvider::new().unwrap(),
+        &[(
+            "src/lib.rs",
+            "pub fn handle<T>() {}\npub fn reg() { let v = vec![handle::<u8>, <u8>::MAX]; }\n",
+        )],
+    );
+    assert!(
+        function_refs(&g, "reg").iter().any(|r| r.1 == "handle"),
+        "{:?}",
+        function_refs(&g, "reg")
+    );
+}
+
 /// A turbofish `handle::<u8>` names a function value; only a name before a
 /// path separator is a path segment.
 #[test]

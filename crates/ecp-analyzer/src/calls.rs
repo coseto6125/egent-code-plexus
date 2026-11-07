@@ -642,35 +642,58 @@ fn field_reads_walk(
 /// for its next sibling instead walks down from the root.
 #[derive(Default)]
 struct PathTokens {
-    /// Stack slot and kind flags of the previous token.
-    last: Option<(usize, u32)>,
+    /// Stack slot of the previous token.
+    last: Option<usize>,
     /// The name the last `::` marked.
     marked: Option<usize>,
-    /// The name of an open turbofish (`handle::<A>`), a value until a `::`
-    /// follows the `>` (`Foo::<u8>::BAR`).
+    /// The name of a turbofish (`handle::<A>`), a value unless a `::`
+    /// follows its closing `>` (`Foo::<u8>::BAR`).
     turbofish: Option<usize>,
+    /// The turbofish's open `<` count; 0 once it closed.
+    depth: u32,
 }
 
 impl PathTokens {
     fn see(&mut self, stack: &mut [Frame<'_>], kind: u32) {
         use kind_flag as k;
+        let slot = stack.len() - 1;
+        if self.depth == 0 {
+            if let Some(name) = self.turbofish.take() {
+                if kind & k::PATH_SEP != 0 {
+                    stack[name].field |= field_flag::BEFORE_PATH;
+                    self.marked = Some(name);
+                    self.last = Some(slot);
+                    return;
+                }
+            }
+        }
         if kind & k::PATH_SEP != 0 {
-            self.marked = match self.last {
-                Some((_, last)) if last & k::ANGLE_CLOSE != 0 => self.turbofish.take(),
-                last => last.map(|(slot, _)| slot),
-            };
-            if let Some(slot) = self.marked {
-                stack[slot].field |= field_flag::BEFORE_PATH;
+            self.marked = self.last;
+            if let Some(name) = self.marked {
+                stack[name].field |= field_flag::BEFORE_PATH;
             }
         } else if kind & k::ANGLE_OPEN != 0 {
-            if let Some(slot) = self.marked.take() {
-                stack[slot].field &= !field_flag::BEFORE_PATH;
-                self.turbofish = Some(slot);
+            if let Some(name) = self.marked.take() {
+                stack[name].field &= !field_flag::BEFORE_PATH;
+                self.turbofish = Some(name);
+                self.depth = 1;
+            } else if self.turbofish.is_some() {
+                self.depth += 1;
             }
         } else {
             self.marked = None;
+            if self.turbofish.is_some() {
+                let closed = if kind & k::ANGLE_CLOSE != 0 {
+                    1
+                } else if kind & k::SHIFT_CLOSE != 0 {
+                    2
+                } else {
+                    0
+                };
+                self.depth = self.depth.saturating_sub(closed);
+            }
         }
-        self.last = Some((stack.len() - 1, kind));
+        self.last = Some(slot);
     }
 }
 
@@ -990,8 +1013,10 @@ mod kind_flag {
     pub const PATH_SEP: u32 = 1 << 25;
     /// A `<` token.
     pub const ANGLE_OPEN: u32 = 1 << 26;
-    /// A `>` or `>>` token.
+    /// A `>` token.
     pub const ANGLE_CLOSE: u32 = 1 << 27;
+    /// A `>>` token: two closing `>` of nested generics.
+    pub const SHIFT_CLOSE: u32 = 1 << 28;
 }
 
 /// Bits [`KindMemo::field`] records for a field name.
@@ -1094,7 +1119,8 @@ impl<'a> KindMemo<'a> {
             (kind == ".", DOT),
             (kind == "::", PATH_SEP),
             (kind == "<", ANGLE_OPEN),
-            (matches!(kind, ">" | ">>"), ANGLE_CLOSE),
+            (kind == ">", ANGLE_CLOSE),
+            (kind == ">>", SHIFT_CLOSE),
             (spec.named_arg_parents.contains(&kind), NAMED_ARG_PARENT),
             (spec.global_decls.contains(&kind), GLOBAL_DECL),
             (
