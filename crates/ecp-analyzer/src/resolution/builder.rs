@@ -3113,10 +3113,16 @@ fn pass1_8_function_metas(
                     .collect();
                 meta_idx.sort_by_key(|(s, _)| *s);
                 for (raw_idx, raw_node) in local_graph.nodes.iter().enumerate() {
-                    if !matches!(
-                        raw_node.kind,
-                        NodeKind::Function | NodeKind::Method | NodeKind::Constructor
-                    ) {
+                    // A Rust test `const`/`static` holds calls and carries a
+                    // flags-only meta, so `--exclude-tests` can drop it. In
+                    // C, `const int f(void), x = 1;` gives the Const `x`
+                    // the span of `f`'s prototype meta: Rust only.
+                    let takes_meta = match raw_node.kind {
+                        NodeKind::Function | NodeKind::Method | NodeKind::Constructor => true,
+                        NodeKind::Const => file_language == Language::Rust,
+                        _ => false,
+                    };
+                    if !takes_meta {
                         continue;
                     }
                     let node_idx = base + raw_idx as u32;

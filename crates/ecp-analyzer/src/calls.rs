@@ -295,45 +295,83 @@ fn declared_in<'s>(at: Node<'_>, source: &'s [u8], within: PosRange) -> Vec<Decl
         if from < start || to.0 > end.0 {
             break;
         }
-        let paired = paired_declarators(parent, source);
-        if paired.is_empty() {
-            // C `int a, b = g();` lists the bare `a` in a `declarator` field
-            // next to the `init_declarator`; it still counts as a declarator.
-            let mut shared = named_fields(parent, "declarator");
-            if shared.len() < 2 {
-                let mut cursor = parent.walk();
-                shared = parent
-                    .named_children(&mut cursor)
-                    .filter(|child| is_declarator_kind(child.kind()))
-                    .collect();
-            }
-            if shared.len() >= 2 {
-                declarators.extend(shared.into_iter().map(|d| Declarator {
-                    range: node_range(d),
-                    name: declared_name(d.child_by_field_name("name").unwrap_or(d), source),
-                }));
-            }
-        } else {
-            declarators.extend(paired);
-        }
+        declarators.extend(statement_declarators(parent, source));
         node = parent;
     }
     declarators
 }
 
+/// The declarators of `statement` when it declares two or more values;
+/// empty otherwise. Calls ([`declared_in`]) and reads ([`field_reads_walk`])
+/// both split a shared statement by this rule.
+fn statement_declarators<'s>(statement: Node<'_>, source: &'s [u8]) -> Vec<Declarator<'s>> {
+    let paired = paired_declarators(statement, source);
+    if !paired.is_empty() {
+        return paired;
+    }
+    let range = node_range(statement);
+    // C `int a, b = g();` lists the bare `a` in a `declarator` field next to
+    // the `init_declarator`; it still counts as a declarator.
+    let mut shared = named_fields(statement, "declarator");
+    let by_field = shared.len() >= 2;
+    if !by_field {
+        let mut cursor = statement.walk();
+        shared = statement
+            .named_children(&mut cursor)
+            .filter(|child| is_declarator_kind(child.kind()))
+            .collect();
+    }
+    if shared.len() < 2 {
+        return Vec::new();
+    }
+    // A C++ member `int a, b = Y;` keeps `Y` in a `default_value` field, and
+    // `unsigned a : 1, b : W;` keeps `W` in a bitfield clause, after `b` and
+    // outside `b`'s node: each declarator there reaches to the next, and the
+    // last to the statement's last named child.
+    let mut ends: Vec<Pos> = shared.iter().map(|d| node_range(*d).1).collect();
+    if by_field {
+        for (end, next) in ends.iter_mut().zip(&shared[1..]) {
+            *end = node_range(*next).0;
+        }
+        let mut cursor = statement.walk();
+        if let Some(tail) = statement.named_children(&mut cursor).last() {
+            let last = ends.len() - 1;
+            ends[last] = ends[last].max(node_range(tail).1);
+        }
+    }
+    shared
+        .into_iter()
+        .zip(ends)
+        .map(|(d, to)| Declarator {
+            range: (node_range(d).0, to),
+            name: declared_name(d.child_by_field_name("name").unwrap_or(d), source),
+            statement: range,
+        })
+        .collect()
+}
+
 /// A node that declares one value of its statement and holds that value's
 /// initializer: `variable_declarator`, C `init_declarator`, Dart
-/// `initialized_identifier`.
+/// `initialized_identifier`, PHP `property_element`.
 fn is_declarator_kind(kind: &str) -> bool {
     kind.contains("declarator")
-        || matches!(kind, "initialized_identifier" | "static_final_declaration")
+        || matches!(
+            kind,
+            "initialized_identifier" | "static_final_declaration" | "property_element"
+        )
 }
 
 /// Go `var C, D = h1(), h2()`, Swift `let a = f(), b = g()` and C++ members
 /// `int a = f(), b = g();` list names and values in parallel fields, so the
 /// i-th name declares the i-th value. Counts that differ pair nothing:
-/// `var cfg, _ = load()` fills every name from one call.
+/// `var cfg, _ = load()` fills every name from one call. Only a declaration
+/// pairs: a Swift labelled tuple `(width: W, size: S)` has the same fields
+/// and declares nothing.
 fn paired_declarators<'s>(statement: Node<'_>, source: &'s [u8]) -> Vec<Declarator<'s>> {
+    let kind = statement.kind();
+    if !(kind.contains("declaration") || kind.ends_with("_spec")) {
+        return Vec::new();
+    }
     let mut names = named_fields(statement, "name");
     if names.len() < 2 {
         names = named_fields(statement, "declarator");
@@ -341,6 +379,7 @@ fn paired_declarators<'s>(statement: Node<'_>, source: &'s [u8]) -> Vec<Declarat
     if names.len() < 2 {
         return Vec::new();
     }
+    let range = node_range(statement);
     let mut values = named_fields(statement, "value");
     if values.is_empty() {
         values = named_fields(statement, "default_value");
@@ -360,6 +399,7 @@ fn paired_declarators<'s>(statement: Node<'_>, source: &'s [u8]) -> Vec<Declarat
         .map(|(name, value)| Declarator {
             range: node_range(value),
             name: declared_name(name, source),
+            statement: range,
         })
         .collect()
 }
@@ -372,12 +412,12 @@ fn named_fields<'t>(node: Node<'t>, field: &str) -> Vec<Node<'t>> {
 }
 
 /// The bare name that `name` declares: `b`, the `b` of C `*b`, the `b` a
-/// Swift `pattern` wraps; none for `{ cb }`.
+/// Swift `pattern` or a PHP `$b` wraps; none for `{ cb }`.
 fn declared_name<'s>(mut name: Node<'_>, source: &'s [u8]) -> Option<&'s str> {
     while let Some(inner) = name.child_by_field_name("declarator") {
         name = inner;
     }
-    if name.kind() == "pattern" && name.named_child_count() == 1 {
+    if matches!(name.kind(), "pattern" | "variable_name") && name.named_child_count() == 1 {
         name = name.named_child(0)?;
     }
     (name.named_child_count() == 0)
@@ -532,9 +572,11 @@ fn field_reads_walk(
             } else {
                 frame.local_scope
             };
-            let mut declarator_count = 0u32;
-            let mut first_declarator = None;
+            // Two of a kind mark a statement that may declare several values;
+            // only those pay for `statement_declarators`.
+            let (mut declarator_kinds, mut name_fields, mut declarator_fields) = (0u32, 0u32, 0u32);
             let mut after_dot = 0;
+            let mut path = PathTokens::default();
             loop {
                 let child = cursor.node();
                 let field = memo.field(&cursor);
@@ -556,17 +598,10 @@ fn field_reads_walk(
                         local_scope = child_scope;
                     }
                 }
-                if child_kind & kind_flag::DECLARATOR != 0 {
-                    declarator_count += 1;
-                    match declarator_count {
-                        1 => first_declarator = Some(child),
-                        2 => {
-                            for declarator in first_declarator.into_iter().chain([child]) {
-                                declarators.push(Declarator::new(declarator, source, &mut memo));
-                            }
-                        }
-                        _ => declarators.push(Declarator::new(child, source, &mut memo)),
-                    }
+                if child.is_named() {
+                    declarator_kinds += u32::from(child_kind & kind_flag::VALUE_DECLARATOR != 0);
+                    name_fields += u32::from(field & field_flag::NAME != 0);
+                    declarator_fields += u32::from(field & field_flag::DECLARATOR != 0);
                 }
                 stack.push(Frame {
                     node: child,
@@ -579,22 +614,87 @@ fn field_reads_walk(
                 // A comment between `.` and the name (`v./* c */join`) keeps
                 // the mark for the name.
                 if !child.is_extra() {
-                    after_dot =
-                        if kind & kind_flag::TOKEN_TREE != 0 && child_kind & kind_flag::DOT != 0 {
-                            field_flag::AFTER_DOT
-                        } else {
-                            0
-                        };
+                    after_dot = 0;
+                    if kind & kind_flag::TOKEN_TREE != 0 {
+                        path.see(&mut stack, child_kind);
+                        if child_kind & kind_flag::DOT != 0 {
+                            after_dot = field_flag::AFTER_DOT;
+                        }
+                    }
                 }
                 if !cursor.goto_next_sibling() {
                     break;
                 }
+            }
+            if declarator_kinds.max(name_fields).max(declarator_fields) >= 2 {
+                declarators.extend(statement_declarators(n, source));
             }
         }
     }
     containers.set_declarators(declarators);
     attach_pending_field_reads(&containers, reads, nodes);
     scan.attach(&containers, nodes, names.scoped_qualifiers);
+}
+
+/// Marks the path segments among the loose tokens of one token tree. A
+/// name's frame stays on the walk's stack until its siblings are pushed, so
+/// the `::` after it sets [`field_flag::BEFORE_PATH`] there; asking the name
+/// for its next sibling instead walks down from the root.
+#[derive(Default)]
+struct PathTokens {
+    /// Stack slot of the previous token.
+    last: Option<usize>,
+    /// The name the last `::` marked.
+    marked: Option<usize>,
+    /// The name of a turbofish (`handle::<A>`), a value unless a `::`
+    /// follows its closing `>` (`Foo::<u8>::BAR`).
+    turbofish: Option<usize>,
+    /// The turbofish's open `<` count; 0 once it closed.
+    depth: u32,
+}
+
+impl PathTokens {
+    fn see(&mut self, stack: &mut [Frame<'_>], kind: u32) {
+        use kind_flag as k;
+        let slot = stack.len() - 1;
+        if self.depth == 0 {
+            if let Some(name) = self.turbofish.take() {
+                if kind & k::PATH_SEP != 0 {
+                    stack[name].field |= field_flag::BEFORE_PATH;
+                    self.marked = Some(name);
+                    self.last = Some(slot);
+                    return;
+                }
+            }
+        }
+        if kind & k::PATH_SEP != 0 {
+            self.marked = self.last;
+            if let Some(name) = self.marked {
+                stack[name].field |= field_flag::BEFORE_PATH;
+            }
+        } else if kind & k::ANGLE_OPEN != 0 {
+            if let Some(name) = self.marked.take() {
+                stack[name].field &= !field_flag::BEFORE_PATH;
+                self.turbofish = Some(name);
+                self.depth = 1;
+            } else if self.turbofish.is_some() {
+                self.depth += 1;
+            }
+        } else {
+            self.marked = None;
+            if self.turbofish.is_some() {
+                let closed = if kind & k::ANGLE_CLOSE != 0 {
+                    1
+                } else if kind & k::SHIFT_CLOSE != 0 {
+                    2
+                } else {
+                    0
+                };
+                self.depth = self.depth.saturating_sub(closed);
+            }
+        }
+        self.last = Some(slot);
+    }
 }
 
 /// Whether `child`, under a node of kind flags `parent_kind`, lists the
@@ -907,6 +1007,16 @@ mod kind_flag {
     pub const DOT: u32 = 1 << 22;
     /// A kind of the spec's [`NameRefSpec::qualified_values`].
     pub const QUALIFIED_VALUE: u32 = 1 << 23;
+    /// A node that declares one value of its statement ([`super::is_declarator_kind`]).
+    pub const VALUE_DECLARATOR: u32 = 1 << 24;
+    /// A `::` token.
+    pub const PATH_SEP: u32 = 1 << 25;
+    /// A `<` token.
+    pub const ANGLE_OPEN: u32 = 1 << 26;
+    /// A `>` token.
+    pub const ANGLE_CLOSE: u32 = 1 << 27;
+    /// A `>>` token: two closing `>` of nested generics.
+    pub const SHIFT_CLOSE: u32 = 1 << 28;
 }
 
 /// Bits [`KindMemo::field`] records for a field name.
@@ -929,6 +1039,12 @@ mod field_flag {
     /// Not a field: a token-tree child right after a `.` token, the member
     /// name of `parts.join(",")` inside `format!(..)`.
     pub const AFTER_DOT: u16 = 1 << 10;
+    /// `declarator`: C, C++ and Java list each declared name in one.
+    pub const DECLARATOR: u16 = 1 << 11;
+    /// Not a field: a token-tree name right before `::`, a path segment
+    /// (module, type, generic parameter) of `S::NAME` inside a macro. A
+    /// turbofish `handle::<A>` keeps `handle` a value.
+    pub const BEFORE_PATH: u16 = 1 << 12;
 }
 
 /// What each node kind and field means to the walk, recorded per file on
@@ -979,6 +1095,7 @@ impl<'a> KindMemo<'a> {
                 TYPE_PARAMETERS,
             ),
             (kind.contains("declarator"), DECLARATOR),
+            (is_declarator_kind(kind), VALUE_DECLARATOR),
             (kind == "for_element", COMPREHENSION),
             (kind == "for_in_clause", COMPREHENSION_CLAUSE),
             (
@@ -1000,6 +1117,10 @@ impl<'a> KindMemo<'a> {
                 TOKEN_TREE,
             ),
             (kind == ".", DOT),
+            (kind == "::", PATH_SEP),
+            (kind == "<", ANGLE_OPEN),
+            (kind == ">", ANGLE_CLOSE),
+            (kind == ">>", SHIFT_CLOSE),
             (spec.named_arg_parents.contains(&kind), NAMED_ARG_PARENT),
             (spec.global_decls.contains(&kind), GLOBAL_DECL),
             (
@@ -1045,6 +1166,7 @@ impl<'a> KindMemo<'a> {
             (SKIP_FIELDS.contains(&field), SKIP),
             (NON_VALUE_FIELDS.contains(&field), NON_VALUE),
             (field == "name", NAME),
+            (field == "declarator", DECLARATOR),
             (field == "left", LEFT),
             (matches!(field, "parameter" | "parameters"), PARAMS),
             (
@@ -1175,7 +1297,7 @@ impl NameRefSpec {
         use field_flag as f;
         use kind_flag as k;
         let (parent, field) = (frame.parent_kind, frame.field);
-        if field & (f::NON_VALUE | f::AFTER_DOT) != 0
+        if field & (f::NON_VALUE | f::AFTER_DOT | f::BEFORE_PATH) != 0
             || (field & f::LEFT != 0 && parent & k::ASSIGNMENT != 0)
             || parent & k::SKIP_PARENT != 0
         {
@@ -1968,19 +2090,9 @@ struct Declarator<'s> {
     range: PosRange,
     /// The name it declares, when that is a bare name (`b`, not `{ cb }`).
     name: Option<&'s str>,
-}
-
-impl<'s> Declarator<'s> {
-    fn new(node: Node<'_>, source: &'s [u8], memo: &mut KindMemo<'_>) -> Self {
-        let name = node
-            .child_by_field_name("name")
-            .filter(|name| memo.kind(*name) & kind_flag::IDENT != 0)
-            .and_then(|name| name.utf8_text(source).ok());
-        Self {
-            range: node_range(node),
-            name,
-        }
-    }
+    /// The statement that declares it. Only a statement around the code
+    /// splits that code's holder.
+    statement: PosRange,
 }
 
 /// The member of `run`, the value declarations that share the statement
@@ -1999,10 +2111,9 @@ fn pick_declared<'d, 's: 'd, T>(
     // Only the declarators that hold `pos` look up a member: a statement of
     // M values is then O(M) per call, not O(M²).
     let mut sibling_declares_only = false;
-    for declarator in declarators
-        .into_iter()
-        .filter(|d| start <= d.range.0 && d.range.1 <= end)
-    {
+    for declarator in declarators.into_iter().filter(|d| {
+        start <= d.range.0 && d.range.1 <= end && d.statement.0 <= pos && pos <= d.statement.1
+    }) {
         let Some(name) = declarator.name else {
             continue;
         };

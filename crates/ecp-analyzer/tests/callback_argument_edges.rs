@@ -1600,26 +1600,50 @@ fn test_function_reference_csharp_multi_declarator_field_binds_own_declarator() 
     );
 }
 
-/// `var C, D = h1, h2` pairs names and values by position only.
+/// Each `(holder, target)` pair: `holder` references only `target`.
+fn assert_own_refs(provider: &dyn LanguageProvider, file: &str, src: &str, pairs: &[(&str, &str)]) {
+    let g = graph(provider, &[(file, src)]);
+    for (holder, target) in pairs {
+        assert_eq!(
+            function_refs(&g, holder),
+            vec![r(file, target, FUNCTION_REFERENCE, SAME_FILE)],
+            "{file}: {holder}"
+        );
+    }
+}
+
+/// `var C, D = h1, h2` pairs names and values by position.
 #[test]
-fn test_function_reference_go_multi_name_var_returns_no_edge() {
+fn test_function_reference_go_multi_name_var_binds_own_declarator() {
     let src = "package main\n\nfunc h1() {}\nfunc h2() {}\n\nvar C, D = h1,\n\th2\n";
-    assert_no_ref(&GoProvider::new().unwrap(), "main.go", src, "C");
-    assert_no_ref(&GoProvider::new().unwrap(), "main.go", src, "D");
+    assert_own_refs(
+        &GoProvider::new().unwrap(),
+        "main.go",
+        src,
+        &[("C", "h1"), ("D", "h2")],
+    );
 }
 
 #[test]
-fn test_function_reference_swift_multi_pattern_let_returns_no_edge() {
+fn test_function_reference_swift_multi_pattern_let_binds_own_declarator() {
     let src = "func h1() {}\nfunc h2() {}\nlet a = h1, b = h2\n";
-    assert_no_ref(&SwiftProvider::new().unwrap(), "s.swift", src, "a");
-    assert_no_ref(&SwiftProvider::new().unwrap(), "s.swift", src, "b");
+    assert_own_refs(
+        &SwiftProvider::new().unwrap(),
+        "s.swift",
+        src,
+        &[("a", "h1"), ("b", "h2")],
+    );
 }
 
 #[test]
-fn test_function_reference_dart_multi_identifier_final_returns_no_edge() {
+fn test_function_reference_dart_multi_identifier_final_binds_own_declarator() {
     let src = "void h1() {}\nvoid h2() {}\nfinal a = h1, b = h2;\n";
-    assert_no_ref(&DartProvider::new().unwrap(), "d.dart", src, "a");
-    assert_no_ref(&DartProvider::new().unwrap(), "d.dart", src, "b");
+    assert_own_refs(
+        &DartProvider::new().unwrap(),
+        "d.dart",
+        src,
+        &[("a", "h1"), ("b", "h2")],
+    );
 }
 
 /// PHP gives each `const` element its own span, so each reads its own value.

@@ -308,3 +308,18 @@ fn test_extract_function_meta_c_extern_declaration_without_body_is_prototype() {
     assert_ne!(prototype, definition);
     assert_ne!(extern_prototype, definition);
 }
+
+/// `const int f(void), x = 1;` gives the Const `x` the span of `f`'s
+/// prototype: only a Rust Const takes a meta, so `x` gets none of `f`'s
+/// flags.
+#[test]
+fn c_const_sharing_prototype_span_takes_no_meta() {
+    let g = analyze("const int f(void), x = 1;\n");
+    let pool = g.string_pool.as_slice();
+    let x = g
+        .nodes
+        .iter()
+        .position(|n| n.kind == NodeKind::Const && n.name.resolve(pool) == "x")
+        .expect("Const x") as u32;
+    assert!(g.function_meta(x).is_none());
+}

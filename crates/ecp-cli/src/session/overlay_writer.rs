@@ -24,6 +24,7 @@ use ecp_core::analyzer::types::{
 };
 use ecp_core::contracts::dirty_event::{PathChange, PathClass};
 use ecp_core::contracts::routing::{FileRouter, ParsedLanguage, RouteOutcome, SizeCap};
+use ecp_core::file_category::Language;
 use ecp_core::graph::NodeKind;
 use ecp_core::registry::{atomic_write_json, os_path_to_slash, replace_file, FileLock};
 use ecp_core::session::layout;
@@ -230,17 +231,21 @@ pub fn fragment_file_from_local_graph(graph: &LocalGraph) -> FragmentFile {
         .iter()
         .map(|meta| (meta.span, meta))
         .collect();
+    let rust = Language::from_path(&graph.file_path.to_string_lossy()) == Language::Rust;
     FragmentFile {
         symbols: graph
             .nodes
             .iter()
             .map(|n| {
-                let meta = matches!(
-                    n.kind,
-                    NodeKind::Function | NodeKind::Method | NodeKind::Constructor
-                )
-                .then(|| metas.get(&n.span))
-                .flatten();
+                // A Rust test-scope `const`/`static` carries a test-flag meta:
+                // it holds calls, and `--exclude-tests` reads the flag. A C
+                // Const can share a prototype's span: Rust only.
+                let takes_meta = match n.kind {
+                    NodeKind::Function | NodeKind::Method | NodeKind::Constructor => true,
+                    NodeKind::Const => rust,
+                    _ => false,
+                };
+                let meta = takes_meta.then(|| metas.get(&n.span)).flatten();
                 FragmentSymbol {
                     name: n.name.clone(),
                     kind: n.kind,
@@ -1132,6 +1137,38 @@ mod flags_tests {
             non_callable.iter().all(|s| s.flags.is_none()),
             "{non_callable:?}"
         );
+    }
+
+    /// Stands for: a dirty Rust file gives its test-module const the same
+    /// test flag a full index gives it, and a production const stays `None`.
+    #[test]
+    fn test_fragment_file_from_local_graph_rust_test_const_carries_test_flag() {
+        let src = "pub const fn width() -> usize { 4 }\npub const PROD: usize = width();\n#[cfg(test)]\nmod tests {\n    const W: usize = super::width();\n}\n";
+        let graph = parse_graph("src/lib.rs", src.as_bytes(), SizeCap::BUILT_IN).unwrap();
+        let symbols = fragment_file_from_local_graph(&graph).symbols;
+        let flags_of = |name: &str| {
+            symbols
+                .iter()
+                .find(|s| s.name == name && s.kind == NodeKind::Const)
+                .unwrap_or_else(|| panic!("{name} missing: {symbols:?}"))
+                .flags
+        };
+        assert!(flags_of("W").is_some_and(|f| f & ecp_core::graph::FunctionMeta::FLAG_TEST != 0));
+        assert_eq!(flags_of("PROD"), None);
+    }
+
+    /// Stands for: a C Const that shares a prototype's span (`const int
+    /// f(void), x = 1;`) takes none of the prototype's flags, as on the index.
+    #[test]
+    fn test_fragment_file_from_local_graph_c_const_sharing_prototype_span_has_no_flags() {
+        let graph =
+            parse_graph("src/a.c", b"const int f(void), x = 1;\n", SizeCap::BUILT_IN).unwrap();
+        let symbols = fragment_file_from_local_graph(&graph).symbols;
+        let x = symbols
+            .iter()
+            .find(|s| s.name == "x" && s.kind == NodeKind::Const)
+            .unwrap_or_else(|| panic!("x missing: {symbols:?}"));
+        assert_eq!(x.flags, None);
     }
 }
 

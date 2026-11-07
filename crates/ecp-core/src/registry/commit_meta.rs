@@ -207,7 +207,11 @@ use std::path::Path;
 /// schema56: a call outside every function (a static block, a property
 /// accessor, an initializer, a class body) is held by the value declaration
 /// or the type around it; a schema55 parse dropped it.
-pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema56");
+/// schema57: a read in a shared declaration (`int a, b = Y;`, Go
+/// `var C, D = h1, h2`) belongs to its own declarator; a Rust const or
+/// static in test scope carries the test flag; a Rust macro path segment
+/// (`S::NAME`) is no value read of a const `S`.
+pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema57");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitBuildMeta {

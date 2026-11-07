@@ -30,7 +30,7 @@ use ecp_analyzer::swift::parser::SwiftProvider;
 use ecp_analyzer::typescript::parser::TypeScriptProvider;
 use ecp_core::analyzer::provider::LanguageProvider;
 use name_ref_support::{
-    assert_one_cross_file, graph, r, value_reads, Ref, IMPORT, SAME_FILE, VALUE_READ,
+    assert_one_cross_file, function_refs, graph, r, value_reads, Ref, IMPORT, SAME_FILE, VALUE_READ,
 };
 
 fn none() -> Vec<Ref> {
@@ -732,6 +732,99 @@ fn test_value_read_rust_const_and_static_return_same_file_edges() {
             r("src/r.rs", "LIMIT", VALUE_READ, SAME_FILE),
             r("src/r.rs", "NAME", VALUE_READ, SAME_FILE),
         ]
+    );
+}
+
+/// A generic parameter used as a path inside a macro (`S::NAME`) is no value
+/// read; before the fix it bound the only project-wide `const S` at 0.7.
+#[test]
+fn test_value_read_rust_macro_path_segment_returns_no_edge() {
+    let g = graph(
+        &RustProvider::new().unwrap(),
+        &[
+            ("src/a.rs", "pub const S: u8 = 1;\n"),
+            (
+                "src/b.rs",
+                "pub trait Spec { const NAME: &'static str; }\n\
+                 pub fn named<S: Spec>() { println!(\"{}\", S::NAME); }\n\
+                 pub fn plain() { println!(\"{}\", crate::a::S); }\n\
+                 pub fn bare() -> u8 { println!(\"{}\", S); 0 }\n",
+            ),
+        ],
+    );
+    assert_eq!(value_reads(&g, "named"), none());
+    // The last segment of `crate::a::S` is the value, not a path segment.
+    for reader in ["plain", "bare"] {
+        assert!(
+            value_reads(&g, reader).iter().any(|r| r.1 == "S"),
+            "{reader}: {:?}",
+            value_reads(&g, reader)
+        );
+    }
+}
+
+/// A `::` after a turbofish's `>` makes the name before it a path again.
+#[test]
+fn test_value_read_rust_macro_turbofish_type_path_returns_no_edge() {
+    let g = graph(
+        &RustProvider::new().unwrap(),
+        &[(
+            "src/lib.rs",
+            "pub const Wrap: u8 = 1;\npub fn show() { println!(\"{}\", Wrap::<u8>::BAR); }\n",
+        )],
+    );
+    assert_eq!(value_reads(&g, "show"), none());
+}
+
+/// Nested generics close with one `>>` token; the `::` after it still makes
+/// `Wrap` a path.
+#[test]
+fn test_value_read_rust_macro_nested_turbofish_type_path_returns_no_edge() {
+    let g = graph(
+        &RustProvider::new().unwrap(),
+        &[(
+            "src/lib.rs",
+            "pub const Wrap: u8 = 1;\npub fn show() { println!(\"{}\", Wrap::<Vec<u8>>::BAR); }\n",
+        )],
+    );
+    assert_eq!(value_reads(&g, "show"), none());
+}
+
+/// A turbofish that closed ends at the next token: a later `<T>::NAME`
+/// does not make `handle` a path.
+#[test]
+fn test_function_reference_rust_macro_closed_turbofish_keeps_function_value() {
+    let g = graph(
+        &RustProvider::new().unwrap(),
+        &[(
+            "src/lib.rs",
+            "pub fn handle<T>() {}\npub fn reg() { let v = vec![handle::<u8>, <u8>::MAX]; }\n",
+        )],
+    );
+    assert!(
+        function_refs(&g, "reg").iter().any(|r| r.1 == "handle"),
+        "{:?}",
+        function_refs(&g, "reg")
+    );
+}
+
+/// A turbofish `handle::<u8>` names a function value; only a name before a
+/// path separator is a path segment.
+#[test]
+fn test_function_reference_rust_macro_turbofish_keeps_function_value() {
+    let g = graph(
+        &RustProvider::new().unwrap(),
+        &[(
+            "src/lib.rs",
+            "pub fn handle<T>() {}
+pub fn reg() { let v = vec![handle::<u8>]; }
+",
+        )],
+    );
+    assert!(
+        function_refs(&g, "reg").iter().any(|r| r.1 == "handle"),
+        "{:?}",
+        function_refs(&g, "reg")
     );
 }
 
