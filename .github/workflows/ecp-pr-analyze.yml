@@ -4,8 +4,9 @@ on:
     types: [opened, synchronize, reopened]
   # `push` to main only warms the caches below; it never analyses or posts a
   # status. ecp/cross-pr-conflict is anchored to the PR HEAD commit and
-  # computed against merge-base, so a base-branch update doesn't invalidate
-  # it. Mergify re-runs its speculative trial natively on base movement.
+  # computed against merge-base. Nothing re-runs it when the base branch or a
+  # sibling PR moves: a `pending` status stays until the PR is pushed again
+  # or the job is re-run.
   #
   # Why the warm run exists: a cache saved by a pull_request run is scoped to
   # refs/pull/<n>/merge, which no other PR can restore. Without a save on
@@ -50,9 +51,12 @@ jobs:
           fetch-depth: 0
           # No `ref:` override. The default for pull_request events is
           # refs/pull/N/merge — a synthetic merge commit GitHub computes
-          # whose two parents are (^1) PR head and (^2) current base tip.
-          # fetch-depth: 0 pulls full history reachable from this merge
-          # ref, which is exactly { PR head ancestors ∪ base tip ancestors }.
+          # ("Merge <PR head> into <base tip>"), so ^1 is the base tip and
+          # ^2 the PR head. The next step names both by the event payload
+          # instead of by parent order.
+          # fetch-depth: 0 pulls the full history of every branch and tag
+          # plus this merge ref, so { PR head ancestors ∪ base tip ancestors }
+          # is local.
           # That gives us everything we need locally — no follow-up
           # `git fetch origin <base>` (which triggers the runner's
           # credential-helper flake: "could not read Username … ENXIO").
@@ -64,13 +68,17 @@ jobs:
       - name: Compute branch point + switch HEAD to PR head
         id: refs
         if: github.event_name == 'pull_request'
+        env:
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          BASE_TIP: ${{ github.event.pull_request.base.sha }}
         run: |
-          # Branch point = merge-base of PR head and current base tip,
-          # both available as parents of the merge ref's HEAD commit.
-          # This is the SAME value `git merge-base origin/<base> <pr-head>`
-          # would produce — derived purely from local objects, no network.
-          PR_HEAD=$(git rev-parse HEAD^1)
-          BASE_TIP=$(git rev-parse HEAD^2)
+          # Branch point = merge-base of PR head and base tip. Both are
+          # ancestors of the merge ref, so fetch-depth: 0 already holds them:
+          # this is the SAME value `git merge-base origin/<base> <pr-head>`
+          # would produce, from local objects, no network. The event payload
+          # names them; HEAD^1 / HEAD^2 depend on GitHub's parent order, and
+          # reading them swapped analysed the base tree against itself
+          # (#913: 0 changed symbols for a 2614-symbol PR).
           BRANCH_POINT=$(git merge-base "$PR_HEAD" "$BASE_TIP")
           echo "pr-head=$PR_HEAD" >> "$GITHUB_OUTPUT"
           echo "branch-point=$BRANCH_POINT" >> "$GITHUB_OUTPUT"
@@ -211,4 +219,4 @@ jobs:
       - name: Log analysis failure (non-blocking)
         if: github.event_name == 'pull_request' && steps.analyze.outcome != 'success'
         run: |
-          echo "::warning::ecp pr-analyze failed — PR falls to default Mergify queue"
+          echo "::warning::ecp pr-analyze failed — no ecp labels or cross-pr-conflict status for this run"
