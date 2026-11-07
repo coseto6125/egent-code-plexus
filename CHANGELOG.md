@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.18.0 - 2026-11-07
+
+### Features
+
+- say what a query did not see — unexplained refs, ranked candidates, unverified warm attach, scoped caveats (#917)
+
+### Bug Fixes
+
+- ecp-pr-analyze reads the PR head and base from the event, not swapped merge parents (#916)
+- reads split shared declarations like calls; Rust test consts carry the test flag; a macro path segment is no value read (#918)
+- a call outside every function gets a holder in 14 languages (#915)
+- one receiver core and one admission gate close the 15 graph gaps left after #912 (#913)
+- impact finds C/C++ header, Go generic-receiver, Rust mod.rs, field-type, alias, PHP callable and bound-method callers (#912)
+- impact finds qualified function values and generic-arg types; hook hides stale hits; one overlay per worktree (#909)
+
+### Performance
+
+- bound and short-circuit MATCH; hook hits read the dirty overlay; registry opens read-only (#908)
+
 ## v0.17.3 - 2026-11-04
 
 ### Features
