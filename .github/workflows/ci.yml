@@ -272,7 +272,7 @@ jobs:
 
       - name: Install cargo-nextest
         if: needs.detect-changes.outputs.code == 'true'
-        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        uses: taiki-e/install-action@4a76afe23f9e08d2d9550fb56e556444e8611d21 # v2.90.4
         with:
           tool: cargo-nextest
 
@@ -391,7 +391,7 @@ jobs:
 
       - name: Install cargo-audit & cargo-deny
         if: needs.detect-changes.outputs.code == 'true'
-        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        uses: taiki-e/install-action@4a76afe23f9e08d2d9550fb56e556444e8611d21 # v2.90.4
         with:
           tool: cargo-audit,cargo-deny
 
@@ -445,7 +445,7 @@ jobs:
         uses: ./.github/actions/diagnose-checkout-failure
 
       - name: Run actionlint
-        uses: reviewdog/action-actionlint@a7d35aaf8c309203a4ae861d32b7bd490baa7bf3 # v1.83.0
+        uses: reviewdog/action-actionlint@ae857e78c1b42b3d0a49637181b09d3d56d402b4 # v1.84.1
         with:
           fail_level: error
 
